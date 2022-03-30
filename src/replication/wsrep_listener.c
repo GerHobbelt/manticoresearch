@@ -27,9 +27,15 @@
 #include <signal.h>
 #include <pthread.h>
 
+#if defined(_MSC_VER)
+#define __attribute__(a)				/**/
+#endif
+
 /*! This is global application context, it will be used by wsrep callbacks */
 struct application_context
-{};
+{
+	int dummy;   // MSVC: error C2016: C requires that a struct or union have at least one member
+};
 
 static struct application_context global_ctx;
 
@@ -105,7 +111,8 @@ apply_cb (void*                   recv_ctx,
  *  by seqno. */
 static wsrep_cb_status_t
 commit_cb (void*                   recv_ctx,
-           uint32_t                flags __attribute((unused)),
+           const void*             trx_handle,
+           uint32_t                flags __attribute__((unused)),
            const wsrep_trx_meta_t* meta __attribute__((unused)),
            wsrep_bool_t*           exit __attribute__((unused)),
            wsrep_bool_t            commit)
@@ -225,7 +232,7 @@ int main (int argc, char* argv[])
     }
 
     /* Now let's start several listening threads*/
-    int const num_threads = 4;
+	#define num_threads  4
     struct receiver_context thread_ctx[num_threads];
     pthread_t threads[num_threads];
 

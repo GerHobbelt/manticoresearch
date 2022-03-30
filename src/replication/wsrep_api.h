@@ -50,7 +50,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#if !defined(_MSC_VER)
 #include <unistd.h>
+#endif
 #include <time.h>
 
 #ifdef __cplusplus
@@ -646,9 +648,9 @@ struct wsrep_stats_var
     const char*      name;     //!< variable name
     wsrep_var_type_t type;     //!< variable value type
     union {
-        int64_t     _int64;
-        double      _double;
-        const char* _string;
+        int64_t     v_int64;
+        double      v_double;
+        const char* v_string;
     } value;                   //!< variable value
 };
 

@@ -16,7 +16,9 @@
 
 /*! @file wsrep implementation loader */
 
+#if !defined(_MSC_VER)
 #include <dlfcn.h>
+#endif
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
@@ -106,6 +108,8 @@ static int verify(const wsrep_t *wh, const char *iface_ver)
     VERIFY(wh->free);
     return 0;
 }
+
+#if !defined(_MSC_VER)
 
 typedef int (*wsrep_loader_fun)(wsrep_t*);
 
@@ -226,3 +230,8 @@ void wsrep_unload(wsrep_t *hptr)
     }
 }
 
+#else
+
+// TBD
+
+#endif

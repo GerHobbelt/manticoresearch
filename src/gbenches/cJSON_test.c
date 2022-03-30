@@ -7,7 +7,7 @@
 
 #include "json/cJSON.c"
 
-// stuff below is only for benching purpuses (used in gtests_functions.cpp)
+// stuff below is only for benching purposes (used in gtests_functions.cpp)
 int cJsonunescape ( char ** buf, cJSON * item )
 {
 	parse_buffer buffer = { 0, 0, 0, 0, { 0, 0, 0 } };

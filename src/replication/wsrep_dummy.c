@@ -22,6 +22,10 @@
 #include <stdbool.h>
 #include <string.h>
 
+#if defined(_MSC_VER)
+#define __attribute__(a)				/**/
+#endif
+
 /*! Dummy backend context. */
 typedef struct wsrep_dummy
 {
