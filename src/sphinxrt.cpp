@@ -2144,6 +2144,9 @@ void RtAccum_t::AddDocument ( ISphHits * pHits, const InsertDocData_t & tDoc, bo
 		tLastHit.m_uWordID = 0;
 		tLastHit.m_uWordPos = 0;
 
+		Hitpos_t uFieldLastHit = pHits->Begin()->m_uWordPos;
+		DWORD uFieldLastCount = 1;
+
 		m_dAccum.ReserveGap ( pHits->GetLength() );
 		iHits = 0;
 		for ( CSphWordHit * pHit = pHits->Begin(); pHit<pHits->End(); ++pHit )
@@ -2153,8 +2156,22 @@ void RtAccum_t::AddDocument ( ISphHits * pHits, const InsertDocData_t & tDoc, bo
 				continue;
 
 			// update field lengths
-			if ( pFieldLens && HITMAN::GetField ( pHit->m_uWordPos )!=HITMAN::GetField ( tLastHit.m_uWordPos ) )
-				pFieldLens [ HITMAN::GetField ( tLastHit.m_uWordPos ) ] = HITMAN::GetPos ( tLastHit.m_uWordPos );
+			if ( pFieldLens )
+			{
+				if ( HITMAN::GetField ( uFieldLastHit )!=HITMAN::GetField ( pHit->m_uWordPos ) )
+				{
+					pFieldLens [ HITMAN::GetField ( uFieldLastHit ) ] += uFieldLastCount;
+					uFieldLastCount = 1;
+					uFieldLastHit = pHit->m_uWordPos;
+				}
+
+				// skip blended part, lemmas and duplicates
+				if ( HITMAN::GetPos ( pHit->m_uWordPos )>HITMAN::GetPos ( uFieldLastHit ) )
+				{
+					uFieldLastHit = pHit->m_uWordPos;
+					uFieldLastCount++;
+				}
+			}
 
 			// need original hit for duplicate removal
 			tLastHit = *pHit;
@@ -2167,8 +2184,10 @@ void RtAccum_t::AddDocument ( ISphHits * pHits, const InsertDocData_t & tDoc, bo
 			m_dAccum.Add ( *pHit );
 			++iHits;
 		}
-		if ( pFieldLens )
-			pFieldLens [ HITMAN::GetField ( tLastHit.m_uWordPos ) ] = HITMAN::GetPos ( tLastHit.m_uWordPos );
+		if ( pFieldLens && uFieldLastCount )
+		{
+			pFieldLens [ HITMAN::GetField ( uFieldLastHit ) ] += uFieldLastCount;
+		}
 	}
 	// make sure to get real count without duplicated hits
 	m_dPerDocHitsCount.Add ( iHits );
@@ -7239,6 +7258,8 @@ static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tR
 			if ( tThMeta.m_sWarning.IsEmpty() && !tChunkMeta.m_sWarning.IsEmpty() )
 				tThMeta.m_sWarning = tChunkMeta.m_sWarning;
 
+			tThMeta.m_bTotalMatchesApprox |= tChunkMeta.m_bTotalMatchesApprox;
+
 			if ( bInterrupt && !tChunkMeta.m_sError.IsEmpty() )
 				// FIXME? maybe handle this more gracefully (convert to a warning)?
 				tThMeta.m_sError = tChunkMeta.m_sError;
@@ -7351,7 +7372,7 @@ bool SetupFilters ( const CSphQuery & tQuery, const ISphSchema * pSchema, bool b
 }
 
 
-void PerformFullScan ( const VecTraits_T<RtSegmentRefPtf_t> & dRamChunks, int iMaxDynamicSize, int iIndexWeight, int iStride, int iCutoff, int64_t tmMaxTimer, QueryProfile_c * pProfiler, CSphQueryContext & tCtx, VecTraits_T<ISphMatchSorter*> & dSorters, CSphString & sWarning )
+static bool PerformFullscan ( const VecTraits_T<RtSegmentRefPtf_t> & dRamChunks, int iMaxDynamicSize, int iIndexWeight, int iStride, int iCutoff, int64_t tmMaxTimer, QueryProfile_c * pProfiler, CSphQueryContext & tCtx, VecTraits_T<ISphMatchSorter*> & dSorters, CSphString & sWarning )
 {
 	bool bRandomize = dSorters[0]->IsRandom();
 
@@ -7411,20 +7432,18 @@ void PerformFullScan ( const VecTraits_T<RtSegmentRefPtf_t> & dRamChunks, int iM
 			// handle cutoff
 			if ( bNewMatch )
 				if ( --iCutoff==0 )
-					break;
+					return true;
 
 			// handle timer
 			if ( tmMaxTimer && sph::TimeExceeded ( tmMaxTimer ) )
 			{
 				sWarning = "query time exceeded max_query_time";
-				iSeg = dRamChunks.GetLength() - 1;	// outer break
-				break;
+				return true;
 			}
 		}
-
-		if ( !iCutoff )
-			break;
 	}
+
+	return false;
 }
 
 
@@ -7441,12 +7460,10 @@ static bool DoFullScanQuery ( const RtSegVec_c & dRamChunks, const ISphSchema & 
 			return false;
 		// FIXME! OPTIMIZE! check if we can early reject the whole index
 
-		// do searching
-		int iCutoff = tQuery.m_iCutoff;
-		if ( iCutoff<=0 )
-			iCutoff = -1;
-
-		PerformFullScan ( dRamChunks, tMaxSorterSchema.GetDynamicSize(), tArgs.m_iIndexWeight, iStride, iCutoff, tmMaxTimer, pProfiler, tCtx, dSorters, tMeta.m_sWarning );
+		bool bImplicitCutoff;
+		int iCutoff;
+		std::tie ( bImplicitCutoff, iCutoff ) = ApplyImplicitCutoff ( tQuery, dSorters );
+		tMeta.m_bTotalMatchesApprox |= PerformFullscan ( dRamChunks, tMaxSorterSchema.GetDynamicSize(), tArgs.m_iIndexWeight, iStride, iCutoff, tmMaxTimer, pProfiler, tCtx, dSorters, tMeta.m_sWarning );
 	}
 
 	FinalExpressionCalculation ( tCtx, dRamChunks, dSorters, tArgs.m_bFinalizeSorters );
