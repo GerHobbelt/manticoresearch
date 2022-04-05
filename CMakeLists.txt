@@ -10,6 +10,8 @@ if (DEFINED ENV{CMAKE_INTERPROCEDURAL_OPTIMIZATION})
 	set(CMAKE_INTERPROCEDURAL_OPTIMIZATION $ENV{CMAKE_INTERPROCEDURAL_OPTIMIZATION})
 endif()
 
+list(APPEND CMAKE_PREFIX_PATH "../re2" "../manticore-columnar" "../../zlib" "../zstd" "../libexpat" "../openssl")
+
 PROJECT ( MANTICORE )
 SET ( CMAKE_CXX_STANDARD 14 )
 SET ( MANTICORE_CMAKE_DIR "${MANTICORE_SOURCE_DIR}/cmake" )
@@ -202,8 +204,8 @@ else ()
 endif ()
 
 # Check for RE2 build
-set (WITH_RE2_FORCE_STATIC 1 CACHE BOOL "force to compile re2 from sources")
-with_get (re2 "RE2" "a regular expression library")
+#set (WITH_RE2_FORCE_STATIC 1 CACHE BOOL "force to compile re2 from sources")
+#with_get (re2 "RE2" "a regular expression library")
 
 # Check for Libstemmer build
 set (WITH_STEMMER_FORCE_STATIC 1 CACHE BOOL "force to compile stemmer from sources")

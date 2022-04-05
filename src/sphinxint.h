@@ -445,8 +445,8 @@ inline int FindBit ( DWORD uValue )
 
 inline int sphEncodeVLB8 ( BYTE * buf, uint64_t v )
 {
-	register BYTE b;
-	register int n = 0;
+	BYTE b;
+	int n = 0;
 
 	do
 	{
@@ -1517,8 +1517,8 @@ inline DWORD PrereadMappingCountingBits ( const char * sIndexName, const char * 
 #if PARANOID
 
 #define SPH_VARINT_DECODE(_type,_getexpr) \
-	register DWORD b = 0; \
-	register _type v = 0; \
+	DWORD b = 0; \
+	_type v = 0; \
 	int it = 0; \
 	do { b = _getexpr; v = ( v<<7 ) + ( b&0x7f ); it++; } while ( b&0x80 ); \
 	assert ( (it-1)*7<=sizeof(_type)*8 ); \
@@ -1527,8 +1527,8 @@ inline DWORD PrereadMappingCountingBits ( const char * sIndexName, const char * 
 #else
 
 #define SPH_VARINT_DECODE(_type,_getexpr) \
-	register DWORD b = _getexpr; \
-	register _type res = 0; \
+	DWORD b = _getexpr; \
+	_type res = 0; \
 	while ( b & 0x80 ) \
 	{ \
 		res = ( res<<7 ) + ( b & 0x7f ); \

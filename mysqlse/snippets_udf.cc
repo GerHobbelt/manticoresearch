@@ -13,7 +13,7 @@
 #include <string.h>
 #include <assert.h>
 
-#ifndef __WIN__
+#if !defined(__WIN__) && !defined(_WIN32)
 #include <sys/un.h>
 #include <netdb.h>
 #endif

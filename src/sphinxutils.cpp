@@ -3022,7 +3022,7 @@ void sphBacktrace ( EXCEPTION_POINTERS * pExc, const char * sFile )
 		return;
 	}
 
-	HANDLE hFile = CreateFile ( sFile, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0 );
+	HANDLE hFile = CreateFileA ( sFile, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0 );
 	if ( hFile==INVALID_HANDLE_VALUE )
 	{
 		sphInfo ( "can't create minidump file '%s'", sFile );

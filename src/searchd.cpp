@@ -292,7 +292,7 @@ static void sphLogEntry ( ESphLogLevel , char * sBuf, char * sTtyBuf )
 		HANDLE hEventSource;
 		LPCTSTR lpszStrings[2];
 
-		hEventSource = RegisterEventSource ( NULL, g_sServiceName );
+		hEventSource = RegisterEventSourceA ( NULL, g_sServiceName );
 		if ( hEventSource )
 		{
 			lpszStrings[0] = g_sServiceName;
@@ -4204,24 +4204,24 @@ struct GenericMatchSort_fn : public CSphMatchComparatorState
 
 			case SPH_KEYPART_INT:
 			{
-				register SphAttr_t aa = a->GetAttr ( m_tLocator[i] );
-				register SphAttr_t bb = b->GetAttr ( m_tLocator[i] );
+				SphAttr_t aa = a->GetAttr ( m_tLocator[i] );
+				SphAttr_t bb = b->GetAttr ( m_tLocator[i] );
 				if ( aa==bb )
 					continue;
 				return ( ( m_uAttrDesc>>i ) & 1 ) ^ ( aa < bb );
 			}
 			case SPH_KEYPART_FLOAT:
 			{
-				register float aa = a->GetAttrFloat ( m_tLocator[i] );
-				register float bb = b->GetAttrFloat ( m_tLocator[i] );
+				float aa = a->GetAttrFloat ( m_tLocator[i] );
+				float bb = b->GetAttrFloat ( m_tLocator[i] );
 				if ( aa==bb )
 					continue;
 				return ( ( m_uAttrDesc>>i ) & 1 ) ^ ( aa < bb );
 			}
 			case SPH_KEYPART_DOUBLE:
 			{
-				register double aa = a->GetAttrDouble ( m_tLocator[i] );
-				register double bb = b->GetAttrDouble ( m_tLocator[i] );
+				double aa = a->GetAttrDouble ( m_tLocator[i] );
+				double bb = b->GetAttrDouble ( m_tLocator[i] );
 				if ( aa==bb )
 					continue;
 				return ( ( m_uAttrDesc>>i ) & 1 ) ^ ( aa < bb );
@@ -17870,7 +17870,7 @@ const char * WinErrorInfo ()
 	snprintf ( sBuf, sizeof(sBuf), "code=%d, error=", uErr );
 
 	auto iLen = (int) strlen(sBuf);
-	if ( !FormatMessage ( FORMAT_MESSAGE_FROM_SYSTEM, NULL, uErr, 0, sBuf+iLen, sizeof(sBuf)-iLen, NULL ) ) // FIXME? force US-english langid?
+	if ( !FormatMessageA ( FORMAT_MESSAGE_FROM_SYSTEM, NULL, uErr, 0, sBuf+iLen, sizeof(sBuf)-iLen, NULL ) ) // FIXME? force US-english langid?
 		snprintf ( sBuf+iLen, sizeof(sBuf)-iLen, "(no message)" );
 
 	return sBuf;
@@ -18013,7 +18013,7 @@ void ServiceDelete ()
 	SC_HANDLE hSCM = ServiceOpenManager ();
 
 	// open service
-	SC_HANDLE hService = OpenService ( hSCM, g_sServiceName, DELETE );
+	SC_HANDLE hService = OpenServiceA ( hSCM, g_sServiceName, DELETE );
 	if ( !hService )
 	{
 		CloseServiceHandle ( hSCM );
@@ -18959,7 +18959,7 @@ void StopOrStopWaitAnother ( CSphVariant * v, bool bWait ) REQUIRES ( MainThread
 
 	while ( hPipe==INVALID_HANDLE_VALUE )
 	{
-		hPipe = CreateFile ( szPipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
+		hPipe = CreateFileA ( szPipeName, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
 
 		if ( hPipe==INVALID_HANDLE_VALUE )
 		{
@@ -18969,7 +18969,7 @@ void StopOrStopWaitAnother ( CSphVariant * v, bool bWait ) REQUIRES ( MainThread
 				break;
 			}
 
-			if ( !WaitNamedPipe ( szPipeName, iWaitTimeout/1000 ) )
+			if ( !WaitNamedPipeA ( szPipeName, iWaitTimeout/1000 ) )
 			{
 				fprintf ( stdout, "WARNING: could not open pipe (GetLastError()=%d)\n", GetLastError () );
 				break;
@@ -19118,7 +19118,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	CSphVector<char *> dArgs;
 	if ( g_bService )
 	{
-		g_ssHandle = RegisterServiceCtrlHandler ( g_sServiceName, ServiceControl );
+		g_ssHandle = RegisterServiceCtrlHandlerA ( g_sServiceName, ServiceControl );
 		if ( !g_ssHandle )
 			sphFatal ( "failed to start service: RegisterServiceCtrlHandler() failed: %s", WinErrorInfo() );
 
@@ -19822,7 +19822,7 @@ inline int mainimpl ( int argc, char **argv )
 
 		SERVICE_TABLE_ENTRY dDispatcherTable[] =
 		{
-			{ (LPSTR) g_sServiceName, (LPSERVICE_MAIN_FUNCTION)ServiceMain },
+			{ g_sServiceName, (LPSERVICE_MAIN_FUNCTION)ServiceMain },
 			{ NULL, NULL }
 		};
 		if ( !StartServiceCtrlDispatcher ( dDispatcherTable ) )

@@ -24,7 +24,7 @@ void * dlsym ( void * lib, const char * name )
 
 void * dlopen ( const char * libname, int )
 {
-	return LoadLibraryEx ( libname, NULL, 0 );
+	return LoadLibraryExA ( libname, NULL, 0 );
 }
 
 

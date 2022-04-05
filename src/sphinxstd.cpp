@@ -38,7 +38,7 @@ void sphAssert ( const char * sExpr, const char * sFile, int iLine )
 	char sBuffer [ 1024 ];
 	_snprintf ( sBuffer, sizeof(sBuffer), "%s(%d): assertion %s failed\n", sFile, iLine, sExpr );
 
-	if ( MessageBox ( NULL, sBuffer, "Assert failed! Cancel to debug.",
+	if ( MessageBoxA ( NULL, sBuffer, "Assert failed! Cancel to debug.",
 		MB_OKCANCEL | MB_TOPMOST | MB_SYSTEMMODAL | MB_ICONEXCLAMATION )!=IDOK )
 	{
 		__debugbreak ();

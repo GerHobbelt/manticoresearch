@@ -15,30 +15,7 @@
 
 #define SPH_READ_NOPROGRESS_CHUNK (32768*1024)
 
-#if PARANOID
-
-#define SPH_VARINT_DECODE(_type,_getexpr) \
-	register DWORD b = 0; \
-	register _type v = 0; \
-	int it = 0; \
-	do { b = _getexpr; v = ( v<<7 ) + ( b&0x7f ); it++; } while ( b&0x80 ); \
-	assert ( (it-1)*7<=sizeof(_type)*8 ); \
-	return v;
-
-#else
-
-#define SPH_VARINT_DECODE(_type,_getexpr) \
-	register DWORD b = _getexpr; \
-	register _type res = 0; \
-	while ( b & 0x80 ) \
-	{ \
-		res = ( res<<7 ) + ( b & 0x7f ); \
-		b = _getexpr; \
-	} \
-	res = ( res<<7 ) + b; \
-	return res;
-
-#endif // PARANOID
+// #define SPH_VARINT_DECODE -- already done in sphinxint.h
 
 DWORD sphUnzipInt ( const BYTE * & pBuf )			{ SPH_VARINT_DECODE ( DWORD, *pBuf++ ); }
 SphOffset_t sphUnzipOffset ( const BYTE * & pBuf )	{ SPH_VARINT_DECODE ( SphOffset_t, *pBuf++ ); }
@@ -63,7 +40,7 @@ static int AutoFileOpen ( const CSphString & sName, int iMode )
 #if _WIN32
 	if ( iMode==SPH_O_READ )
 	{
-		intptr_t tFD = (intptr_t)CreateFile ( sName.cstr(), GENERIC_READ , FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+		intptr_t tFD = (intptr_t)CreateFileA ( sName.cstr(), GENERIC_READ , FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
 		iFD = _open_osfhandle ( tFD, 0 );
 	} else
 		iFD = ::open ( sName.cstr(), iMode, 0644 );

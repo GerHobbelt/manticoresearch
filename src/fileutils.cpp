@@ -14,7 +14,7 @@
 #include "sphinxint.h"
 
 #if _WIN32
-	#define getcwd		_getcwd
+	//#define getcwd		_getcwd
 
 	#include <shlwapi.h>
 
@@ -585,7 +585,7 @@ StrVec_t FindFiles ( const char * szPath, bool bNeedDirs )
 	StrVec_t dFilesFound;
 
 #if _WIN32
-	WIN32_FIND_DATA tFFData;
+	WIN32_FIND_DATAA tFFData;
 	const char * szLastSlash = NULL;
 	for ( const char * s = szPath; *s; s++ )
 		if ( *s=='/' || *s=='\\' )
@@ -598,7 +598,7 @@ StrVec_t FindFiles ( const char * szPath, bool bNeedDirs )
 		sPath = sPath.SubString ( 0, szLastSlash - szPath + 1 );
 	}
 
-	HANDLE hFind = FindFirstFile ( szPath, &tFFData );
+	HANDLE hFind = FindFirstFileA ( szPath, &tFFData );
 	if ( hFind!=INVALID_HANDLE_VALUE )
 	{
 		AddFile ( dFilesFound, sPath, tFFData, bNeedDirs );
@@ -737,7 +737,7 @@ namespace sph
 	int rename ( const char * sOld, const char * sNew )
 	{
 #if _WIN32
-		if ( MoveFileEx ( sOld, sNew, MOVEFILE_REPLACE_EXISTING ) )
+		if ( MoveFileExA ( sOld, sNew, MOVEFILE_REPLACE_EXISTING ) )
 			return 0;
 		errno = GetLastError();
 		return -1;
@@ -779,7 +779,7 @@ bool IsPathAbsolute ( const CSphString & sPath )
 		return false;
 
 #if _WIN32
-	return !PathIsRelative ( sPath.cstr() );
+	return !PathIsRelativeA ( sPath.cstr() );
 #else
 	return sPath.cstr() && IsSlash ( sPath.cstr()[0] );
 #endif
@@ -850,7 +850,7 @@ CSphString GetExecutablePath()
 #if _WIN32
 	HMODULE hModule = GetModuleHandle(NULL);
 	CHAR szPath[MAX_PATH];
-	GetModuleFileName ( hModule, szPath, MAX_PATH );
+	GetModuleFileNameA ( hModule, szPath, MAX_PATH );
 	return szPath;
 #else
 	char szPath[PATH_MAX];

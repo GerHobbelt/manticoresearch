@@ -209,7 +209,7 @@ public:
 		if ( bWrite )
 			uShare |= FILE_SHARE_WRITE; // wo this flag indexer and indextool unable to open attribute file that was opened by daemon
 
-		HANDLE iFD = CreateFile ( sFile.cstr(), iAccessMode, uShare, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0 );
+		HANDLE iFD = CreateFileA ( sFile.cstr(), iAccessMode, uShare, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0 );
 		if ( iFD==INVALID_HANDLE_VALUE )
 		{
 			sError.SetSprintf ( "failed to open file '%s' (errno %u)", sFile.cstr(), ::GetLastError() );
