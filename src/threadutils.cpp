@@ -253,25 +253,6 @@ public:
 		post_immediate_completion ( pOp, true );
 	}
 
-	template<typename Handler>
-	inline void post ( Handler handler ) // post into secondary queue
-	{
-		post_op ( Threads::details::Handler2Op( std::move ( handler ) ) );
-	}
-
-	template<typename Handler>
-	inline void defer ( Handler handler ) // post into primary queue
-	{
-		defer_op ( Threads::details::Handler2Op( std::move ( handler ) ) );
-	}
-
-	template<typename Handler>
-	void post_continuationHandler ( Handler handler ) // try to execute immediately, or then post to primary queue
-	{
-		// Allocate and construct an operation to wrap the handler.
-		post_continuation ( Threads::details::Handler2Op( std::move ( handler ) ) );
-	}
-
 	void post_continuation ( Service_t::operation * pOp )
 	{
 		auto * pThisThread = ThreadCallStack_c::Contains ( this );
@@ -709,7 +690,6 @@ class ThreadPool_c final : public Worker_i
 	Optional_T<Work> m_dWork;
 	CSphVector<SphThread_t> m_dThreads;
 	CSphMutex m_dMutex;
-	sph::Event_c m_dCond;
 	std::atomic<bool> m_bStop {false};
 
 	// support iteration over children for show threads and hazards
@@ -759,7 +739,6 @@ class ThreadPool_c final : public Worker_i
 			{
 				createWork ();
 				m_tService.reset ();
-				m_dCond.SignalAll (dLock);
 			}
 		}
 		ScWL_t _ ( m_dChildGuard );
@@ -1216,7 +1195,7 @@ public:
 		{
 			auto * pOp = m_tQueue.Front ();
 			m_tQueue.Pop ();
-			pOp->Complete ( nullptr );
+			pOp->Destroy ();
 		}
 	}
 };
@@ -1301,7 +1280,7 @@ class IterationHandler_c : public Threads::details::SchedulerOperation_t
 			{
 				auto * pOp = m_tQueue.Front ();
 				m_tQueue.Pop ();
-				pOp->Complete ( nullptr );
+				pOp->Destroy();
 			}
 		}
 	};

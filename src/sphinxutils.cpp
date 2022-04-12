@@ -3124,7 +3124,8 @@ void sphConfigureCommon ( const CSphConfig & hConf )
 		return;
 
 	CSphConfigSection & hCommon = hConf["common"]["common"];
-	g_sLemmatizerBase = hCommon.GetStr ( "lemmatizer_base" );
+	if ( hCommon ( "lemmatizer_base" ) )
+		g_sLemmatizerBase = hCommon.GetStr ( "lemmatizer_base" );
 
 	bool bJsonStrict = false;
 	bool bJsonAutoconvNumbers;
@@ -3155,8 +3156,6 @@ void sphConfigureCommon ( const CSphConfig & hConf )
 
 	if ( hCommon("plugin_dir") )
 		sphPluginInit ( hCommon["plugin_dir"].cstr() );
-	else
-		sphPluginInit ( HARDCODED_PLUGIN_DIR );
 }
 
 bool sphIsChineseCode ( int iCode )
