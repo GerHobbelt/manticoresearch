@@ -93,12 +93,18 @@ target_link_libraries ( lmanticore PUBLIC sourcedoc )
 
 if (WIN32)
 	target_sources (lmanticore PRIVATE libutils.cpp)
-	target_compile_options(lmanticore PRIVATE /bigobj)
+	if (NOT CMAKE_CROSSCOMPILING)
+		target_compile_options(lmanticore PRIVATE /bigobj)
+	endif()
 endif()
 
 # Boost is required dependency now
 set (Boost_USE_MULTITHREADED ON)
 set (Boost_USE_STATIC_LIBS ON)
+# todo: as alternative we can try to recompile boost with clang, but precompiled also quite ok
+if (CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_NAME STREQUAL Windows)
+	set (Boost_COMPILER vc142)
+endif()
 find_package (Boost 1.61.0 REQUIRED COMPONENTS context)
 target_link_libraries ( lextra INTERFACE Boost::boost Boost::context )
 
@@ -129,14 +135,14 @@ set ( HEADERS sphinxexcerpt.h sphinxfilter.h sphinxint.h sphinxjsonquery.h sphin
 		hazard_pointer.h task_info.h mini_timer.h collation.h fnv64.h histogram.h sortsetup.h dynamic_idx.h
 		indexsettings.h columnarlib.h fileio.h memio.h queryprofile.h columnarfilter.h columnargrouper.h fileutils.h
 		libutils.h conversion.h columnarsort.h sortcomp.h binlog_defs.h binlog.h ${MANTICORE_BINARY_DIR}/config/config.h
-		chunksearchctx.h lrucache.h indexfiles.h attrindex_builder.h queryfilter.h aggregate.h)
+		chunksearchctx.h lrucache.h indexfiles.h attrindex_builder.h queryfilter.h aggregate.h openhash.h )
 
 set ( SEARCHD_H searchdaemon.h searchdconfig.h searchdddl.h searchdexpr.h searchdha.h searchdreplication.h searchdsql.h
 		searchdtask.h client_task_info.h taskflushattrs.h taskflushbinlog.h taskflushmutable.h taskglobalidf.h
 		taskmalloctrim.h taskoptimize.h taskping.h taskpreread.h tasksavestate.h net_action_accept.h
 		netreceive_api.h netreceive_http.h netreceive_ql.h netstate_api.h networking_daemon.h optional.h query_status.h
 		compressed_zlib_mysql.h sphinxql_debug.h stackmock.h replication/wsrep_api_stub.h searchdssl.h digest_sha1.h
-		client_session.h compressed_zstd_mysql.h docs_collector.h index_rotator.h config_reloader.h)
+		client_session.h compressed_zstd_mysql.h docs_collector.h index_rotator.h config_reloader.h searchdhttp.h)
 
 source_group ( "Grammar sources" FILES ${LMANTICORE_BISON} ${SEARCHD_BISON} )
 source_group ( "Lexer sources" FILES ${LMANTICORE_FLEX} ${SEARCHD_FLEX} )
@@ -276,7 +282,7 @@ if (WITH_SSL)
 	endif()
 	if (WIN32 AND TARGET OpenSSL::applink)
 		target_link_libraries (searchd_ssl PRIVATE OpenSSL::applink)
-		target_compile_options ( OpenSSL::applink INTERFACE $<${CLANG_CL}:-Wno-pedantic -Wno-missing-prototypes> )
+		target_compile_options ( OpenSSL::applink INTERFACE $<${CLANGWIN}:-Wno-pedantic -Wno-missing-prototypes> )
 	endif()
 endif (WITH_SSL)
 
@@ -313,7 +319,7 @@ if (NOT STATIC_BINARY)
 	target_link_libraries(wordbreaker lmanticore)
 	target_link_libraries(index_converter lmanticore)
 	add_library(udfexample MODULE udfexample.c)
-	target_compile_options (udfexample PRIVATE "$<${CLANG_CL}:-Wno-deprecated-declarations>")
+	target_compile_options (udfexample PRIVATE "$<${CLANGWIN}:-Wno-deprecated-declarations>")
 endif ()
 
 if ( SPLIT_SYMBOLS )

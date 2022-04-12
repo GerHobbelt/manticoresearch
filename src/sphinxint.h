@@ -22,6 +22,7 @@
 #include "sphinxutils.h"
 #include "fileio.h"
 #include "match.h"
+#include "openhash.h"
 #include "dict/dict_base.h"
 
 #include <float.h>
@@ -163,8 +164,8 @@ public:
 
 	DWORD						m_uPackedFactorFlags { SPH_FACTOR_DISABLE }; ///< whether we need to calculate packed factors (and some extra options)
 
-	ISphFilter *				m_pFilter = nullptr;
-	ISphFilter *				m_pWeightFilter = nullptr;
+	std::unique_ptr<ISphFilter>	m_pFilter;
+	std::unique_ptr<ISphFilter>	m_pWeightFilter;
 
 	bool						m_bSkipQCache = false;			///< whether do not cache this query
 
@@ -192,7 +193,7 @@ public:
 
 	void	BindWeights ( const CSphQuery & tQuery, const CSphSchema & tSchema, CSphString & sWarning );
 	bool	SetupCalc ( CSphQueryResultMeta & tMeta, const ISphSchema & tInSchema, const CSphSchema & tSchema, const BYTE * pBlobPool, const columnar::Columnar_i * pColumnar, const CSphVector<const ISphSchema *> & dInSchemas );
-	bool	CreateFilters ( CreateFilterContext_t &tCtx, CSphString &sError, CSphString &sWarning );
+	bool	CreateFilters ( CreateFilterContext_t& tCtx, CSphString &sError, CSphString &sWarning );
 
 	void	CalcFilter ( CSphMatch & tMatch ) const;
 	void	CalcSort ( CSphMatch & tMatch ) const;
@@ -1402,7 +1403,7 @@ public:
 };
 
 
-ISphInfixBuilder * sphCreateInfixBuilder ( int iCodepointBytes, CSphString * pError );
+std::unique_ptr<ISphInfixBuilder> sphCreateInfixBuilder ( int iCodepointBytes, CSphString * pError );
 bool sphLookupInfixCheckpoints ( const char * sInfix, int iBytes, const BYTE * pInfixes, const CSphVector<InfixBlock_t> & dInfixBlocks, int iInfixCodepointBytes, CSphVector<DWORD> & dCheckpoints );
 // calculate length, upto iInfixCodepointBytes chars from infix start
 int sphGetInfixLength ( const char * sInfix, int iBytes, int iInfixCodepointBytes );

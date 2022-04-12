@@ -2650,6 +2650,10 @@ inline bool StrEqN ( const char * l, const char * r )
 	return strcasecmp ( l, r )==0;
 }
 
+/// lenghted blob of chars (for zero-copy string processing)
+using Str_t = std::pair<const char*, int>;
+const Str_t dEmptyStr { "", 0 };
+
 /// immutable C string proxy
 struct CSphString
 {
@@ -2767,6 +2771,11 @@ public:
 		SetBinary ( sValue, iLen );
 	}
 
+	CSphString ( Str_t sValue )
+	{
+		SetBinary ( sValue );
+	}
+
 	// pass by value - replaces both copy and move assignments.
 	CSphString & operator = ( CSphString rhs )
 	{
@@ -2821,6 +2830,8 @@ public:
 			m_sValue = EMPTY;
 		}
 	}
+
+	void SetBinary ( Str_t sValue ) { SetBinary ( sValue.first, sValue.second ); }
 
 	void Reserve ( int iLen )
 	{
@@ -3022,6 +3033,13 @@ inline CSphString SphSprintf ( const char* sTemplate, ... )
 	return sResult;
 }
 
+// Str_t stuff
+inline bool IsEmpty ( const Str_t & dBlob ) { return dBlob.second==0; }
+inline bool IsFilled ( const Str_t & dBlob ) { return dBlob.first && dBlob.second>0; }
+inline Str_t FromSz ( const char * szString ) { return { szString, szString ? (int) strlen ( szString ) : 0 }; }
+inline Str_t FromStr ( const CSphString& sString ) { return { sString.cstr(), (int) sString.Length() }; }
+inline Str_t FromBytes ( const ByteBlob_t& sData ) { return { (const char*)sData.first, sData.second }; }
+
 // commonly used vectors
 using StrVec_t = CSphVector<CSphString>;
 using IntVec_t = CSphVector<int>;
@@ -3125,12 +3143,6 @@ public:
 /// NOTE that using >1 call in one chain like out << comma << "foo" << comma << "bar" is NOT defined,
 /// since order of calling 2 commas here is undefined (so, you may take "foo, bar", but may ", foobar" also).
 /// Use out << comma << "foo"; out << comma << "bar"; in the case
-using Str_t = std::pair<const char*, int>;
-const Str_t dEmptyStr { "", 0 };
-inline bool IsEmpty ( const Str_t & dBlob ) { return dBlob.second==0; }
-inline bool IsFilled ( const Str_t & dBlob ) { return dBlob.first && dBlob.second>0; }
-inline Str_t FromSz ( const char * szString ) { return { szString, szString ? (int) strlen ( szString ) : 0 }; }
-inline Str_t FromStr ( const CSphString& sString ) { return { sString.cstr(), (int) sString.Length() }; }
 
 class Comma_c
 {
@@ -3227,6 +3239,7 @@ public:
 	StringBuilder_c &	operator << ( char cChar ) { return *this += {&cChar,1}; }
 	StringBuilder_c &	operator << ( const CSphString &sText ) { return *this += sText.cstr (); }
 	StringBuilder_c &	operator << ( const CSphVariant &sText )	{ return *this += sText.cstr (); }
+	StringBuilder_c &	operator << ( const StringBuilder_c &sText )	{ return *this << (Str_t) sText; }
 	StringBuilder_c &	operator << ( Comma_c& dComma ) { return *this += dComma; }
 
 	StringBuilder_c &	operator << ( int iVal );
@@ -3973,44 +3986,6 @@ public:
 	using Iterator_c = BASE::Iterator_c;
 };
 }
-
-//////////////////////////////////////////////////////////////////////////
-
-/// pointer with automatic safe deletion when going out of scope
-template < typename T >
-class CSphScopedPtr : public ISphNoncopyable
-{
-public:
-					CSphScopedPtr()				= default;
-	explicit		CSphScopedPtr ( T * pPtr )	{ m_pPtr = pPtr; }
-					~CSphScopedPtr ()			{ SafeDelete ( m_pPtr ); }
-	T *				operator -> () const noexcept { return m_pPtr; }
-	T *				Ptr () const noexcept		{ return m_pPtr; }
-	T *				get () const noexcept		{ return m_pPtr; } // compatible with std::unique_ptr<T>
-	T&				operator* () const noexcept	{ return *m_pPtr; }
-	bool 			operator! () const noexcept 	{ return m_pPtr==nullptr; }
-	explicit 		operator bool () const noexcept	{ return !this->operator!(); }
-
-	CSphScopedPtr& operator= ( T* pPtr )
-	{
-		CSphScopedPtr<T> pTmp ( pPtr );
-		Swap ( pTmp );
-		return *this;
-	}
-
-	CSphScopedPtr& operator= ( CSphScopedPtr pPtr )
-	{
-		Swap ( pPtr );
-		return *this;
-	}
-	T *				LeakPtr ()					{ T * pPtr = m_pPtr; m_pPtr = nullptr; return pPtr; }
-	void			Reset ()					{ SafeDelete ( m_pPtr ); }
-	inline void 	Swap (CSphScopedPtr & rhs) noexcept { ::Swap(m_pPtr,rhs.m_pPtr);}
-
-
-protected:
-	T *				m_pPtr = nullptr;
-};
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -5098,307 +5073,6 @@ inline int sphRoundUp ( int iValue, int iLimit )
 {
 	return ( iValue+iLimit-1 ) & ~( iLimit-1 );
 }
-//////////////////////////////////////////////////////////////////////////
-struct HashFunc_Int64_t
-{
-	static DWORD GetHash ( int64_t k )
-	{
-		return ( DWORD(k) * 0x607cbb77UL ) ^ ( k>>32 );
-	}
-};
-
-
-/// simple open-addressing hash
-template < typename VALUE, typename KEY, typename HASHFUNC=HashFunc_Int64_t >
-class OpenHash_T
-{
-public:
-	using MYTYPE = OpenHash_T<VALUE,KEY,HASHFUNC>;
-
-	/// initialize hash of a given initial size
-	explicit OpenHash_T ( int64_t iSize=256 )
-	{
-		Reset ( iSize );
-	}
-
-	OpenHash_T ( const OpenHash_T& rhs )
-	{
-		m_iSize = rhs.m_iSize;
-		m_iUsed = rhs.m_iUsed;
-		m_iMaxUsed = rhs.m_iMaxUsed;
-
-		// as we anyway copy raw data, don't need to call ctrs with this allocation
-		using Entry_Storage = typename std::aligned_storage<sizeof ( Entry_t ), alignof ( Entry_t )>::type;
-		m_pHash = (Entry_t*)new Entry_Storage[m_iSize];
-		sph::DefaultCopy_T<Entry_t>::CopyVoid ( m_pHash, rhs.m_pHash, m_iSize );
-	}
-
-	OpenHash_T ( OpenHash_T&& rhs ) noexcept
-	{
-		Swap ( rhs );
-	}
-
-	OpenHash_T& operator= ( OpenHash_T rhs ) noexcept
-	{
-		Swap ( rhs );
-		return *this;
-	}
-
-	~OpenHash_T()
-	{
-		SafeDeleteArray ( m_pHash );
-	}
-
-	/// reset to a given size
-	void Reset ( int64_t iSize )
-	{
-		assert ( iSize<=UINT_MAX ); 		// sanity check
-		SafeDeleteArray ( m_pHash );
-		if ( iSize<=0 )
-		{
-			m_iSize = m_iUsed = m_iMaxUsed = 0;
-			return;
-		}
-
-		iSize = ( 1ULL<<sphLog2 ( iSize-1 ) );
-		assert ( iSize<=UINT_MAX ); 		// sanity check
-		m_pHash = new Entry_t[iSize];
-		m_iSize = iSize;
-		m_iUsed = 0;
-		m_iMaxUsed = GetMaxLoad ( iSize );
-	}
-
-	void Clear()
-	{
-		for ( int i=0; i<m_iSize; i++ )
-			m_pHash[i] = Entry_t();
-
-		m_iUsed = 0;
-	}
-
-	/// acquire value by key (ie. get existing hashed value, or add a new default value)
-	VALUE & Acquire ( KEY k )
-	{
-		DWORD uHash = HASHFUNC::GetHash(k);
-		int64_t iIndex = uHash & ( m_iSize-1 );
-
-		int64_t iDead = -1;
-		while (true)
-		{
-			// found matching key? great, return the value
-			Entry_t * p = m_pHash + iIndex;
-			if ( p->m_uState==Entry_e::USED && p->m_Key==k )
-				return p->m_Value;
-
-			// no matching keys? add it
-			if ( p->m_uState==Entry_e::EMPTY )
-			{
-				// not enough space? grow the hash and force rescan
-				if ( m_iUsed>=m_iMaxUsed )
-				{
-					Grow();
-					iIndex = uHash & ( m_iSize-1 );
-					iDead = -1;
-					continue;
-				}
-
-				// did we walk past a dead entry while probing? if so, lets reuse it
-				if ( iDead>=0 )
-					p = m_pHash + iDead;
-
-				// store the newly added key
-				p->m_Key = k;
-				p->m_uState = Entry_e::USED;
-				m_iUsed++;
-				return p->m_Value;
-			}
-
-			// is this a dead entry? store its index for (possible) reuse
-			if ( p->m_uState==Entry_e::DELETED )
-				iDead = iIndex;
-
-			// no match so far, keep probing
-			iIndex = ( iIndex+1 ) & ( m_iSize-1 );
-		}
-	}
-
-	/// find an existing value by key
-	VALUE * Find ( KEY k ) const
-	{
-		Entry_t * e = FindEntry(k);
-		return e ? &e->m_Value : nullptr;
-	}
-
-	/// add or fail (if key already exists)
-	bool Add ( KEY k, const VALUE & v )
-	{
-		int64_t u = m_iUsed;
-		VALUE & x = Acquire(k);
-		if ( u==m_iUsed )
-			return false; // found an existing value by k, can not add v
-		x = v;
-
-		return true;
-	}
-
-	/// find existing value, or add a new value
-	VALUE & FindOrAdd ( KEY k, const VALUE & v )
-	{
-		int64_t u = m_iUsed;
-		VALUE & x = Acquire(k);
-		if ( u!=m_iUsed )
-			x = v; // did not find an existing value by k, so add v
-
-		return x;
-	}
-
-	/// delete by key
-	bool Delete ( KEY k )
-	{
-		Entry_t * e = FindEntry(k);
-		if ( e )
-			e->m_uState = Entry_e::DELETED;
-
-		return e!=nullptr;
-	}
-
-	/// get number of inserted key-value pairs
-	int64_t GetLength() const
-	{
-		return m_iUsed;
-	}
-
-	int64_t GetLengthBytes () const
-	{
-		return m_iSize * sizeof ( Entry_t );
-	}
-
-	/// iterate the hash by entry index, starting from 0
-	/// finds the next alive key-value pair starting from the given index
-	/// returns that pair and updates the index on success
-	/// returns NULL when the hash is over
-	VALUE * Iterate ( int64_t * pIndex, KEY * pKey ) const
-	{
-		if ( !pIndex || *pIndex<0 )
-			return nullptr;
-
-		for ( int64_t i = *pIndex; i < m_iSize; ++i )
-			if ( m_pHash[i].m_uState==Entry_e::USED )
-			{
-				*pIndex = i+1;
-				if ( pKey )
-					*pKey = m_pHash[i].m_Key;
-
-				return &m_pHash[i].m_Value;
-			}
-
-		return nullptr;
-	}
-
-	// same as above, but without messing of return value/return param
-	std::pair<KEY,VALUE*> Iterate ( int64_t * pIndex ) const
-	{
-		if ( !pIndex || *pIndex<0 )
-			return {0, nullptr};
-
-		for ( int64_t i = *pIndex; i<m_iSize; ++i )
-			if ( m_pHash[i].m_uState==Entry_e::USED ) {
-				*pIndex = i+1;
-				return {m_pHash[i].m_Key, &m_pHash[i].m_Value};
-			}
-
-		return {0,nullptr};
-	}
-
-	void Swap ( MYTYPE& rhs ) noexcept
-	{
-		::Swap ( m_iSize, rhs.m_iSize );
-		::Swap ( m_iUsed, rhs.m_iUsed );
-		::Swap ( m_iMaxUsed, rhs.m_iMaxUsed );
-		::Swap ( m_pHash, rhs.m_pHash );
-	}
-
-protected:
-	enum class Entry_e
-	{
-		EMPTY,
-		USED,
-		DELETED
-	};
-
-#pragma pack(push,4)
-	struct Entry_t
-	{
-		KEY		m_Key;
-		VALUE	m_Value;
-		Entry_e	m_uState { Entry_e::EMPTY };
-		Entry_t ();
-	};
-#pragma pack(pop)
-
-	int64_t		m_iSize {0};					// total hash size
-	int64_t		m_iUsed {0};					// how many entries are actually used
-	int64_t		m_iMaxUsed {0};					// resize threshold
-
-	Entry_t *	m_pHash {nullptr};	///< hash entries
-
-									/// get max load, ie. max number of actually used entries at given size
-	int64_t GetMaxLoad ( int64_t iSize ) const
-	{
-		return (int64_t)( iSize*LOAD_FACTOR );
-	}
-
-	/// we are overloaded, lets grow 2x and rehash
-	void Grow()
-	{
-		int64_t iNewSize = 2*Max(m_iSize,8);
-		assert ( iNewSize<=UINT_MAX ); 		// sanity check
-
-		Entry_t * pNew = new Entry_t[iNewSize];
-
-		for ( int64_t i=0; i<m_iSize; i++ )
-			if ( m_pHash[i].m_uState==Entry_e::USED )
-			{
-				int64_t j = HASHFUNC::GetHash ( m_pHash[i].m_Key ) & ( iNewSize-1 );
-				while ( pNew[j].m_uState==Entry_e::USED )
-					j = ( j+1 ) & ( iNewSize-1 );
-
-				pNew[j] = m_pHash[i];
-			}
-
-		SafeDeleteArray ( m_pHash );
-		m_pHash = pNew;
-		m_iSize = iNewSize;
-		m_iMaxUsed = GetMaxLoad ( m_iSize );
-	}
-
-	/// find (and do not touch!) entry by key
-	inline Entry_t * FindEntry ( KEY k ) const
-	{
-		int64_t iIndex = HASHFUNC::GetHash(k) & ( m_iSize-1 );
-
-		while ( m_pHash[iIndex].m_uState!=Entry_e::EMPTY )
-		{
-			Entry_t & tEntry = m_pHash[iIndex];
-			if ( tEntry.m_Key==k && tEntry.m_uState!=Entry_e::DELETED )
-				return &tEntry;
-
-			iIndex = ( iIndex+1 ) & ( m_iSize-1 );
-		}
-
-		return nullptr;
-	}
-
-private:
-	static constexpr float LOAD_FACTOR = 0.95f;
-};
-
-template<typename V, typename K, typename H> OpenHash_T<V,K,H>::Entry_t::Entry_t() = default;
-template<> inline OpenHash_T<int,int64_t>::Entry_t::Entry_t() : m_Key{0}, m_Value{0} {}
-template<> inline OpenHash_T<DWORD,int64_t>::Entry_t::Entry_t() : m_Key{0}, m_Value{0} {}
-template<> inline OpenHash_T<float,int64_t>::Entry_t::Entry_t() : m_Key{0}, m_Value{0.0f} {}
-template<> inline OpenHash_T<int64_t,int64_t>::Entry_t::Entry_t() : m_Key{0}, m_Value{0} {}
-template<> inline OpenHash_T<uint64_t,int64_t>::Entry_t::Entry_t() : m_Key{0}, m_Value{0} {}
 
 /////////////////////////////////////////////////////////////////////////////
 
@@ -5908,6 +5582,10 @@ private:
 #define LOGINFO( Level, Component ) \
 	if_const ( LOG_LEVEL_##Level ) \
 		LogMessage_t { SPH_LOG_INFO } << LOG_COMPONENT_##Component
+
+#define LOGMSG( Verbosity, Level, Component ) \
+	if_const ( LOG_LEVEL_##Level ) \
+		LogMessage_t { SPH_LOG_##Verbosity } << LOG_COMPONENT_##Component
 
 // flag to trace all threads creation/deletion (set to true and rebuild)
 #define LOG_LEVEL_TPLIFE false

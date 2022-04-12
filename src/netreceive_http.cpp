@@ -12,73 +12,12 @@
 
 #include "netreceive_http.h"
 #include "searchdssl.h"
+#include "searchdhttp.h"
 
 extern int g_iClientTimeoutS; // from searchd.cpp
 extern volatile bool g_bMaintenance;
 
-static const char g_sContentLength[] = "\r\r\n\nCcOoNnTtEeNnTt--LlEeNnGgTtHh\0";
-static const size_t g_sContentLengthSize = sizeof ( g_sContentLength ) - 1;
-static const char g_sHeadEnd[] = "\r\n\r\n";
 
-struct HttpHeaderStreamParser_t
-{
-	int m_iHeaderEnd = 0;
-	int m_iFieldContentLenStart = 0;
-	int m_iFieldContentLenVal = 0;
-
-	int m_iCur = 0;
-	int m_iCRLF = 0;
-	int m_iName = 0;
-
-	bool HeaderFound ( ByteBlob_t tPacket )
-	{
-		if ( IsNull ( tPacket ) )
-			return false;
-
-		auto pBuf = tPacket.first;
-		auto iLen = tPacket.second;
-		// early exit at for already found request header
-		if ( m_iHeaderEnd || m_iCur>=iLen )
-			return true;
-
-		const int iCNwoLFSize = ( g_sContentLengthSize-5 ) / 2; // size of just Content-Length field name
-		for ( ; m_iCur<iLen; ++m_iCur )
-		{
-			m_iCRLF = ( pBuf[m_iCur]==g_sHeadEnd[m_iCRLF] ? m_iCRLF+1 : 0 );
-			m_iName = ( !m_iFieldContentLenStart
-					&& ( pBuf[m_iCur]==g_sContentLength[m_iName] || pBuf[m_iCur]==g_sContentLength[m_iName+1] )
-					? m_iName+2 : 0 );
-
-			// header end found
-			if ( m_iCRLF==sizeof ( g_sHeadEnd )-1 )
-			{
-				m_iHeaderEnd = m_iCur+1;
-				break;
-			}
-			// Content-Length field found
-			if ( !m_iFieldContentLenStart && m_iName==g_sContentLengthSize-1 )
-				m_iFieldContentLenStart = m_iCur-iCNwoLFSize+1;
-		}
-
-		// parse Content-Length field value
-		while ( m_iHeaderEnd && m_iFieldContentLenStart )
-		{
-			int iNumStart = m_iFieldContentLenStart+iCNwoLFSize;
-			// skip spaces
-			while ( iNumStart<m_iHeaderEnd && pBuf[iNumStart]==' ' )
-				++iNumStart;
-			if ( iNumStart>=m_iHeaderEnd || pBuf[iNumStart]!=':' )
-				break;
-
-			++iNumStart; // skip ':' delimiter
-			m_iFieldContentLenVal = atoi (
-					(const char *) pBuf+iNumStart ); // atoi handles leading spaces and tail not digital chars
-			break;
-		}
-
-		return ( m_iHeaderEnd>0 );
-	}
-};
 
 void HttpServe ( std::unique_ptr<AsyncNetBuffer_c> pBuf )
 {
@@ -130,62 +69,78 @@ void HttpServe ( std::unique_ptr<AsyncNetBuffer_c> pBuf )
 	auto& tOut = *(NetGenericOutputBuffer_c *) pBuf.get();
 	auto& tIn = *(AsyncNetInputBuffer_c *) pBuf.get();
 
+	HttpRequestParser_c tParser;
+	CSphVector<BYTE> dResult;
+
+	auto HttpReply = [&dResult, &tOut] ( ESphHttpStatus eCode, Str_t sMsg )
+	{
+		if ( IsEmpty ( sMsg ) )
+			HttpBuildReply ( dResult, eCode, sMsg, false );
+		else
+			sphHttpErrorReply ( dResult, eCode, sMsg.first );
+		tOut.SwapData ( dResult );
+		return tOut.Flush();
+	};
+
 	do
 	{
 		tIn.DiscardProcessed ( -1 ); // -1 means 'force flush'
+		tParser.Reinit();
 
-		HttpHeaderStreamParser_t tHeadParser;
-		while ( !tHeadParser.HeaderFound ( tIn.Tail() ))
+		// read HTTP header
+		while ( !tParser.ParseHeader ( tIn.Tail() ) )
 		{
-			auto iChunk = tIn.ReadAny ();
-			if ( iChunk>0 )
+			tIn.PopTail ();
+			auto iChunk = tIn.ReadAny();
+			if ( iChunk > 0 )
 				continue;
 
 			if ( !iChunk && tIn.GetError() )
-				sphWarning ( "failed to receive HTTP request (client=%s(%d)) max packet size(%d) exceeded)",
-					sClientIP, iCID, g_iMaxPacketSize );
+				sphWarning ( "failed to receive HTTP request (client=%s(%d)) max packet size(%d) exceeded)", sClientIP, iCID, g_iMaxPacketSize );
 
 			return;
 		}
 
-		int iPacketLen = tHeadParser.m_iHeaderEnd+tHeadParser.m_iFieldContentLenVal;
-		if ( !tIn.ReadFrom ( iPacketLen )) {
-			sphWarning ( "failed to receive HTTP request (client=%s(%d), exp=%d, error='%s')", sClientIP, iCID,
-						 iPacketLen, sphSockError ());
-			return;
+		// malformed header
+		if ( tParser.Error() )
+		{
+			HttpReply ( SPH_HTTP_STATUS_400, FromSz ( tParser.Error() ) );
+			break;
 		}
 
-		// Temporary write \0 at the end, since parser wants z-terminated buf
-		auto uOldByte = tIn.Terminate ( iPacketLen, '\0' );
-		auto tPacket = tIn.PopTail (iPacketLen);
-
-		CSphVector<BYTE> dResult;
+		// check if we should interrupt because of maxed-out
 		if ( IsMaxedOut() )
 		{
-			sphHttpErrorReply ( dResult, SPH_HTTP_STATUS_503, g_sMaxedOutMessage );
-			tOut.SwapData ( dResult );
-			tOut.Flush (); // no need to check return code since we break anyway
+			HttpReply ( SPH_HTTP_STATUS_503, FromSz ( g_sMaxedOutMessage ) );
 			gStats().m_iMaxedOut.fetch_add ( 1, std::memory_order_relaxed );
 			break;
 		}
 
-		tCrashQuery.m_dQuery = tPacket;
-
-		if ( sphLoopClientHttp ( tPacket.first, tPacket.second, dResult ) )
+		// process keep-alive conditions
+		if ( tParser.KeepAlive() )
 		{
 			if ( !tSess.GetPersistent() )
 				tIn.SetTimeoutUS ( S2US * g_iClientTimeoutS );
-			tSess.SetPersistent(true);
+			tSess.SetPersistent ( true );
 		} else {
 			if ( tSess.GetPersistent() )
 				tIn.SetTimeoutUS ( S2US * g_iReadTimeoutS );
-			tSess.SetPersistent(false);
+			tSess.SetPersistent ( false );
 		}
 
-		tIn.Terminate ( 0, uOldByte ); // return back prev byte
+		// if first chunk is (most probably) pure header, we can proceed special headers here
+		if ( tParser.Expect100() && !tParser.ParsedBodyLength() )
+		{
+			if ( !HttpReply ( SPH_HTTP_STATUS_100, dEmptyStr ) )
+				break;
+			sphLogDebug ("100 Continue sent");
+		}
+
+		tParser.ProcessClientHttp ( tIn, dResult );
 
 		tOut.SwapData (dResult);
 		if ( !tOut.Flush () )
 			break;
+		pBuf->SyncErrorState();
 	} while ( tSess.GetPersistent() );
 }

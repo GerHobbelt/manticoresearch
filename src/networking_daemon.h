@@ -181,11 +181,16 @@ public:
 
 	/// get timeout from backend, in microseconds
 	virtual int64_t GetTimeoutUS () const = 0;
+
+	/// get total N of bytes received via this buffer
+	virtual int64_t GetTotalReceived() const = 0;
 };
 
 
 class AsyncNetBuffer_c : public AsyncNetInputBuffer_c, public NetGenericOutputBuffer_c
 {
+public:
+	void SyncErrorState();
 };
 
 std::unique_ptr<AsyncNetBuffer_c> MakeAsyncNetBuffer ( std::unique_ptr<SockWrapper_c> pSock );

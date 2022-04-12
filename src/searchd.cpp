@@ -287,6 +287,10 @@ static void sphLogEntry ( ESphLogLevel , char * sBuf, char * sTtyBuf )
 #endif
 {
 #if _WIN32
+
+#pragma message( "Automatically linking with AdvAPI32.Lib" )
+#pragma comment( lib, "AdvAPI32.Lib" )
+
 	if ( g_bService && g_iLogFile==STDOUT_FILENO )
 	{
 		HANDLE hEventSource;
@@ -1459,6 +1463,11 @@ void ISphOutputBuffer::SendBytes ( const CSphString& sStr )
 	SendBytes ( sStr.cstr(), sStr.Length() );
 }
 
+void ISphOutputBuffer::SendBytes ( const Str_t& sStr )
+{
+	m_dBuf.Append ( sStr );
+}
+
 void ISphOutputBuffer::SendBytes ( const VecTraits_T<BYTE> & dBuf )
 {
 	m_dBuf.Append ( dBuf );
@@ -1985,13 +1994,10 @@ bool SearchReplyParser_c::ParseReply ( MemInputBuffer_c & tReq, AgentConn_t & tA
 	const int iResults = m_iResults;
 	assert ( iResults>0 );
 
-	auto pResult = ( cSearchResult * ) tAgent.m_pResult.Ptr ();
-	if ( !pResult )
-	{
-		pResult = new cSearchResult;
-		tAgent.m_pResult = pResult;
-	}
+	if ( !tAgent.m_pResult )
+		tAgent.m_pResult = std::make_unique<cSearchResult>();
 
+	auto pResult = (cSearchResult*)tAgent.m_pResult.get();
 	auto &dResults = pResult->m_dResults;
 
 	dResults.Resize ( iResults );
@@ -3390,10 +3396,7 @@ static ESphAttr FixupAttrForNetwork ( const CSphColumnInfo & tCol, const CSphSch
 
 	case SPH_ATTR_STRINGPTR:
 	{
-		auto pField = tSchema.GetField ( tCol.m_sName.cstr() );
-		bool bStored = ( pField && ( pField->m_uFieldFlags & CSphColumnInfo::FIELD_STORED ) ) || ( tCol.m_uFieldFlags & CSphColumnInfo::FIELD_STORED );
-
-		if ( bAgentMode && uMasterVer>=18 && bStored )
+		if ( bAgentMode && uMasterVer>=18 && IsNotRealAttribute ( tCol ) )
 			return SPH_ATTR_STORED_FIELD;
 		else
 			return SPH_ATTR_STRING;
@@ -4840,7 +4843,7 @@ bool MergeAllMatches ( AggrResult_t & tRes, const CSphQuery & tQuery, bool bHave
 	tQueueSettings.m_iMaxMatches = Max ( tQueueSettings.m_iMaxMatches, 1 );
 
 	SphQueueRes_t tQueueRes;
-	CSphScopedPtr<ISphMatchSorter> pSorter ( sphCreateQueue ( tQueueSettings, tQueryCopy, tRes.m_sError, tQueueRes ) );
+	std::unique_ptr<ISphMatchSorter> pSorter ( sphCreateQueue ( tQueueSettings, tQueryCopy, tRes.m_sError, tQueueRes ) );
 
 	// restore outer order related patches, or it screws up the query log
 	if ( tQueryCopy.m_bHasOuter )
@@ -4890,8 +4893,7 @@ bool MergeAllMatches ( AggrResult_t & tRes, const CSphQuery & tQuery, bool bHave
 	}
 
 	// do the sort work!
-	tRes.m_iTotalMatches -= KillDupesAndFlatten ( pSorter.Ptr(), tRes );
-
+	tRes.m_iTotalMatches -= KillDupesAndFlatten ( pSorter.get(), tRes );
 	return true;
 }
 
@@ -5136,13 +5138,13 @@ public:
 class SearchHandler_c
 {
 public:
-									SearchHandler_c ( int iQueries, const QueryParser_i * pParser, QueryType_e eQueryType, bool bMaster );
+									SearchHandler_c ( int iQueries, std::unique_ptr<QueryParser_i> pParser, QueryType_e eQueryType, bool bMaster );
 									~SearchHandler_c();
 
 	void							RunQueries ();					///< run all queries, get all results
 	void							RunCollect ( const CSphQuery & tQuery, const CSphString & sIndex, CSphString * pErrors, CSphVector<BYTE> * pCollectedDocs );
 	void							SetQuery ( int iQuery, const CSphQuery & tQuery, ISphTableFunc * pTableFunc );
-	void							SetQueryParser ( const QueryParser_i * pParser, QueryType_e eQueryType );
+	void							SetQueryParser ( std::unique_ptr<QueryParser_i> pParser, QueryType_e eQueryType );
 	void							SetProfile ( QueryProfile_c * pProfile );
 	AggrResult_t *					GetResult ( int iResult ) { return m_dAggrResults.Begin() + iResult; }
 	void							SetFederatedUser () { m_bFederatedUser = true; }
@@ -5171,7 +5173,7 @@ protected:
 
 	QueryProfile_c *				m_pProfile = nullptr;
 	QueryType_e						m_eQueryType {QUERY_API}; ///< queries from sphinxql require special handling
-	const QueryParser_i *			m_pQueryParser;	///< parser used for queries in this handler. e.g. plain or json-style
+	std::unique_ptr<QueryParser_i>	m_pQueryParser;	///< parser used for queries in this handler. e.g. plain or json-style
 
 	bool							m_bNeedDocIDs = false;	///< do we need docids returned from local searches (remotes return them anyway)?
 
@@ -5215,9 +5217,9 @@ private:
 	void							CalcSplits ( int iConcurrency, CSphFixedVector<int> & dSplits );
 };
 
-PubSearchHandler_c::PubSearchHandler_c ( int iQueries, const QueryParser_i * pQueryParser, QueryType_e eQueryType, bool bMaster )
+PubSearchHandler_c::PubSearchHandler_c ( int iQueries, std::unique_ptr<QueryParser_i> pQueryParser, QueryType_e eQueryType, bool bMaster )
 {
-	m_pImpl = new SearchHandler_c ( iQueries, pQueryParser, eQueryType, bMaster );
+	m_pImpl = new SearchHandler_c ( iQueries, std::move ( pQueryParser ), eQueryType, bMaster );
 }
 
 PubSearchHandler_c::~PubSearchHandler_c ()
@@ -5268,7 +5270,7 @@ void PubSearchHandler_c::RunCollect ( const CSphQuery& tQuery, const CSphString&
 }
 
 
-SearchHandler_c::SearchHandler_c ( int iQueries, const QueryParser_i * pQueryParser, QueryType_e eQueryType, bool bMaster )
+SearchHandler_c::SearchHandler_c ( int iQueries, std::unique_ptr<QueryParser_i> pQueryParser, QueryType_e eQueryType, bool bMaster )
 	: m_dTables ( iQueries )
 {
 	m_dQueries.Resize ( iQueries );
@@ -5280,7 +5282,7 @@ SearchHandler_c::SearchHandler_c ( int iQueries, const QueryParser_i * pQueryPar
 	ARRAY_FOREACH ( i, m_dTables )
 		m_dTables[i] = nullptr;
 
-	SetQueryParser ( pQueryParser, eQueryType );
+	SetQueryParser ( std::move ( pQueryParser ), eQueryType );
 	m_dResults.Resize ( iQueries );
 	for ( int i=0; i<iQueries; ++i )
 		m_dResults[i].m_pMeta = &m_dAggrResults[i];
@@ -5341,7 +5343,6 @@ public:
 
 SearchHandler_c::~SearchHandler_c ()
 {
-	SafeDelete ( m_pQueryParser );
 	ARRAY_FOREACH ( i, m_dTables )
 		SafeDelete ( m_dTables[i] );
 
@@ -5354,13 +5355,13 @@ SearchHandler_c::~SearchHandler_c ()
 	}
 }
 
-void SearchHandler_c::SetQueryParser ( const QueryParser_i * pParser, QueryType_e eQueryType )
+void SearchHandler_c::SetQueryParser ( std::unique_ptr<QueryParser_i> pParser, QueryType_e eQueryType )
 {
-	m_pQueryParser = pParser;
+	m_pQueryParser = std::move ( pParser );
 	m_eQueryType = eQueryType;
 	for ( auto & dQuery : m_dQueries )
 	{
-		dQuery.m_pQueryParser = pParser;
+		dQuery.m_pQueryParser = m_pQueryParser.get();
 		dQuery.m_eQueryType = eQueryType;
 	}
 }
@@ -5458,7 +5459,7 @@ void SearchHandler_c::RunActionQuery ( const CSphQuery & tQuery, const CSphStrin
 void SearchHandler_c::SetQuery ( int iQuery, const CSphQuery & tQuery, ISphTableFunc * pTableFunc )
 {
 	m_dQueries[iQuery] = tQuery;
-	m_dQueries[iQuery].m_pQueryParser = m_pQueryParser;
+	m_dQueries[iQuery].m_pQueryParser = m_pQueryParser.get();
 	m_dQueries[iQuery].m_eQueryType = m_eQueryType;
 	m_dTables[iQuery] = pTableFunc;
 }
@@ -6942,20 +6943,20 @@ void SearchHandler_c::RunSubset ( int iStart, int iEnd )
 	///////////////////////////////////////////////////////////
 
 	// connect to remote agents and query them, if required
-	CSphScopedPtr<SearchRequestBuilder_c> tReqBuilder { nullptr };
+	std::unique_ptr<SearchRequestBuilder_c> tReqBuilder;
 	CSphRefcountedPtr<RemoteAgentsObserver_i> tReporter { nullptr };
-	CSphScopedPtr<ReplyParser_i> tParser { nullptr };
+	std::unique_ptr<ReplyParser_i> tParser;;
 	if ( !dRemotes.IsEmpty() )
 	{
 		SwitchProfile(m_pProfile, SPH_QSTATE_DIST_CONNECT);
-		tReqBuilder = new SearchRequestBuilder_c ( m_dNQueries, iDivideLimits );
-		tParser = new SearchReplyParser_c ( iQueries );
+		tReqBuilder = std::make_unique<SearchRequestBuilder_c> ( m_dNQueries, iDivideLimits );
+		tParser = std::make_unique<SearchReplyParser_c> ( iQueries );
 		tReporter = GetObserver();
 
 		// run remote queries. tReporter will tell us when they're finished.
 		// also blackholes will be removed from this flow of remotes.
-		ScheduleDistrJobs ( dRemotes, tReqBuilder.Ptr (),
-			tParser.Ptr (),
+		ScheduleDistrJobs ( dRemotes, tReqBuilder.get (),
+			tParser.get (),
 			tReporter, tFirst.m_iRetryCount, tFirst.m_iRetryDelay );
 	}
 
@@ -7015,7 +7016,7 @@ void SearchHandler_c::RunSubset ( int iStart, int iEnd )
 				// merge this agent's results
 				for ( int iRes = 0; iRes<iQueries; ++iRes )
 				{
-					auto pResult = ( cSearchResult * ) pAgent->m_pResult.Ptr ();
+					auto pResult = ( cSearchResult * ) pAgent->m_pResult.get ();
 					if ( !pResult )
 						continue;
 
@@ -7314,14 +7315,14 @@ void HandleCommandSearch ( ISphOutputBuffer & tOut, WORD uVer, InputBuffer_c & t
 			assert ( i.m_eQueryType==eQueryType );
 #endif
 
-		QueryParser_i * pParser {nullptr};
+		std::unique_ptr<QueryParser_i> pParser;
 		if ( eQueryType==QUERY_JSON )
 			pParser = sphCreateJsonQueryParser();
 		else
 			pParser = sphCreatePlainQueryParser();
 
 		assert ( pParser );
-		tHandler.SetQueryParser ( pParser, eQueryType );
+		tHandler.SetQueryParser ( std::move ( pParser ), eQueryType );
 
 		const CSphQuery & q = tHandler.m_dQueries[0];
 		myinfo::SetThreadInfo ( R"(api-search query="%s" comment="%s" index="%s")",
@@ -7794,11 +7795,10 @@ static inline bool MakeSingleLocalSnippetWithFields ( ExcerptQuery_t & tQuery, c
 {
 	assert ( pBuilder );
 
-	CSphScopedPtr<TextSource_i> pSource ( CreateSnippetSource ( q.m_uFilesMode,
-			(const BYTE*)tQuery.m_sSource.cstr(), tQuery.m_sSource.Length() ) );
+	std::unique_ptr<TextSource_i> pSource = CreateSnippetSource ( q.m_uFilesMode, (const BYTE*)tQuery.m_sSource.cstr(), tQuery.m_sSource.Length() );
 
 	SnippetResult_t tRes;
-	if ( !pBuilder->Build ( pSource.Ptr(), tRes ) )
+	if ( !pBuilder->Build ( pSource, tRes ) )
 	{
 		tQuery.m_sError = std::move ( tRes.m_sError );
 		return false;
@@ -8075,7 +8075,7 @@ bool MakeSnippets ( CSphString sIndex, CSphVector<ExcerptQuery_t> & dQueries,
 	/// do highlighting
 	///////////////////
 
-	CSphScopedPtr<SnippetBuilder_c>	pBuilder ( new SnippetBuilder_c );
+	auto pBuilder = std::make_unique<SnippetBuilder_c>();
 	pBuilder->Setup ( pLocalIndex, q );
 
 	if ( !pBuilder->SetQuery ( q.m_sQuery.cstr(), true, sError ) )
@@ -8083,7 +8083,7 @@ bool MakeSnippets ( CSphString sIndex, CSphVector<ExcerptQuery_t> & dQueries,
 
 	// boring single snippet
 	if ( dQueries.GetLength ()==1 )
-		return MakeSingleLocalSnippet ( dQueries[0], q, pBuilder.Ptr(), sError );
+		return MakeSingleLocalSnippet ( dQueries[0], q, pBuilder.get(), sError );
 
 	if ( !CollectSourceSizes ( dQueries, q.m_uFilesMode, !bScattered, sError ) )
 		return false;
@@ -8119,7 +8119,7 @@ bool MakeSnippets ( CSphString sIndex, CSphVector<ExcerptQuery_t> & dQueries,
 	if ( !bRemote )
 	{
 		// multithreaded, but no remote agents.
-		MakeSnippetsCoro ( dPresent, dQueries, q, pBuilder.Ptr() );
+		MakeSnippetsCoro ( dPresent, dQueries, q, pBuilder.get() );
 
 	} else
 	{
@@ -8127,9 +8127,9 @@ bool MakeSnippets ( CSphString sIndex, CSphVector<ExcerptQuery_t> & dQueries,
 
 		// multithreaded with remotes (scattered and full)
 		if ( bScattered )
-			MakeRemoteScatteredSnippets ( dQueries, pDist, pBuilder.Ptr(), q, dPresent, dAbsent );
+			MakeRemoteScatteredSnippets ( dQueries, pDist, pBuilder.get(), q, dPresent, dAbsent );
 		else
-			MakeRemoteNonScatteredSnippets ( dQueries, pDist, pBuilder.Ptr (), q, dPresent );
+			MakeRemoteNonScatteredSnippets ( dQueries, pDist, pBuilder.get (), q, dPresent );
 	}
 
 	StringBuilder_c sErrors ( "; " );
@@ -9537,13 +9537,10 @@ public:
 		//	auto &dQueries = m_pWorker->m_dQueries;
 		//	int iDoc = m_pWorker->m_dTasks[tAgent.m_iStoreTag].m_iHead;
 
-		auto pResult = ( CPqResult * ) tAgent.m_pResult.Ptr ();
-		if ( !pResult )
-		{
-			pResult = new CPqResult;
-			tAgent.m_pResult = pResult;
-		}
+		if ( !tAgent.m_pResult )
+			tAgent.m_pResult = std::make_unique<CPqResult>();
 
+		auto pResult = (CPqResult*)tAgent.m_pResult.get();
 		auto &dResult = pResult->m_dResult;
 		auto uFlags = tReq.GetDword ();
 		bool bDumpDocs = !!(uFlags & 1U);
@@ -9772,7 +9769,7 @@ static void SendMysqlPercolateReply ( RowBuffer_i & tOut, const CPqResult & tRes
 				}
 			}
 
-			tOut.PutString ( sDocs.cstr () );
+			tOut.PutString ( sDocs );
 			sDocs.Clear ();
 		}
 		if ( bQuery )
@@ -10032,16 +10029,16 @@ void PercolateMatchDocuments ( const BlobVec_t & dDocs, const PercolateOptions_t
 	bool bHaveRemotes = !dAgents.IsEmpty ();
 	int iSuccesses = 0;
 	int iAgentsDone = 0;
-	CSphScopedPtr<PqRequestBuilder_c> pReqBuilder { nullptr };
-	CSphScopedPtr<ReplyParser_i> pParser { nullptr };
+	std::unique_ptr<PqRequestBuilder_c> pReqBuilder;
+	std::unique_ptr<ReplyParser_i> pParser;
 	CSphRefcountedPtr<RemoteAgentsObserver_i> pReporter { nullptr };
 	if ( bHaveRemotes )
 	{
-		pReqBuilder = new PqRequestBuilder_c ( dDocs, tOpts, iStart, iStep );
+		pReqBuilder = std::make_unique<PqRequestBuilder_c> ( dDocs, tOpts, iStart, iStep );
 		iStart += iStep * dAgents.GetLength ();
-		pParser = new PqReplyParser_c;
+		pParser = std::make_unique<PqReplyParser_c>();
 		pReporter = GetObserver();
-		ScheduleDistrJobs ( dAgents, pReqBuilder.Ptr(), pParser.Ptr(), pReporter );
+		ScheduleDistrJobs ( dAgents, pReqBuilder.get(), pParser.get(), pReporter );
 	}
 
 	LazyVector_T <CPqResult> dLocalResults;
@@ -10078,7 +10075,7 @@ void PercolateMatchDocuments ( const BlobVec_t & dDocs, const PercolateOptions_t
 				continue;
 			}
 
-			auto pResult = ( CPqResult * ) pAgent->m_pResult.Ptr ();
+			auto pResult = ( CPqResult * ) pAgent->m_pResult.get ();
 			if ( !pResult )
 				continue;
 
@@ -11602,7 +11599,7 @@ void HandleMysqlCallSuggest ( RowBuffer_i & tOut, SqlStmt_t & tStmt, bool bQuery
 			for ( auto &dMatched : tRes.m_dMatched )
 				sBuf.Appendf ( "%d", dMatched.m_iDocs );
 			tOut.PutString ( "docs" );
-			tOut.PutString ( sBuf.cstr () );
+			tOut.PutString ( sBuf );
 			tOut.Commit ();
 		}
 	} else
@@ -12202,7 +12199,7 @@ void HandleMysqlShowThreads ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 			continue;
 		tOut.PutNumAsString ( dThd.m_iThreadID );
 		tOut.PutString ( dThd.m_sThreadName );
-		tOut.PutString ( dThd.m_sProto.cstr() );
+		tOut.PutString ( dThd.m_sProto );
 		tOut.PutString ( TaskStateName ( dThd.m_eTaskState ) );
 		tOut.PutString ( dThd.m_sClientName ); // Host
 		tOut.PutNumAsString ( dThd.m_iConnID ); // ConnID
@@ -12227,7 +12224,7 @@ void HandleMysqlShowThreads ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 		}
 
 		if ( bAll )
-			tOut.PutString ( dThd.m_sChain.cstr () ); // Chain
+			tOut.PutString ( dThd.m_sChain ); // Chain
 		auto tInfo = FormatInfo ( dThd, eFmt, tBuf );
 		tOut.PutString ( tInfo.first, Min ( tInfo.second, iCols ) ); // Info m_pTaskInfo
 		if ( !tOut.Commit () )
@@ -12648,9 +12645,9 @@ void sphHandleMysqlUpdate ( StmtErrorReporter_i & tOut, const SqlStmt_t & tStmt,
 			pDist->GetAllHosts ( dAgents );
 
 			// connect to remote agents and query them
-			CSphScopedPtr<RequestBuilder_i> pRequestBuilder ( CreateRequestBuilder ( sQuery, tStmt ) ) ;
-			CSphScopedPtr<ReplyParser_i> pReplyParser ( CreateReplyParser ( tStmt.m_bJson, iUpdated, iWarns ) );
-			iSuccesses += PerformRemoteTasks ( dAgents, pRequestBuilder.Ptr (), pReplyParser.Ptr () );
+			std::unique_ptr<RequestBuilder_i> pRequestBuilder = CreateRequestBuilder ( sQuery, tStmt );
+			std::unique_ptr<ReplyParser_i> pReplyParser = CreateReplyParser ( tStmt.m_bJson, iUpdated, iWarns );
+			iSuccesses += PerformRemoteTasks ( dAgents, pRequestBuilder.get (), pReplyParser.get () );
 		}
 	}
 
@@ -13328,9 +13325,9 @@ void sphHandleMysqlDelete ( StmtErrorReporter_i & tOut, const SqlStmt_t & tStmt,
 			int iWarns = 0;
 
 			// connect to remote agents and query them
-			CSphScopedPtr<RequestBuilder_i> pRequestBuilder ( CreateRequestBuilder ( sQuery, tStmt ) ) ;
-			CSphScopedPtr<ReplyParser_i> pReplyParser ( CreateReplyParser ( tStmt.m_bJson, iGot, iWarns ) );
-			PerformRemoteTasks ( dAgents, pRequestBuilder.Ptr (), pReplyParser.Ptr () );
+			std::unique_ptr<RequestBuilder_i> pRequestBuilder = CreateRequestBuilder ( sQuery, tStmt );
+			std::unique_ptr<ReplyParser_i> pReplyParser = CreateReplyParser ( tStmt.m_bJson, iGot, iWarns );
+			PerformRemoteTasks ( dAgents, pRequestBuilder.get (), pReplyParser.get () );
 
 			// FIXME!!! report error & warnings from agents
 			// FIXME? profile update time too?
@@ -14114,7 +14111,7 @@ void HandleSelectFiles ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 	if ( sFormat!="external" )
 		ARRAY_CONSTFOREACH( i, dFiles )
 		{
-			tOut.PutString ( dFiles[i].cstr () );
+			tOut.PutString ( dFiles[i] );
 			tOut.PutNumAsString ( sphGetFileSize ( dFiles[i], nullptr ) );
 			if ( !tOut.Commit () )
 				return;
@@ -14125,7 +14122,7 @@ void HandleSelectFiles ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 		dExt.Uniq ();
 		ARRAY_CONSTFOREACH( i, dExt )
 		{
-			tOut.PutString ( dExt[i].cstr () );
+			tOut.PutString ( dExt[i] );
 			tOut.PutNumAsString ( sphGetFileSize ( dExt[i], nullptr ) );
 			if ( !tOut.Commit () )
 				return;
@@ -15093,8 +15090,8 @@ void HandleMysqlShowIndexSettings ( RowBuffer_i & tOut, const SqlStmt_t & tStmt 
 			return;
 
 		StringBuilder_c tBuf;
-		CSphScopedPtr<FilenameBuilder_i> pFilenameBuilder ( CreateFilenameBuilder ( pIndex->GetName () ) );
-		DumpSettings ( tBuf, *pIndex, pFilenameBuilder.Ptr () );
+		std::unique_ptr<FilenameBuilder_i> pFilenameBuilder = CreateFilenameBuilder ( pIndex->GetName () );
+		DumpSettings ( tBuf, *pIndex, pFilenameBuilder.get () );
 
 		tOut.DataTuplet ( "settings", tBuf.cstr () );
 		tOut.Eof ();
@@ -15320,11 +15317,11 @@ static void HandleMysqlAlter ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, bool
 
 static bool PrepareReconfigure ( const CSphString & sIndex, const CSphConfigSection & hIndex, CSphReconfigureSettings & tSettings, CSphString & sWarning, CSphString & sError )
 {
-	CSphScopedPtr<FilenameBuilder_i> pFilenameBuilder ( CreateFilenameBuilder ( sIndex.cstr() ) );
+	std::unique_ptr<FilenameBuilder_i> pFilenameBuilder = CreateFilenameBuilder ( sIndex.cstr() );
 
 	// fixme: report warnings
 	tSettings.m_tTokenizer.Setup ( hIndex, sWarning );
-	tSettings.m_tDict.Setup ( hIndex, pFilenameBuilder.Ptr(), sWarning );
+	tSettings.m_tDict.Setup ( hIndex, pFilenameBuilder.get(), sWarning );
 	tSettings.m_tFieldFilter.Setup ( hIndex, sWarning );
 	tSettings.m_tMutableSettings.Load ( hIndex, false, nullptr );
 
@@ -15643,7 +15640,7 @@ static void HandleMysqlShowPlan ( RowBuffer_i & tOut, const QueryProfile_c & p, 
 	tOut.PutString ( "transformed_tree" );
 	StringBuilder_c sPlan;
 	sph::RenderBsonPlan ( sPlan, bson::MakeHandle ( p.m_dPlan ), bDot );
-	tOut.PutString ( sPlan.cstr (), sPlan.GetLength() );
+	tOut.PutString ( sPlan );
 	tOut.Commit();
 
 	tOut.Eof ( bMoreResultsFollow );
@@ -15775,7 +15772,7 @@ void HandleMysqlExplain ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, bool bDot
 	tOut.HeadEnd ();
 
 	tOut.PutString ( "transformed_tree" );
-	tOut.PutString ( sRes.cstr(), sRes.GetLength() );
+	tOut.PutString ( sRes );
 	tOut.Commit();
 	tOut.Eof ();
 }
@@ -16424,11 +16421,8 @@ void HandleCommandJson ( ISphOutputBuffer & tOut, WORD uVer, InputBuffer_c & tRe
 	CSphString sEndpoint = tReq.GetString ();
 	CSphString sCommand = tReq.GetString ();
 	
-	ESphHttpEndpoint eEndpoint = sphStrToHttpEndpoint ( sEndpoint );
-
 	CSphVector<BYTE> dResult;
-	SmallStringHash_T<CSphString> tOptions;
-	sphProcessHttpQueryNoResponce ( eEndpoint, sCommand.cstr(), tOptions, dResult );
+	sphProcessHttpQueryNoResponce ( sEndpoint, sCommand, dResult );
 
 	auto tReply = APIAnswer ( tOut, VER_COMMAND_JSON );
 	tOut.SendString ( sEndpoint.cstr() );
@@ -16821,8 +16815,8 @@ bool FixupAndLockIndex ( ServedIndex_c& tIdx, CSphIndex* pIdx, const CSphConfigS
 {
 	if ( pConfig )
 	{
-		CSphScopedPtr<FilenameBuilder_i> pFilenameBuilder ( CreateFilenameBuilder ( szIndexName ) );
-		if ( !sphFixupIndexSettings ( pIdx, *pConfig, g_bStripPath, pFilenameBuilder.Ptr(), dWarnings, sError ) )
+		std::unique_ptr<FilenameBuilder_i> pFilenameBuilder = CreateFilenameBuilder ( szIndexName );
+		if ( !sphFixupIndexSettings ( pIdx, *pConfig, g_bStripPath, pFilenameBuilder.get(), dWarnings, sError ) )
 			return false;
 	}
 
@@ -16834,10 +16828,10 @@ bool FixupAndLockIndex ( ServedIndex_c& tIdx, CSphIndex* pIdx, const CSphConfigS
 /// that is, local and RT indexes, but not distributed one
 bool PreallocNewIndex ( ServedIndex_c & tIdx, const CSphConfigSection * pConfig, const char * szIndexName, StrVec_t & dWarnings, CSphString & sError )
 {
-	CSphScopedPtr<FilenameBuilder_i> pFilenameBuilder ( CreateFilenameBuilder(szIndexName) );
+	std::unique_ptr<FilenameBuilder_i> pFilenameBuilder = CreateFilenameBuilder ( szIndexName );
 	CSphIndex* pIdx = UnlockedHazardIdxFromServed ( tIdx );
 	assert (pIdx);
-	if ( !pIdx->Prealloc ( g_bStripPath, pFilenameBuilder.Ptr(), dWarnings ) )
+	if ( !pIdx->Prealloc ( g_bStripPath, pFilenameBuilder.get(), dWarnings ) )
 	{
 		sError.SetSprintf ( "prealloc: %s", pIdx->GetLastError().cstr() );
 		return false;
@@ -17358,9 +17352,9 @@ static ResultAndIndex_t LoadTemplateIndex ( const char * szIndexName, const CSph
 	pIdx->SetMutableSettings ( pServed->m_tSettings );
 	pIdx->m_iExpansionLimit = g_iExpansionLimit;
 
-	CSphScopedPtr<FilenameBuilder_i> pFilenameBuilder ( CreateFilenameBuilder(szIndexName) );
+	std::unique_ptr<FilenameBuilder_i> pFilenameBuilder = CreateFilenameBuilder ( szIndexName );
 	StrVec_t dWarnings;
-	if ( !sphFixupIndexSettings ( pIdx.get(), hIndex, g_bStripPath, pFilenameBuilder.Ptr(), dWarnings, sError ) )
+	if ( !sphFixupIndexSettings ( pIdx.get(), hIndex, g_bStripPath, pFilenameBuilder.get(), dWarnings, sError ) )
 	{
 		sphWarning ( "index '%s': %s - NOT SERVING", szIndexName, sError.cstr () );
 		return { ADD_ERROR, nullptr };
@@ -18369,7 +18363,7 @@ static int	g_iNetWorkers = 1;
 // DAEMON OPTIONS
 /////////////////////////////////////////////////////////////////////////////
 
-static const QueryParser_i * PercolateQueryParserFactory ( bool bJson )
+static std::unique_ptr<QueryParser_i> PercolateQueryParserFactory ( bool bJson )
 {
 	if ( bJson )
 		return sphCreateJsonQueryParser();

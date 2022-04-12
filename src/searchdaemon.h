@@ -358,6 +358,7 @@ public:
 	void		SendBytes ( const void * pBuf, int iLen );	///< (was) protected to avoid network-vs-host order bugs
 	void		SendBytes ( const char * pBuf );    // used strlen() to get length
 	void		SendBytes ( const CSphString& sStr );    // used strlen() to get length
+	void		SendBytes ( const Str_t& sStr );
 	void		SendBytes ( const VecTraits_T<BYTE>& dBuf );
 	void		SendBytes ( const StringBuilder_c& dBuf );
 	void		SendBytes ( ByteBlob_t dData );
@@ -475,6 +476,7 @@ public:
 
 	virtual void SetWTimeoutUS ( int64_t iTimeoutUS ) = 0;
 	virtual int64_t GetWTimeoutUS () const = 0;
+	virtual int64_t GetTotalSent() const = 0;
 
 protected:
 	QueryProfile_c *	m_pProfile = nullptr;
@@ -510,7 +512,7 @@ public:
 	CSphString		GetString ();
 	CSphString		GetRawString ( int iLen );
 	bool			GetString ( CSphVector<BYTE> & dBuffer );
-	bool			GetError () { return m_bError; }
+	bool			GetError () const { return m_bError; }
 	bool			GetBytes ( void * pBuf, int iLen );
 	const BYTE *	GetBufferPtr () const { return m_pCur; }
 	int				GetBufferPos () const { return int ( m_pCur - m_pBuf ); }
@@ -1264,7 +1266,7 @@ class SearchHandler_c;
 class PubSearchHandler_c
 {
 public:
-						PubSearchHandler_c ( int iQueries, const QueryParser_i * pQueryParser, QueryType_e eQueryType, bool bMaster );
+						PubSearchHandler_c ( int iQueries, std::unique_ptr<QueryParser_i> pQueryParser, QueryType_e eQueryType, bool bMaster );
 						~PubSearchHandler_c();
 
 	void				RunQueries ();					///< run all queries, get all results
@@ -1327,12 +1329,13 @@ class QueryParser_i;
 class RequestBuilder_i;
 class ReplyParser_i;
 
-QueryParser_i * CreateQueryParser ( bool bJson );
-RequestBuilder_i * CreateRequestBuilder ( Str_t sQuery, const SqlStmt_t & tStmt );
-ReplyParser_i * CreateReplyParser ( bool bJson, int & iUpdated, int & iWarnings );
+std::unique_ptr<QueryParser_i> CreateQueryParser ( bool bJson );
+std::unique_ptr<RequestBuilder_i> CreateRequestBuilder ( Str_t sQuery, const SqlStmt_t & tStmt );
+std::unique_ptr<ReplyParser_i> CreateReplyParser ( bool bJson, int & iUpdated, int & iWarnings );
 
 enum ESphHttpStatus
 {
+	SPH_HTTP_STATUS_100,
 	SPH_HTTP_STATUS_200,
 	SPH_HTTP_STATUS_206,
 	SPH_HTTP_STATUS_400,
@@ -1343,24 +1346,6 @@ enum ESphHttpStatus
 	SPH_HTTP_STATUS_526,
 
 	SPH_HTTP_STATUS_TOTAL
-};
-
-enum ESphHttpEndpoint
-{
-	SPH_HTTP_ENDPOINT_INDEX,
-	SPH_HTTP_ENDPOINT_SQL,
-	SPH_HTTP_ENDPOINT_JSON_SEARCH,
-	SPH_HTTP_ENDPOINT_JSON_INDEX,
-	SPH_HTTP_ENDPOINT_JSON_CREATE,
-	SPH_HTTP_ENDPOINT_JSON_INSERT,
-	SPH_HTTP_ENDPOINT_JSON_REPLACE,
-	SPH_HTTP_ENDPOINT_JSON_UPDATE,
-	SPH_HTTP_ENDPOINT_JSON_DELETE,
-	SPH_HTTP_ENDPOINT_JSON_BULK,
-	SPH_HTTP_ENDPOINT_PQ,
-	SPH_HTTP_ENDPOINT_CLI,
-
-	SPH_HTTP_ENDPOINT_TOTAL
 };
 
 bool CheckCommandVersion ( WORD uVer, WORD uDaemonVersion, ISphOutputBuffer & tOut );
@@ -1376,11 +1361,8 @@ bool sphCheckWeCanModify ();
 bool sphCheckWeCanModify ( StmtErrorReporter_i & tOut );
 bool sphCheckWeCanModify ( const char* szStmt, RowBuffer_i& tOut );
 
-bool				sphLoopClientHttp ( const BYTE * pRequest, int iRequestLen, CSphVector<BYTE> & dResult );
-bool				sphProcessHttpQueryNoResponce ( ESphHttpEndpoint eEndpoint, const char * sQuery, const SmallStringHash_T<CSphString> & tOptions, CSphVector<BYTE> & dResult );
+bool				sphProcessHttpQueryNoResponce ( const CSphString& sEndpoint, const CSphString& sQuery, CSphVector<BYTE> & dResult );
 void				sphHttpErrorReply ( CSphVector<BYTE> & dData, ESphHttpStatus eCode, const char * szError );
-ESphHttpEndpoint	sphStrToHttpEndpoint ( const CSphString & sEndpoint );
-CSphString			sphHttpEndpointToStr ( ESphHttpEndpoint eEndpoint );
 
 void ExecuteApiCommand ( SearchdCommand_e eCommand, WORD uCommandVer, int iLength, InputBuffer_c & tBuf, ISphOutputBuffer & tOut );
 void HandleCommandPing ( ISphOutputBuffer & tOut, WORD uVer, InputBuffer_c & tReq );
@@ -1505,7 +1487,7 @@ public:
 			sTime.Sprintf ( "%0.2F%%", iVal*10000/iBase );
 		else
 			sTime << "100%";
-		PutString ( sTime.cstr () );
+		PutString ( sTime );
 	}
 
 	virtual void PutNumAsString ( int64_t iVal ) = 0;
@@ -1517,7 +1499,7 @@ public:
 	virtual void PutArray ( const void * pBlob, int iLen, bool bSendEmpty = false ) = 0;
 
 	// pack zero-terminated string (or "" if it is zero itself)
-	virtual void PutString ( const char * sMsg, int iMaxLen=-1 ) = 0;
+	virtual void PutString ( const char * sMsg, int iLen ) = 0;
 
 	virtual void PutMicrosec ( int64_t iUsec ) = 0;
 
@@ -1560,6 +1542,11 @@ public:
 		PutArray ( ( const char * )dData.begin(), dData.GetLength(), bSendEmpty );
 	}
 
+	void PutString ( const char* szMsg )
+	{
+		PutString ( szMsg, szMsg ? (int)strlen ( szMsg ) : 0 );
+	}
+
 	void PutString ( const CSphString & sMsg )
 	{
 		PutString ( sMsg.cstr() );
@@ -1567,7 +1554,7 @@ public:
 
 	void PutString ( const StringBuilder_c & sMsg )
 	{
-		PutString ( sMsg.cstr (), sMsg.GetLength() );
+		PutString ( sMsg.cstr(), sMsg.GetLength() );
 	}
 
 	void PutTimeAsString ( int64_t tmVal )
@@ -1579,14 +1566,14 @@ public:
 		}
 		StringBuilder_c sTime;
 		sTime.Sprintf ("%t", tmVal);
-		PutString ( sTime.cstr() );
+		PutString ( sTime );
 	}
 
 	void PutTimestampAsString ( int64_t tmTimestamp )
 	{
 		StringBuilder_c sTime;
 		sTime.Sprintf ( "%T", tmTimestamp );
-		PutString ( sTime.cstr ());
+		PutString ( sTime );
 	}
 
 	void ErrorEx ( const char * sStmt, const char * sTemplate, ... )
@@ -1637,7 +1624,7 @@ public:
 		va_start ( ap, sFmt );
 		sRight.vSprintf ( sFmt, ap );
 		va_end ( ap );
-		PutString ( sRight.cstr() );
+		PutString ( sRight );
 		return Commit();
 	}
 

@@ -28,11 +28,9 @@ if (NOT isMultiConfig AND NOT CMAKE_BUILD_TYPE)
 	message (STATUS "Automatically set build type to RelWithDebInfo since no other provided")
 endif ()
 
-if (WIN32 AND LIBS_BUNDLE)
-	message (DEBUG "CMAKE_PREFIX_PATH on top was ${CMAKE_PREFIX_PATH}")
-	LIST (APPEND CMAKE_PREFIX_PATH "${LIBS_BUNDLE}")
+if (WIN32 AND WIN_BUNDLE)
+	APPEND_PREFIX ( "${WIN_BUNDLE}")
 	set (CMAKE_FIND_PACKAGE_PREFER_CONFIG TRUE)
-	message (DEBUG "CMAKE_PREFIX_PATH became ${CMAKE_PREFIX_PATH}")
 endif ()
 
 set (BUILD_TAG "" CACHE STRING "The tag which will be added to build")
@@ -152,7 +150,7 @@ bannervar (USE_SYSLOG)
 
 # options for clang/gcc c and c++
 target_compile_options ( lextra INTERFACE $<${ONLYGNUCLANGC_CXX}:-D_FILE_OFFSET_BITS=64 -Wall -fno-strict-aliasing> )
-target_compile_options ( lextra INTERFACE $<${CLANG_CL}:-fno-strict-aliasing -Wno-format -Wno-uninitialized-const-reference -Wno-unneeded-internal-declaration
+target_compile_options ( lextra INTERFACE $<${CLANGWIN}:-fno-strict-aliasing -Wno-format -Wno-uninitialized-const-reference -Wno-unneeded-internal-declaration
 	-Wno-deprecated-declarations -Wno-implicit-const-int-float-conversion -Wno-missing-braces -Wno-unused-function> )
 
 # disable rtti
