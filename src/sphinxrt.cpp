@@ -132,17 +132,17 @@ volatile int AutoOptimizeCutoff() noexcept
 	return iAutoOptimizeCutoff;
 }
 
-volatile EnqueueForOptimizeFnPtr& EnqueueForOptimizeExecutor() noexcept
+volatile OptimizeExecutorFnPtr& OptimizeExecutor() noexcept
 {
-	static EnqueueForOptimizeFnPtr EnqueueForOptimizeFn = nullptr;
-	return EnqueueForOptimizeFn;
+	static OptimizeExecutorFnPtr OptimizeExecutorFn = nullptr;
+	return OptimizeExecutorFn;
 }
 
-void EnqueueForOptimizeWeak ( CSphString sIndex, OptimizeTask_t tTask )
+void RunOptimizeRtIndexWeak ( OptimizeTask_t tTask )
 {
-	auto * EnqueueForOptimizeFn = EnqueueForOptimizeExecutor();
-	if (EnqueueForOptimizeFn)
-		EnqueueForOptimizeFn ( std::move ( sIndex ), std::move ( tTask ) );
+	auto * OptimizeExecutorFn = OptimizeExecutor();
+	if ( OptimizeExecutorFn)
+		OptimizeExecutorFn ( std::move ( tTask ) );
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1643,8 +1643,13 @@ static void StoreAttrValue ( const InsertDocData_t & tDoc, const CSphColumnInfo 
 		tValue = (T)sphGetRowAttr ( tDoc.m_tDoc.m_pDynamic, tAttr.m_tLocator );
 
 	int iBits = tAttr.m_tLocator.m_iBitCount;
-	T uMask = iBits==64 ? (T)0xFFFFFFFFFFFFFFFFULL : (T)( (1ULL<<iBits)-1 );
-	tValue &= uMask;
+	if ( tAttr.m_eAttrType==SPH_ATTR_BOOL )
+		tValue = tValue ? 1 : 0;
+	else
+	{
+		T uMask = iBits==64 ? (T)0xFFFFFFFFFFFFFFFFULL : (T)( (1ULL<<iBits)-1 );
+		tValue &= uMask;
+	}
 
 	dTmpStorage.Resize ( sizeof(tValue) );
 	memcpy ( dTmpStorage.Begin(), &tValue, dTmpStorage.GetLength() );
@@ -3000,7 +3005,8 @@ RtSegment_t* RtIndex_c::MergeTwoSegments ( const RtSegment_t* pA, const RtSegmen
 	auto * pSeg = new RtSegment_t (0);
 	FakeWL_t _ { pSeg->m_tLock }; // as pSeg is just created - we don't need real guarding and use fake lock to mute thread safety warnings
 
-	if ( m_tSchema.HasStoredFields() || m_tSchema.HasStoredAttrs() )
+	assert ( !!pA->m_pDocstore==!!pB->m_pDocstore );
+	if ( ( m_tSchema.HasStoredFields() || m_tSchema.HasStoredAttrs() ) && pA->m_pDocstore && pB->m_pDocstore )
 		pSeg->SetupDocstore ( &m_tSchema );
 
 	// we might need less because of killed, but we can not know yet. Reserving more than necessary is strictly not desirable!
@@ -7246,7 +7252,7 @@ static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tR
 		int iTick=1; // num of times coro rescheduled by throttler
 		while ( !bInterrupt ) // some earlier job met error; abort.
 		{
-			myinfo::SetThreadInfo ( "%d ch %d:", iTick, iChunk );
+			myinfo::SetTaskInfo ( "%d ch %d:", iTick, iChunk );
 			auto & dLocalSorters = tCtx.m_dSorters;
 			CSphQueryResultMeta tChunkMeta;
 			CSphQueryResult tChunkResult;
@@ -7279,7 +7285,7 @@ static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tR
 			if ( tThMeta.m_bHasPrediction )
 				tThMeta.m_tStats.Add ( tChunkMeta.m_tStats );
 
-			if ( iChunk && tmMaxTimer>0 && sph::TimeExceeded ( tmMaxTimer ) )
+			if ( iChunk && sph::TimeExceeded ( tmMaxTimer ) )
 			{
 				tThMeta.m_sWarning = "query time exceeded max_query_time";
 				bInterrupt = true;
@@ -7465,7 +7471,7 @@ static bool PerformFullscan ( const VecTraits_T<RtSegmentRefPtf_t> & dRamChunks,
 					return true;
 
 			// handle timer
-			if ( tmMaxTimer && sph::TimeExceeded ( tmMaxTimer ) )
+			if ( sph::TimeExceeded ( tmMaxTimer ) )
 			{
 				sWarning = "query time exceeded max_query_time";
 				return true;
@@ -7791,10 +7797,8 @@ bool RtIndex_c::MultiQuery ( CSphQueryResult & tResult, const CSphQuery & tQuery
 
 	tMeta.m_bHasPrediction = tQuery.m_iMaxPredictedMsec>0;
 
-	int64_t tmMaxTimer = 0;
-	sph::MiniTimer_c dTimerGuard;
-	if ( tQuery.m_uMaxQueryMsec>0 )
-		tmMaxTimer = dTimerGuard.MiniTimerEngage ( tQuery.m_uMaxQueryMsec ); // max_query_time
+	MiniTimer_c dTimerGuard;
+	int64_t tmMaxTimer = dTimerGuard.Engage ( tQuery.m_uMaxQueryMsec ); // max_query_time
 
 	SorterSchemaTransform_c tSSTransform ( dDiskChunks.GetLength(), tArgs.m_bFinalizeSorters );
 
@@ -7833,8 +7837,7 @@ bool RtIndex_c::MultiQuery ( CSphQueryResult & tResult, const CSphQuery & tQuery
 	tTermSetup.SetDict ( pDict );
 	tTermSetup.m_pIndex = this;
 	tTermSetup.m_iDynamicRowitems = tMaxSorterSchema.GetDynamicSize();
-	if ( tQuery.m_uMaxQueryMsec>0 )
-		tTermSetup.m_iMaxTimer = dTimerGuard.MiniTimerEngage ( tQuery.m_uMaxQueryMsec ); // max_query_time
+	tTermSetup.m_iMaxTimer = dTimerGuard.Engage ( tQuery.m_uMaxQueryMsec ); // max_query_time
 	tTermSetup.m_pWarning = &tMeta.m_sWarning;
 	tTermSetup.SetSegment ( -1 );
 	tTermSetup.m_pCtx = &tCtx;
@@ -9801,10 +9804,11 @@ void RtIndex_c::CheckStartAutoOptimize()
 	OptimizeTask_t tTask;
 	tTask.m_eVerb = OptimizeTask_t::eAutoOptimize;
 	tTask.m_iCutoff = iCutoff;
+	tTask.m_sIndex = m_sIndexName;
 
-	RTDLOG << "EnqueueForOptimizeWeak for " << m_sIndexName << ", auto-optimize with cutoff " << iCutoff;
+	RTDLOG << "RunOptimizeRtIndexWeak for " << m_sIndexName << ", auto-optimize with cutoff " << iCutoff;
 
-	EnqueueForOptimizeWeak ( m_sIndexName, tTask );
+	RunOptimizeRtIndexWeak ( tTask );
 }
 
 

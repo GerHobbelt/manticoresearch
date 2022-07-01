@@ -30,7 +30,7 @@ else ()
 	set ( MYVER "${CPACK_RPM_PACKAGE_VERSION}-${CPACK_RPM_PACKAGE_RELEASE}%{?dist}" )
 endif ()
 set ( CPACK_RPM_PACKAGE_GROUP "Applications/Internet" )
-set ( CPACK_RPM_PACKAGE_ARCHITECTURE ${CMAKE_SYSTEM_PROCESSOR})
+set ( CPACK_RPM_PACKAGE_ARCHITECTURE ${CMAKE_SYSTEM_PROCESSOR} )
 
 set ( CPACK_RPM_SEARCHD_PACKAGE_NAME "manticore-server-core" )
 set ( CPACK_RPM_SEARCHD_PACKAGE_REQUIRES "manticore-common = ${MYVER}" )
@@ -49,6 +49,7 @@ set ( CPACK_RPM_DEVEL_PACKAGE_NAME "manticore-devel" )
 set ( CPACK_RPM_DEVEL_PACKAGE_ARCHITECTURE noarch )
 
 set ( CPACK_RPM_ICUDATA_PACKAGE_NAME "manticore-icudata" )
+set ( CPACK_RPM_ICUDATA_FILE_NAME "manticore-icudata.rpm" )
 set ( CPACK_RPM_ICUDATA_PACKAGE_ARCHITECTURE noarch )
 
 set ( CPACK_RPM_COMMON_PACKAGE_NAME "manticore-common" )

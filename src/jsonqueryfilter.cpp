@@ -607,6 +607,7 @@ JsonObj_c FilterTreeConstructor_c::GetFilterColumn ( const JsonObj_c & tJson )
 	return tColumn;
 }
 
+static void SetMvaFilterFunc ( CSphFilterSettings & tFilter );
 
 std::unique_ptr<FilterTreeNode_t> FilterTreeConstructor_c::ConstructInFilter ( const JsonObj_c & tJson )
 {
@@ -626,7 +627,7 @@ std::unique_ptr<FilterTreeNode_t> FilterTreeConstructor_c::ConstructInFilter ( c
 
 	tFilter.m_sAttrName = tColumn.Name();
 	sphColumnToLowercase ( const_cast<char *>( tFilter.m_sAttrName.cstr() ) );
-
+	SetMvaFilterFunc ( tFilter );
 
 	if ( tColumn.Size() )
 	{
@@ -713,6 +714,23 @@ std::unique_ptr<FilterTreeNode_t> FilterTreeConstructor_c::ConstructFilter ( con
 	return nullptr;
 }
 
+void SetMvaFilterFunc ( CSphFilterSettings & tFilter )
+{
+	bool bAll = tFilter.m_sAttrName.Begins ( "all(" );
+	bool bAny = tFilter.m_sAttrName.Begins ( "any(" );
+	if ( !bAll && !bAny )
+		return;
+
+	int iLen = tFilter.m_sAttrName.Length();
+	if ( iLen<5 )
+		return;
+
+	CSphString sName;
+	sName.SetBinary ( tFilter.m_sAttrName.cstr()+4, iLen-5 );
+	tFilter.m_sAttrName.Swap ( sName );
+
+	tFilter.m_eMvaFunc = ( bAll ? SPH_MVAFUNC_ALL : SPH_MVAFUNC_ANY );
+}
 
 std::unique_ptr<FilterTreeNode_t> FilterTreeConstructor_c::ConstructEqualsFilter ( const JsonObj_c & tJson )
 {
@@ -732,6 +750,7 @@ std::unique_ptr<FilterTreeNode_t> FilterTreeConstructor_c::ConstructEqualsFilter
 
 	tFilter.m_sAttrName = tColumn.Name();
 	sphColumnToLowercase ( const_cast<char *>( tFilter.m_sAttrName.cstr() ) );
+	SetMvaFilterFunc ( tFilter );
 
 	if ( tColumn.IsInt() )
 	{

@@ -2,7 +2,7 @@
 
 To install Manticore in Windows you need to download zip archive and unpack it into a folder.
 
-1. Download [Manticore bundle](https://repo.manticoresearch.com/repository/manticoresearch_windows/release/x64/manticore-5.0.2-220530-348514c86-main.zip) and [Manticore Columnar Library](https://repo.manticoresearch.com/repository/manticoresearch_windows/release/x64/manticore-columnar-lib-1.15.4-220522-2fef34e-x64.zip)
+1. Download [Manticore bundle](https://repo.manticoresearch.com/repository/manticoresearch_windows/release/x64/manticore-5.0.2-220530-348514c86-main.zip) and [Manticore Columnar Library](https://repo.manticoresearch.com/repository/manticoresearch_windows/release/x64/manticore-columnar-lib-1.15.4-220522-2fef34e-x64.zip). Sometimes you may also need Windows redistributable runtime libraries.
 2. Create a folder, e.g. `C:\Manticore`
 3. Move the archives into it and extract files from them:
    * `unzip manticore-5.0.2-220530-348514c86-main.zip`
