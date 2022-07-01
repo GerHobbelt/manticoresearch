@@ -4,10 +4,6 @@
   </a>
 </p>
 
-<h1 align="center">
-  Manticore Search 5.0.0
-</h1>
-
 <h3 align="center">
   <a href="https://manticoresearch.com">Website</a> •
   <a href="http://bit.ly/2Q9uGj4">Downloads</a> •
@@ -22,23 +18,28 @@
 
 # Introduction
 
-<span class="badge-geekswag">
-<a href="https://geekswag.co/collections/manticore-search" title="Get Our Merch"><img src="https://img.shields.io/badge/Geekswag-Get%20Our%20Merch-brightgreen" alt="Get Manticore merch" /></a>
+⭐ Star us on GitHub — it motivates us a lot!
 
 Manticore Search is an easy to use open source fast database for search. What distinguishes it from other solutions is:
-* Modern MPP architecture and smart query parallelization capabilities allow to fully utilize all your CPU cores to lower response time as much as possible, when needed.
-* Powerful and fast full-text searching which works fine for small and big datasets
-* Traditional row-wise storage for small, medium and big size datasets
-* Columnar storage support via the [Manticore Columnar Library](https://github.com/manticoresoftware/columnar/) for bigger datasets (much bigger than can fit in RAM)
-* SQL-first: Manticore's native syntax is SQL. It speaks SQL over HTTP and uses the MySQL protocol (you can use your preferred MySQL client)
-* Clients for [PHP](https://github.com/manticoresoftware/manticoresearch-php), [Python](https://github.com/manticoresoftware/manticoresearch-python), [JavaScript](https://github.com/manticoresoftware/manticoresearch-javascript), [Java](https://github.com/manticoresoftware/manticoresearch-java), [Elixir](https://github.com/manticoresoftware/manticoresearch-elixir) and [Go](https://github.com/manticoresoftware/go-sdk)
-* JSON over HTTP: to provide a more programmatic way to manage your data and schemas, Manticore provides a HTTP JSON protocol
-* Written fully in C++: starts fast, doesn't take much RAM, and low-level optimizations provide good performance
-* Real-time inserts: after an INSERT is made, the document can be read immediately
-* [Interactive courses](https://play.manticoresearch.com/) for easier learning
-* Built-in replication and load balancing
-* Can sync from MySQL/PostgreSQL/ODBC/xml/csv out of the box
-* Not fully ACID-compliant, but supports transactions and binlog for safe writes
+* It's very fast: 
+  - **182x faster** than MySQL for [small data](https://db-benchmarks.com/test-hn-small/#mysql-vs-manticore-search).
+  - **29x faster** than Elasticsearch for [log analytics](https://db-benchmarks.com/test-logs10m/#elasticsearch-with-no-tuning-vs-manticore-search-default-row-wise-storage).
+  - **15x faster** than Elasticsearch for [small dataset](https://db-benchmarks.com/test-hn-small/#manticore-search-vs-elasticsearch).
+  - **5x faster** than Elasticsearch for [medium-size data](https://db-benchmarks.com/test-hn/#manticore-search-columnar-storage-vs-elasticsearch).
+  - **4x faster** than Elasticsearch for [big data](https://db-benchmarks.com/test-taxi/#manticore-search-vs-elasticsearch).
+* Modern MPP architecture and smart query parallelization capabilities allow to fully utilize all your CPU cores to **lower response time** as much as possible, when needed.
+* Powerful and fast full-text searching which **works fine for small and big datasets**
+* Traditional **row-wise storage** for small, medium and big size datasets
+* **Columnar storage** support via the [Manticore Columnar Library](https://github.com/manticoresoftware/columnar/) for bigger datasets (much bigger than can fit in RAM)
+* SQL-first: Manticore's **native syntax is SQL**. It speaks SQL over HTTP and uses the MySQL protocol (you can use your preferred MySQL client)
+* **Clients** for [PHP](https://github.com/manticoresoftware/manticoresearch-php), [Python](https://github.com/manticoresoftware/manticoresearch-python), [JavaScript](https://github.com/manticoresoftware/manticoresearch-javascript), [Java](https://github.com/manticoresoftware/manticoresearch-java), [Elixir](https://github.com/manticoresoftware/manticoresearch-elixir) and [Go](https://github.com/manticoresoftware/go-sdk)
+* **JSON over HTTP**: to provide a more programmatic way to manage your data and schemas, Manticore provides a HTTP JSON protocol
+* Written fully in C++: **starts fast, doesn't take much RAM**, and low-level optimizations provide good performance
+* **Real-time inserts**: after an INSERT is made, the document can be read immediately
+* [Interactive courses](https://play.manticoresearch.com/) for **easier learning**
+* **Built-in replication and load balancing**
+* **Can sync** from MySQL/PostgreSQL/ODBC/xml/csv out of the box
+* Not fully ACID-compliant, but **supports transactions and binlog** for safe writes
 
 [Craigslist](https://www.craigslist.org/), [Socialgist](https://socialgist.com/), [PubChem](https://pubchem.ncbi.nlm.nih.gov/) and many others use Manticore for efficient searching and stream filtering.
 
@@ -139,7 +140,7 @@ sudo apt install manticore manticore-columnar-lib
 
 ### Homebrew on MacOS
 ```
-brew install manticoresearch
+brew install manticoresoftware/manticore/manticoresearch
 ```
 
 ### Windows
@@ -156,6 +157,13 @@ See [instruction here](https://manual.manticoresearch.com/Installation/MacOS).
   * [Manticore Community Forum](https://forum.manticoresearch.com/)
   * [Public Slack chat](http://slack.manticoresearch.com/)
   * [Bug tracker](https://github.com/manticoresoftware/manticore/issues)
+
+# Third-party integrations
+  * https://dev.tiki.org/Manticore-Search - TikiWiki CMS Groupware integration
+  * https://github.com/EvilFreelancer/laravel-manticoresearch - Laravel ManticoreSearch plugin
+  * https://www.mediawiki.org/wiki/Extension:SphinxSearch - extension for MediaWiki
+  * https://github.com/gordonbanderson/silverstripe-manticore-search - integration for SilverStripe
+  * https://drwho.virtadpt.net/archive/2022-05-13/combining-manticore-and-searx/ - integration for SearX
 
 # How we can support you
 Should your company require any help - we provide full-cycle services in the areas of Sphinx and Manticore Search:
