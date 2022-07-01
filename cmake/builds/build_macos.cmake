@@ -13,7 +13,7 @@ if (NOT installed)
 	# configure specific stuff
 	set ( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -arch ${CMAKE_SYSTEM_PROCESSOR}" )
 	set ( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -arch ${CMAKE_SYSTEM_PROCESSOR}" )
-	set ( CPACK_SUFFIX "-osx${CMAKE_OSX_DEPLOYMENT_TARGET}-${CMAKE_SYSTEM_PROCESSOR}" )
+	set ( CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_FILE_NAME}-osx${CMAKE_OSX_DEPLOYMENT_TARGET}-${CMAKE_SYSTEM_PROCESSOR}" )
 	set ( installed ON )
 endif ()
 
@@ -45,6 +45,6 @@ install ( FILES example.sql DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT tools 
 install ( DIRECTORY misc/stopwords DESTINATION ${CMAKE_INSTALL_DATADIR}/manticore COMPONENT common )
 install ( DIRECTORY DESTINATION ${CMAKE_INSTALL_DATADIR}/manticore/modules COMPONENT common )
 
-if (WITH_ICU)
+if (WITH_ICU AND WITH_ICU_FORCE_STATIC)
 	install_icudata ( ${CMAKE_INSTALL_DATADIR}/manticore/icu )
 endif ()

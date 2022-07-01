@@ -83,6 +83,7 @@ set ( CPACK_DEBIAN_COMMON_PACKAGE_CONTROL_EXTRA "${dircommon}/conffiles;${dircom
 set ( CPACK_DEBIAN_COMMON_PACKAGE_SUGGESTS "manticore-icudata-65l" )
 set ( CPACK_DEBIAN_COMMON_PACKAGE_REPLACES "${breaks}" )
 set ( CPACK_DEBIAN_COMMON_PACKAGE_BREAKS "${breaks}" )
+set ( CPACK_DEBIAN_COMMON_PACKAGE_ARCHITECTURE all )
 
 set ( CPACK_DEBIAN_META_PACKAGE_NAME "manticore" )
 seta ( CPACK_DEBIAN_META_PACKAGE_DEPENDS "manticore-server (= ${CPACK_PACKAGE_VERSION}), manticore-tools (= ${CPACK_PACKAGE_VERSION}), manticore-dev (= ${CPACK_PACKAGE_VERSION}), manticore-icudata-65l" )
@@ -183,7 +184,7 @@ install ( FILES example.sql DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT tools 
 install ( DIRECTORY misc/stopwords DESTINATION ${CMAKE_INSTALL_DATADIR}/manticore COMPONENT common )
 install ( DIRECTORY DESTINATION ${CMAKE_INSTALL_DATADIR}/manticore/modules COMPONENT common )
 
-if (WITH_ICU)
+if (WITH_ICU AND WITH_ICU_FORCE_STATIC)
 	install_icudata ( ${CMAKE_INSTALL_DATADIR}/manticore/icu )
 endif ()
 
