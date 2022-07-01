@@ -47,6 +47,7 @@ public:
 	ESphCollation m_eCollation { GlobalCollation () };
 	Profile_e			m_eProfile { Profile_e::NONE };
 	bool m_bPersistent = false;
+	static int m_iVips;
 
 private:
 	ClientSession_c* 	m_pSession = nullptr;
@@ -71,6 +72,7 @@ public:
 
 	void SetVip ( bool bVip ) { m_bVip = bVip; }
 	bool GetVip() const { return m_bVip; }
+	inline static int GetVips() { return m_iVips; }
 
 	void SetReadOnly ( bool bReadOnly ) { m_bReadOnly = bReadOnly; }
 	bool GetReadOnly() const { return m_bReadOnly; }
@@ -109,8 +111,6 @@ public:
 	static ClientTaskInfo_t& Info ( bool bStrict = false );
 };
 
-using ScopedClientInfo_t = ScopedInfo_T<ClientTaskInfo_t>;
-
 namespace session {
 
 	inline ClientTaskInfo_t & Info (bool bStrict=false){ return ClientTaskInfo_t::Info(bStrict); }
@@ -133,6 +133,7 @@ namespace session {
 
 	inline void SetVip ( bool bVip ) { ClientTaskInfo_t::Info().SetVip (bVip); }
 	inline bool GetVip() { return ClientTaskInfo_t::Info().GetVip(); }
+	inline int GetVips() { return ClientTaskInfo_t::GetVips(); }
 
 	inline void SetReadOnly ( bool bReadOnly ) { ClientTaskInfo_t::Info().SetReadOnly (bReadOnly); }
 	inline bool GetReadOnly() { return ClientTaskInfo_t::Info().GetReadOnly(); }
@@ -168,10 +169,16 @@ namespace session {
 } // namespace session
 
 namespace myinfo {
-	// num of client tasks
+	// num of client tasks, not including vips
 	inline int CountClients ()
 	{
-		return Count ( ClientTaskInfo_t::m_eTask );
+		return Count ( ClientTaskInfo_t::m_eTask ) - session::GetVips();
+	}
+
+	// num of real tasks (that is mini-info + client-info)
+	inline int CountTasks()
+	{
+		return Count ( MiniTaskInfo_t::m_eTask ) + Count ( ClientTaskInfo_t::m_eTask );
 	}
 
 } // namespace myinfo

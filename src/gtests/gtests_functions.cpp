@@ -479,7 +479,7 @@ TEST ( functions, strinbguilder_appendf )
 
 struct EscapeQuotation_t : public BaseQuotation_t
 {
-	inline static bool IsEscapeChar ( char c )
+	static constexpr bool IsEscapeChar ( char c )
 	{
 		return ( c=='\\' || c=='\'' );
 	}
@@ -800,6 +800,7 @@ TEST ( functions, Log2 )
 	EXPECT_EQ ( nlog2 ( 0xfffffffffffffffeULL ), 64 );
 	EXPECT_EQ ( nlog2 ( 0xefffffffffffffffULL ), 64 );
 	ASSERT_EQ ( sphLog2 ( 0x7fffffffffffffffULL ), 63 );
+	EXPECT_EQ ( sphLog2 ( 0 ), 0 );
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -2912,9 +2913,9 @@ TEST ( functions, histogram )
 		tFilter.m_fMinValue = 0.0f;
 		tFilter.m_fMaxValue = 10.0f;
 
-		int64_t iRes = 0;
-		pHist->EstimateRsetSize ( tFilter, iRes );
-		ASSERT_EQ( iRes, 3 );
+		HistogramRset_t tRes;
+		pHist->EstimateRsetSize ( tFilter, tRes );
+		ASSERT_EQ( tRes.m_iTotal, 3 );
 	}
 }
 

@@ -1,11 +1,11 @@
 <p align="center">
   <a href="https://manticoresearch.com" target="_blank" rel="noopener">
-    <img src="https://manticoresearch.com/wp-content/uploads/2019/12/manticore-logo-central-M-1.png" width="140" alt="Manicore Search Logo">
+    <img src="https://manticoresearch.com/images/logo.svg" width="50%" alt="Manicore Search Logo">
   </a>
 </p>
 
 <h1 align="center">
-  Manticore Search 4.2.0
+  Manticore Search 5.0.0
 </h1>
 
 <h3 align="center">
@@ -23,15 +23,15 @@
 # Introduction
 
 <span class="badge-geekswag">
-<a href="https://geekswag.co/collections/manticore-search" title="Get Our Merch"><img src="https://img.shields.io/badge/Geekswag-Get%20Our%20Merch-brightgreen" alt="Get a Merch donate button" /></a>
+<a href="https://geekswag.co/collections/manticore-search" title="Get Our Merch"><img src="https://img.shields.io/badge/Geekswag-Get%20Our%20Merch-brightgreen" alt="Get Manticore merch" /></a>
 
-Manticore Search is a multi-storage database designed specifically for search, including full-text search. What distinguishes it from other solutions is:
+Manticore Search is an easy to use open source fast database for search. What distinguishes it from other solutions is:
 * Modern MPP architecture and smart query parallelization capabilities allow to fully utilize all your CPU cores to lower response time as much as possible, when needed.
 * Powerful and fast full-text searching which works fine for small and big datasets
 * Traditional row-wise storage for small, medium and big size datasets
 * Columnar storage support via the [Manticore Columnar Library](https://github.com/manticoresoftware/columnar/) for bigger datasets (much bigger than can fit in RAM)
 * SQL-first: Manticore's native syntax is SQL. It speaks SQL over HTTP and uses the MySQL protocol (you can use your preferred MySQL client)
-* Clients for [PHP](https://github.com/manticoresoftware/manticoresearch-php), [Python](https://github.com/manticoresoftware/manticoresearch-python), [JavaScript](https://github.com/manticoresoftware/manticoresearch-javascript), [Java](https://github.com/manticoresoftware/manticoresearch-java) and [Go](https://github.com/manticoresoftware/go-sdk)
+* Clients for [PHP](https://github.com/manticoresoftware/manticoresearch-php), [Python](https://github.com/manticoresoftware/manticoresearch-python), [JavaScript](https://github.com/manticoresoftware/manticoresearch-javascript), [Java](https://github.com/manticoresoftware/manticoresearch-java), [Elixir](https://github.com/manticoresoftware/manticoresearch-elixir) and [Go](https://github.com/manticoresoftware/go-sdk)
 * JSON over HTTP: to provide a more programmatic way to manage your data and schemas, Manticore provides a HTTP JSON protocol
 * Written fully in C++: starts fast, doesn't take much RAM, and low-level optimizations provide good performance
 * Real-time inserts: after an INSERT is made, the document can be read immediately
@@ -121,7 +121,7 @@ Read [the full instruction for the docker image](https://dockr.ly/33biV0U) for m
 
 ### Packages
 
-## [Ubuntu, Debian, Centos, Windows and MacOS packages are here](https://www.manticoresearch.com/downloads).
+## [Ubuntu, Debian, Centos, Windows and MacOS packages are here](https://manticoresearch.com/install/).
 
 ### YUM repo for RHEL/Centos
 ```
@@ -145,14 +145,14 @@ brew install manticoresearch
 ### Windows
 See [instruction here](https://manual.manticoresearch.com/Installation/Windows).
 
-### MacOS .dmg
+### MacOS tarball
 See [instruction here](https://manual.manticoresearch.com/Installation/MacOS).
 
 
 # Documentation and community sites
 
-  * [Interactive courses](https://play.manticoresearch.com)
   * [Documentation](https://manual.manticoresearch.com)
+  * [Interactive courses](https://play.manticoresearch.com)
   * [Manticore Community Forum](https://forum.manticoresearch.com/)
   * [Public Slack chat](http://slack.manticoresearch.com/)
   * [Bug tracker](https://github.com/manticoresoftware/manticore/issues)

@@ -498,7 +498,7 @@ max_batch_queries = 256
 ### max_connections
 
 <!-- example max_connections -->
-Maximum number of simultaneous client connections. Unlimited by default. That is usually noticeable only when using any kind of persistent connections, like cli mysql sessions or persistent remote connections from remote distributed indexes. When the limit is exceeded you can still connect to the server using the [VIP connection](../Connecting_to_the_server/MySQL_protocol.md#VIP-connection)
+Maximum number of simultaneous client connections. Unlimited by default. That is usually noticeable only when using any kind of persistent connections, like cli mysql sessions or persistent remote connections from remote distributed indexes. When the limit is exceeded you can still connect to the server using the [VIP connection](../Connecting_to_the_server/MySQL_protocol.md#VIP-connection). VIP connections are not counted towards the limit.
 
 <!-- request Example -->
 ```ini
@@ -828,7 +828,7 @@ preopen_indexes = 1
 ### pseudo_sharding
 
 <!-- example conf pseudo_sharding -->
-Enables pseudo-sharding for search queries to plain and real-time indexes, no matter if they are queried directly or through a distributed index. Any search query to a local index will be automatically parallelized to up to `searchd.threads` # of threads. 
+Enables pseudo-sharding for search queries to plain and real-time indexes, no matter if they are queried directly or through a distributed index. Any search query to a local index will be automatically parallelized to up to `searchd.threads` # of threads.
 
 Note that if your worker threads are already busy, because you have:
 * high query concurrency
@@ -1082,6 +1082,21 @@ seamless_rotate = 1
 ```
 <!-- end -->
 
+### secondary_indexes
+<!-- example conf secondary_indexes -->
+
+Enables using secondary indexes for search queries. Note, you don't need to enable it for indexing (it's always enabled). Requires [Manticore Columnar Library](https://github.com/manticoresoftware/columnar).
+
+<!-- intro -->
+##### Example:
+
+<!-- request Example -->
+
+```ini
+secondary_indexes = 1
+```
+
+<!-- end -->
 
 ### server_id
 
@@ -1103,7 +1118,7 @@ server_id = 1
 ### shutdown_timeout
 
 <!-- example conf shutdown_timeout -->
-`searchd --stopwait` waiting time, in seconds (or [special_suffixes](../Server_settings/Special_suffixes.md)). Optional, default is 3 seconds.
+`searchd --stopwait` waiting time, in seconds (or [special_suffixes](../Server_settings/Special_suffixes.md)). Optional, default is 60 seconds.
 
 When you run `searchd --stopwait` your server needs to perform some activities before stopping like finishing queries, flushing RT RAM chunk, flushing attributes and updating binlog. And it requires some time. `searchd --stopwait` will wait up to `shutdown_time` seconds for server to finish its jobs. Suitable time depends on your index size and load.
 
@@ -1114,7 +1129,7 @@ When you run `searchd --stopwait` your server needs to perform some activities b
 <!-- request Example -->
 
 ```ini
-shutdown_timeout = 1m # wait for up to 60 seconds
+shutdown_timeout = 3m # wait for up to 3 minutes
 ```
 <!-- end -->
 
@@ -1313,13 +1328,13 @@ threads = 10
 ### thread_stack
 
 <!-- example conf thread_stack -->
-Maximum stack size for a job (coroutine, one search query may cause multiple jobs/coroutines). Optional, default is unlimited.
+Maximum stack size for a job (coroutine, one search query may cause multiple jobs/coroutines). Optional, default is 128K.
 
-Each job has it's own stack of 128K. When you run a query it's checked for how much stack it requires. If the default 128K is enough, it's just processed. If it needs more we schedule another job with increased stack, which continues processing. The maximum size of such advanced stack is limited by this setting.
+Each job has it's own stack of 128K. When you run a query it's checked for how much stack it requires. If the default 128K is enough, it's just processed. If it needs more we schedule another job with an increased stack, which continues processing. The maximum size of such advanced stack is limited by this setting.
 
 Setting the value to a reasonably high rate will help with processing very deep queries without implication, that overall RAM consumption will grow too high. For example, setting it to 1G does not imply that every new job will take 1G of RAM, but if we see that it requires let's say 100M stack, we just allocate 100M for the job. Other jobs at the same time will be running with their default 128K stack. The same way we can run even more complex queries that need 500M. And if only if we **see** internally that the job requires more than 1G of stack we will fail and report about too low thread_stack.
 
-However in practice even a query which needs 16M of stack is often too complex for parsing, and consumes too much time and resources to be processed. So, the daemon will process it, but limiting such queries by the thread_stack setting looks quite reasonable.
+However in practice even a query which needs 16M of stack is often too complex for parsing, and consumes too much time and resources to be processed. So, the daemon will process it, but limiting such queries by the `thread_stack` setting looks quite reasonable.
 
 
 <!-- intro -->

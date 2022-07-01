@@ -219,7 +219,7 @@ with_get (icu "ICU" "International Components for Unicode")
 
 # Support for OpenSSL
 with_menu_comp (OpenSSL SSL "OpenSSL" "for encrypted networking")
-win_install_c(OpenSSL SSL)
+win_install_c(OpenSSL SSL daemon)
 
 trace (OpenSSL::Crypto)
 
@@ -242,7 +242,7 @@ dl_package (ODBC "ODBC/UnixODBC/iODBC")
 # EXPAT and it's dynamic linking
 with_menu (EXPAT "expat" "for indexing xmlpipe sources with indexer")
 dl_package (EXPAT "expat")
-win_install (EXPAT)
+win_install (EXPAT common)
 
 # test for ICONV
 if (WITH_EXPAT)
@@ -251,7 +251,7 @@ if (WITH_EXPAT)
 		set_target_properties(Iconv::Iconv PROPERTIES INTERFACE_COMPILE_DEFINITIONS LIBICONV_PLUG)
 	else()
 		dl_package (Iconv "iconv")
-		win_install (Iconv)
+		win_install (Iconv common)
 	endif()
 	include (check_const_iconv)
 	diag(Iconv_IS_BUILT_IN)
@@ -264,12 +264,12 @@ if (WITH_STATIC_MYSQL)
 endif()
 with_menu (Mysql "mysql" "for indexing mysql sources with indexer")
 dl_package (Mysql "mysql")
-win_install (Mysql)
+win_install (Mysql indexer)
 
 # PostgreSQL and it's dynamic linking
 with_menu (PostgreSQL "pgsql" "for indexing postgresql sources with indexer")
 dl_package (PostgreSQL "pgsql")
-win_install (PostgreSQL)
+win_install (PostgreSQL indexer)
 
 # Storing compiler version
 set (COMPILER "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
@@ -285,48 +285,39 @@ diag(SPLIT)
 configure_file ("COPYING" "${MANTICORE_BINARY_DIR}/COPYING.txt" COPYONLY)
 include (CommonInfo)
 
-# select distribution build and install rules for most of the files
+include ( ${MANTICORE_SOURCE_DIR}/sphinxrev.cmake )
+
+# set final paths for build
+set ( only_set_paths ON )
 include (SetBuildType)
 
 diag (installed)
 if (NOT installed) # GNUInstallDirs wasn't yet included...
-	include (GNUInstallDirs)
-	set (CMAKE_INSTALL_DOCDIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/manticore")
-	GNUInstallDirs_get_absolute_install_dir (CMAKE_INSTALL_FULL_DOCDIR CMAKE_INSTALL_DOCDIR DOCDIR)
-endif ()
-
-cmake_print_variables (CMAKE_INSTALL_PREFIX)
-foreach (var BINDIR SBINDIR LIBEXECDIR SYSCONFDIR SHAREDSTATEDIR LOCALSTATEDIR RUNSTATEDIR LIBDIR INCLUDEDIR OLDINCLUDEDIR DATAROOTDIR DATADIR INFODIR LOCALEDIR MANDIR DOCDIR)
-	cmake_print_variables (CMAKE_INSTALL_${var} CMAKE_INSTALL_FULL_${var})
-endforeach ()
-
-# a bit of default installation stuff, is in game if no distr build asked
-if (NOT installed) # that is set in cmake/builds/build_*
-	SET (LOCALDATADIR "${CMAKE_INSTALL_FULL_LOCALSTATEDIR}/data") # will be used also in the app
+	include ( GNUInstallDirs )
+	SET ( LOCALDATADIR "${CMAKE_INSTALL_FULL_LOCALSTATEDIR}/data" ) # will be used also in the app
 	if (WIN32)
-		set (CMAKE_INSTALL_DOCDIR "${CMAKE_INSTALL_DATAROOTDIR}/doc")
-		GNUInstallDirs_get_absolute_install_dir (CMAKE_INSTALL_FULL_DOCDIR CMAKE_INSTALL_DOCDIR DOCDIR)
-
-		SET (FULL_SHARE_DIR "${CMAKE_INSTALL_FULL_DATADIR}")
-		install (DIRECTORY api doc contrib DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT applications)
-		install (FILES example.sql DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT applications)
-		install (DIRECTORY misc/stopwords DESTINATION ${CMAKE_INSTALL_DATADIR} COMPONENT applications)
-		install (FILES COPYING INSTALL manticore.conf.in DESTINATION . COMPONENT applications)
-		install (DIRECTORY DESTINATION ${CMAKE_INSTALL_LOCALSTATEDIR}/log COMPONENT applications)
-		install (DIRECTORY DESTINATION ${CMAKE_INSTALL_LOCALSTATEDIR}/data COMPONENT applications)
+		set ( CMAKE_INSTALL_DOCDIR "${CMAKE_INSTALL_DATAROOTDIR}/doc" )
+		SET ( FULL_SHARE_DIR "${CMAKE_INSTALL_FULL_DATADIR}" )
+		install ( DIRECTORY api doc contrib DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT common )
+		install ( FILES example.sql DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT tools )
+		install ( DIRECTORY misc/stopwords DESTINATION ${CMAKE_INSTALL_DATADIR} COMPONENT common )
+		install ( FILES COPYING INSTALL manticore.conf.in DESTINATION . COMPONENT common )
+		install ( DIRECTORY DESTINATION ${CMAKE_INSTALL_LOCALSTATEDIR}/log COMPONENT searchd )
+		install ( DIRECTORY DESTINATION ${CMAKE_INSTALL_LOCALSTATEDIR}/data COMPONENT common )
 		if (WITH_ICU)
-			install_icudata (${CMAKE_INSTALL_DATADIR}/icu)
+			install_icudata ( ${CMAKE_INSTALL_DATADIR}/icu )
 		endif ()
 	else ()
-		configure_config (lib/manticore)
-		SET (FULL_SHARE_DIR "${CMAKE_INSTALL_FULL_DATADIR}/manticore")
-		install (FILES ${MANTICORE_BINARY_DIR}/manticore.conf DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/manticoresearch COMPONENT applications)
-		install (DIRECTORY misc/stopwords DESTINATION ${CMAKE_INSTALL_DATADIR}/manticore COMPONENT applications)
-		install (DIRECTORY DESTINATION ${CMAKE_INSTALL_LOCALSTATEDIR}/lib/manticore/data COMPONENT applications)
-		install (DIRECTORY DESTINATION ${CMAKE_INSTALL_RUNSTATEDIR}/manticore COMPONENT applications)
-		install (DIRECTORY DESTINATION ${CMAKE_INSTALL_LOCALSTATEDIR}/log/manticore COMPONENT applications)
+		set ( CMAKE_INSTALL_DOCDIR "${CMAKE_INSTALL_DATAROOTDIR}/doc/manticore" )
+		configure_config ( lib/manticore )
+		SET ( FULL_SHARE_DIR "${CMAKE_INSTALL_FULL_DATADIR}/manticore" )
+		install ( FILES ${MANTICORE_BINARY_DIR}/manticore.conf DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/manticoresearch COMPONENT common )
+		install ( DIRECTORY misc/stopwords DESTINATION ${CMAKE_INSTALL_DATADIR}/manticore COMPONENT common )
+		install ( DIRECTORY DESTINATION ${CMAKE_INSTALL_LOCALSTATEDIR}/lib/manticore/data COMPONENT common )
+		install ( DIRECTORY DESTINATION ${CMAKE_INSTALL_RUNSTATEDIR}/manticore COMPONENT searchd )
+		install ( DIRECTORY DESTINATION ${CMAKE_INSTALL_LOCALSTATEDIR}/log/manticore COMPONENT searchd )
 		if (WITH_ICU)
-			install_icudata (${CMAKE_INSTALL_DATADIR}/manticore/icu)
+			install_icudata ( ${CMAKE_INSTALL_DATADIR}/manticore/icu )
 		endif ()
 	endif ()
 endif ()
@@ -339,10 +330,6 @@ set ( CPACK_SOURCE_GENERATOR TGZ )
 set ( CPACK_RPM_COMPONENT_INSTALL 1 )
 set ( CPACK_DEB_COMPONENT_INSTALL 1 )
 set ( CPACK_ARCHIVE_COMPONENT_INSTALL 1 )
-
-if ( SPLIT )
-	set (CPACK_COMPONENTS_GROUPING IGNORE )
-endif()
 
 bannervar (LOCALDATADIR)
 bannervar (FULL_SHARE_DIR)
@@ -361,17 +348,38 @@ if ( BUILD_TESTING )
 	endif()
 endif ()
 
+# run setBuildType again, full pass. Select distribution build and install rules for most of the files
+if (installed)
+	set ( only_set_paths OFF )
+	include ( SetBuildType )
+endif()
+
+cmake_print_variables ( CMAKE_INSTALL_PREFIX )
+foreach (var BINDIR SBINDIR LIBEXECDIR SYSCONFDIR SHAREDSTATEDIR LOCALSTATEDIR RUNSTATEDIR LIBDIR INCLUDEDIR OLDINCLUDEDIR DATAROOTDIR DATADIR INFODIR LOCALEDIR MANDIR DOCDIR)
+	cmake_print_variables ( CMAKE_INSTALL_${var} CMAKE_INSTALL_FULL_${var} )
+endforeach ()
+
 if (NOT CPack_CMake_INCLUDED)
 	include ( CPack )
-endif()
-cpack_add_component (applications GROUP main)
-cpack_add_component (runtime GROUP main)
-cpack_add_component (tools GROUP main)
-cpack_add_component (meta GROUP main)
-cpack_add_component (devel GROUP main)
-cpack_add_component (converter GROUP converter)
-cpack_add_component_group(main EXTENDED)
-cpack_add_component_group(converter)
+endif ()
+
+cpack_add_component ( server GROUP main )
+cpack_add_component ( searchd GROUP main )
+cpack_add_component ( common GROUP main )
+cpack_add_component ( tools GROUP main )
+cpack_add_component ( meta )
+cpack_add_component ( devel GROUP main )
+cpack_add_component ( converter GROUP converter )
+cpack_add_component_group ( main EXPANDED )
+cpack_add_component_group ( converter )
+
+if (WITH_ICU)
+	cpack_add_component ( icudata GROUP main )
+endif ()
+
+if (WIN32)
+	cpack_add_component ( runtime GROUP main )
+endif ()
 
 #feature_summary (
 #		INCLUDE_QUIET_PACKAGES

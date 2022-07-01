@@ -50,7 +50,7 @@ add_library(lmanticore STATIC sphinx.cpp sphinxexcerpt.cpp sphinxquery.cpp sphin
 		columnarlib.cpp collation.cpp fnv64.cpp histogram.cpp threads_detached.cpp hazard_pointer.cpp
 		mini_timer.cpp dynamic_idx.cpp columnarrt.cpp columnarmisc.cpp exprtraits.cpp columnarexpr.cpp
 		sphinx_alter.cpp columnarsort.cpp binlog.cpp chunksearchctx.cpp client_task_info.cpp
-		indexfiles.cpp attrindex_builder.cpp queryfilter.cpp aggregate.cpp)
+		indexfiles.cpp attrindex_builder.cpp queryfilter.cpp aggregate.cpp secondarylib.cpp)
 
 add_library(lstem STATIC sphinxsoundex.cpp sphinxmetaphone.cpp sphinxstemen.cpp sphinxstemru.cpp sphinxstemru.inl
 		sphinxstemcz.cpp sphinxstemar.cpp )
@@ -135,7 +135,7 @@ set ( HEADERS sphinxexcerpt.h sphinxfilter.h sphinxint.h sphinxjsonquery.h sphin
 		hazard_pointer.h task_info.h mini_timer.h collation.h fnv64.h histogram.h sortsetup.h dynamic_idx.h
 		indexsettings.h columnarlib.h fileio.h memio.h queryprofile.h columnarfilter.h columnargrouper.h fileutils.h
 		libutils.h conversion.h columnarsort.h sortcomp.h binlog_defs.h binlog.h ${MANTICORE_BINARY_DIR}/config/config.h
-		chunksearchctx.h lrucache.h indexfiles.h attrindex_builder.h queryfilter.h aggregate.h openhash.h )
+		chunksearchctx.h lrucache.h indexfiles.h attrindex_builder.h queryfilter.h aggregate.h openhash.h secondarylib.h)
 
 set ( SEARCHD_H searchdaemon.h searchdconfig.h searchdddl.h searchdexpr.h searchdha.h searchdreplication.h searchdsql.h
 		searchdtask.h client_task_info.h taskflushattrs.h taskflushbinlog.h taskflushmutable.h taskglobalidf.h
@@ -185,23 +185,6 @@ set_property (SOURCE searchdddl.cpp APPEND PROPERTY OBJECT_DEPENDS ${FLEX_DDLlex
 set_property (SOURCE sphinxjson.cpp APPEND PROPERTY OBJECT_DEPENDS ${FLEX_Jsonlex_OUTPUTS})
 set_property (SOURCE sphinxexpr.cpp APPEND PROPERTY OBJECT_DEPENDS ${FLEX_Exprlex_OUTPUTS})
 set_property (SOURCE sphinxql_debug.cpp APPEND PROPERTY OBJECT_DEPENDS ${FLEX_SQLDebuglex_OUTPUTS})
-
-add_custom_target (
-		vergen
-		COMMAND
-		${CMAKE_COMMAND}
-		-D SOURCE_DIR=${MANTICORE_SOURCE_DIR}
-		-D BINARY_DIR=${MANTICORE_BINARY_DIR}
-		-D BUILD_TAG=${BUILD_TAG}
-		-D CPACK_SUFFIX=${CPACK_SUFFIX}
-		-P ${MANTICORE_SOURCE_DIR}/sphinxrev.cmake
-		COMMENT "Generate version from sources"
-		VERBATIM
-		SOURCES ${MANTICORE_SOURCE_DIR}/sphinxrev.cmake
-		${MANTICORE_SOURCE_DIR}/src/sphinxversion.h.in
-		${MANTICORE_SOURCE_DIR}/dist/CPackOptions.cmake.in
-)
-add_dependencies (lextra vergen)
 
 # our mega-lib
 target_sources(lmanticore PUBLIC ${LMANTICORE_BISON} ${LMANTICORE_FLEX} ${HEADERS} ${CHARSET_FILES} ${CHARSET_TEMPLATE} "../misc/manticore.natvis")
@@ -299,10 +282,6 @@ target_link_libraries(lsearchd PUBLIC searchd_replication)
 trace(lextra)
 trace(lsearchd)
 
-if (SPLIT_SYMBOLS)
-	include (split)
-endif()
-
 # our executables
 add_executable(searchd searchd.cpp)
 target_link_libraries (searchd searchd_ssl lmanticore lsearchd)
@@ -323,6 +302,7 @@ if (NOT STATIC_BINARY)
 endif ()
 
 if ( SPLIT_SYMBOLS )
+	include ( split )
 	split_dbg ( indexer )
 	split_dbg ( indextool )
 	split_dbg ( searchd )
@@ -331,7 +311,7 @@ if ( SPLIT_SYMBOLS )
 	split_dbg ( index_converter )
 endif()
 
-INSTALL (TARGETS searchd RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT applications)
+INSTALL (TARGETS searchd RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT searchd)
 if (NOT STATIC_BINARY)
 	INSTALL (TARGETS indexer indextool spelldump wordbreaker RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT tools)
 	INSTALL (TARGETS index_converter RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT converter)
@@ -342,9 +322,15 @@ endif ()
 if (WIN32)
 	set (CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
 	include (InstallRequiredSystemLibraries)
-	addruntime ("${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}")
-	getruntime (libs)
-	install (PROGRAMS ${libs} DESTINATION bin COMPONENT runtime)
+	addruntime ( "${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}" common )
+	getruntime ( libs common )
+	install ( PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION bin COMPONENT common )
+	unset ( libs )
+	getruntime ( libs daemon )
+	install ( PROGRAMS ${libs} DESTINATION bin COMPONENT searchd )
+	unset ( libs )
+	getruntime ( libs indexer )
+	install ( PROGRAMS ${libs} DESTINATION bin COMPONENT tools )
 	if (BUILD_TESTING)
 		add_custom_command (TARGET searchd POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy ${libs} "$<TARGET_FILE_DIR:searchd>" VERBATIM )
 	endif()
