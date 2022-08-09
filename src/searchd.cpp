@@ -192,8 +192,11 @@ bool					g_bHostnameLookup = false;
 CSphString				g_sMySQLVersion = szMANTICORE_VERSION;
 CSphString				g_sDbName = "Manticore";
 
+CSphString				g_sBannerVersion { szMANTICORE_NAME };
 CSphString				g_sBanner;
 CSphString				g_sStatusVersion = szMANTICORE_VERSION;
+CSphString				g_sSecondaryError;
+bool					g_bSecondaryError { false };
 
 // for CLang thread-safety analysis
 ThreadRole MainThread; // functions which called only from main thread
@@ -1092,7 +1095,7 @@ LONG WINAPI CrashLogger::HandleCrash ( EXCEPTION_POINTERS * pExc )
 		sphWrite ( g_iLogFile, tQuery.m_dIndex );
 	sphWrite ( g_iLogFile, g_sEndLine, sizeof (g_sEndLine)-1 );
 
-	sphSafeInfo ( g_iLogFile, szMANTICORE_NAME );
+	sphSafeInfo ( g_iLogFile, g_sBannerVersion.cstr() );
 
 #if _WIN32
 	// mini-dump reference
@@ -1829,7 +1832,7 @@ void SearchRequestBuilder_c::SendQuery ( const char * sIndexes, ISphOutputBuffer
 	tOut.SendInt ( q.m_dIndexHints.GetLength() );
 	for ( const auto & i : q.m_dIndexHints )
 	{
-		tOut.SendDword ( i.m_eHint );
+		tOut.SendDword ( (DWORD)i.m_dHints[int(SecondaryIndexType_e::INDEX)] );
 		tOut.SendString ( i.m_sIndex.cstr() );
 	}
 }
@@ -2647,7 +2650,7 @@ bool ParseSearchQuery ( InputBuffer_c & tReq, ISphOutputBuffer & tOut, CSphQuery
 		tQuery.m_dIndexHints.Resize ( tReq.GetDword() );
 		for ( auto & i : tQuery.m_dIndexHints )
 		{
-			i.m_eHint = (IndexHint_e)tReq.GetDword();
+			i.m_dHints[int(SecondaryIndexType_e::INDEX)] = (IndexHint_e)tReq.GetDword();
 			i.m_sIndex = tReq.GetString();
 		}
 	}
@@ -2986,15 +2989,15 @@ static void FormatIndexHints ( const CSphQuery & tQuery, StringBuilder_c & tBuf 
 	StrVec_t dUse, dForce, dIgnore;
 	for ( const auto & i : tQuery.m_dIndexHints )
 	{
-		switch ( i.m_eHint )
+		switch ( i.m_dHints[int(SecondaryIndexType_e::INDEX)] )
 		{
-		case INDEX_HINT_USE:
+		case IndexHint_e::USE:
 			dUse.Add(i.m_sIndex);
 			break;
-		case INDEX_HINT_FORCE:
+		case IndexHint_e::FORCE:
 			dForce.Add(i.m_sIndex);
 			break;
-		case INDEX_HINT_IGNORE:
+		case IndexHint_e::IGNORE_:
 			dIgnore.Add(i.m_sIndex);
 			break;
 		default:
@@ -5635,6 +5638,9 @@ struct LocalSearchRef_t
 			tResult.m_iSuccesses += tChild.m_iSuccesses;
 			tResult.m_tIOStats.Add ( tChild.m_tIOStats );
 
+			for ( const auto & i : tChild.m_dUsedIterators )
+				tResult.m_dUsedIterators.Add(i);
+
 			// failures
 			m_dFailuresSet[i].Append ( dChild.m_dFailuresSet[i] );
 		}
@@ -6361,7 +6367,6 @@ static uint64_t GetIndexMass ( const CSphString & sName )
 void HandleMysqlShowThreads ( RowBuffer_i & tOut, const SqlStmt_t * pStmt );
 void HandleMysqlShowTables ( RowBuffer_i & tOut, const SqlStmt_t * pStmt );
 void HandleTasks ( RowBuffer_i & tOut );
-void HandleSysthreads ( RowBuffer_i & tOut );
 void HandleSched ( RowBuffer_i & tOut );
 void HandleMysqlDescribe ( RowBuffer_i & tOut, const SqlStmt_t * pStmt );
 void HandleSelectIndexStatus ( RowBuffer_i & tOut, const SqlStmt_t * pStmt );
@@ -6393,10 +6398,6 @@ bool SearchHandler_c::ParseSysVar ()
 			else if ( dSubkeys[0]==".tasks" ) // select .. from @@system.tasks
 			{
 				fnFeed = [] ( RowBuffer_i * pBuf ) { HandleTasks ( *pBuf ); };
-			}
-			else if ( dSubkeys[0]==".systhreads" ) // select .. from @@system.systhreads
-			{
-				fnFeed = [] ( RowBuffer_i * pBuf ) { HandleSysthreads ( *pBuf ); };
 			}
 			else if ( dSubkeys[0]==".sched" ) // select .. from @@system.sched
 			{
@@ -7508,7 +7509,7 @@ static const char * g_dSqlStmts[] =
 	"facet", "alter_reconfigure", "show_index_settings", "flush_index", "reload_plugins", "reload_index",
 	"flush_hostnames", "flush_logs", "reload_indexes", "sysfilters", "debug", "alter_killlist_target",
 	"alter_index_settings", "join_cluster", "cluster_create", "cluster_delete", "cluster_index_add",
-	"cluster_index_delete", "cluster_update", "explain", "import_table"
+	"cluster_index_delete", "cluster_update", "explain", "import_table", "lock_indexes", "unlock_indexes",
 };
 
 
@@ -8958,6 +8959,22 @@ static bool BuildDistIndexStatus ( VectorLike & dStatus, const CSphString& sInde
 	return true;
 }
 
+
+static bool operator < ( const IteratorDesc_t & tA, const IteratorDesc_t & tB )
+{
+	if ( tA.m_sAttr < tB.m_sAttr )
+		return true;
+
+	return tA.m_sType<tB.m_sType;
+}
+
+
+static bool operator == ( const IteratorDesc_t & tA, const IteratorDesc_t & tB )
+{
+	return tA.m_sAttr==tB.m_sAttr && tA.m_sType==tB.m_sType;
+}
+
+
 void BuildAgentStatus ( VectorLike &dStatus, const CSphString& sIndexOrAgent )
 {
 	if ( !sIndexOrAgent.IsEmpty() )
@@ -9054,7 +9071,6 @@ void BuildMeta ( VectorLike & dStatus, const CSphQueryResultMeta & tMeta )
 		}
 	}
 
-
 	auto dWords = tMeta.MakeSortedWordStat();
 	ARRAY_CONSTFOREACH( iWord, dWords )
 	{
@@ -9069,6 +9085,15 @@ void BuildMeta ( VectorLike & dStatus, const CSphQueryResultMeta & tMeta )
 		if ( dStatus.MatchAddf ( "hits[%d]", iWord ) )
 			dStatus.Addf ( "%l", pWord->second.second );
 	}
+
+	StringBuilder_c sIterators { ", " };
+	CSphVector<IteratorDesc_t> dIterators = tMeta.m_dUsedIterators;
+	dIterators.Uniq();
+	for ( const auto & i : dIterators )
+		sIterators.Appendf ( "%s:%s", i.m_sAttr.cstr(), i.m_sType.cstr() );
+
+	if ( !sIterators.IsEmpty() )
+		dStatus.MatchTuplet ( "index", sIterators.cstr() );
 }
 
 
@@ -14057,7 +14082,7 @@ void HandleMysqlfiles ( RowBuffer_i & tOut, const DebugCmd::DebugCommand_t & tCm
 
 	StrVec_t dFiles;
 	StrVec_t dExt;
-	RIdx_c ( pIndex )->CollectFiles ( dFiles, dExt );
+	RIdx_c ( pIndex )->GetIndexFiles ( dFiles, dExt );
 
 	VectorLike dOut ( 0 );
 	dOut.SetColNames ( { "file" } );
@@ -14087,8 +14112,9 @@ void HandleMysqlclose ( RowBuffer_i & tOut )
 // same for select ... from index.files
 void HandleSelectFiles ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 {
-	tOut.HeadBegin ( 2 );
+	tOut.HeadBegin ( 3 );
 	tOut.HeadColumn ( "file" );
+	tOut.HeadColumn ( "normalized" );
 	tOut.HeadColumn ( "size", MYSQL_COL_LONGLONG );
 	if ( !tOut.HeadEnd () )
 		return;
@@ -14103,13 +14129,14 @@ void HandleSelectFiles ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 
 	StrVec_t dFiles;
 	StrVec_t dExt;
-	RIdx_c ( pServed )->CollectFiles ( dFiles, dExt );
+	RIdx_c ( pServed )->GetIndexFiles ( dFiles, dExt );
 
 	auto sFormat = tStmt.m_sThreadFormat;
 	if ( sFormat!="external" )
 		ARRAY_CONSTFOREACH( i, dFiles )
 		{
 			tOut.PutString ( dFiles[i] );
+			tOut.PutString ( RealPath ( dFiles[i] ) );
 			tOut.PutNumAsString ( sphGetFileSize ( dFiles[i], nullptr ) );
 			if ( !tOut.Commit () )
 				return;
@@ -14121,6 +14148,7 @@ void HandleSelectFiles ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 		ARRAY_CONSTFOREACH( i, dExt )
 		{
 			tOut.PutString ( dExt[i] );
+			tOut.PutString ( RealPath ( dExt[i] ) );
 			tOut.PutNumAsString ( sphGetFileSize ( dExt[i], nullptr ) );
 			if ( !tOut.Commit () )
 				return;
@@ -14320,13 +14348,6 @@ void HandleTasks ( RowBuffer_i & tOut )
 	tOut.Eof ();
 }
 
-void HandleSysthreads ( RowBuffer_i & tOut )
-{
-	tOut.HeadTuplet ( "command", "result" );
-	tOut.DataTuplet ( "command", "deprecated" );
-	tOut.Eof();
-}
-
 void HandleSched ( RowBuffer_i & tOut )
 {
 	if (!tOut.HeadOfStrings ( { "Time rest", "Task" } ))
@@ -14377,7 +14398,6 @@ void HandleMysqlDebug ( RowBuffer_i &tOut, Str_t sCommand )
 	case Cmd_e::TOKEN: HandleToken ( tOut, tCmd.m_sParam ); return;
 	case Cmd_e::SLEEP: HandleSleep ( tOut, tCmd.m_iPar1 ); return;
 	case Cmd_e::TASKS: HandleTasks ( tOut ); return;
-	case Cmd_e::SYSTHREADS: HandleSysthreads ( tOut ); return;
 	case Cmd_e::SCHED: HandleSched ( tOut ); return;
 	case Cmd_e::MERGE: HandleMysqlOptimizeManual ( tOut, tCmd ); return;
 	case Cmd_e::DROP: HandleMysqlDropManual ( tOut, tCmd ); return;
@@ -15648,11 +15668,6 @@ static void HandleMysqlShowPlan ( RowBuffer_i & tOut, const QueryProfile_c & p, 
 	tOut.PutString ( sPlan );
 	tOut.Commit();
 
-	tOut.PutString ( "enabled_indexes" );
-	tOut.PutString ( p.m_sEnablesIndexes.cstr() );
-
-	tOut.Commit();
-
 	tOut.Eof ( bMoreResultsFollow );
 }
 
@@ -15837,6 +15852,66 @@ void HandleMysqlImportTable ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, CSphS
 }
 
 //////////////////////////////////////////////////////////////////////////
+void HandleMysqlLockIndexes ( RowBuffer_i& tOut, const CSphString& sIndexes, CSphString& sWarningOut )
+{
+	// search through specified local indexes
+	StrVec_t dIndexes, dNonlockedIndexes, dIndexFiles;
+
+	ParseIndexList ( sIndexes, dIndexes );
+	for ( const auto& sIndex : dIndexes )
+	{
+		auto pIndex = GetServed ( sIndex );
+		if ( !ServedDesc_t::IsMutable ( pIndex ) )
+		{
+			dNonlockedIndexes.Add ( sIndex );
+			continue;
+		}
+
+		RIdx_T<RtIndex_i*> pRt { pIndex };
+		pRt->LockFileState ( dIndexFiles );
+	}
+
+	int iWarnings=0;
+	if ( !dNonlockedIndexes.IsEmpty() )
+	{
+		StringBuilder_c sWarning;
+		sWarning << "Some indexes are not suitable for locking: ";
+		sWarning.StartBlock();
+		dNonlockedIndexes.for_each ( [&sWarning] ( const auto& sValue ) { sWarning << sValue; } );
+		sWarning.FinishBlocks ();
+		sWarning.MoveTo ( sWarningOut );
+		++iWarnings;
+	}
+
+	tOut.HeadBegin ( 2 );
+	tOut.HeadColumn ( "file" );
+	tOut.HeadColumn ( "normalized" );
+	tOut.HeadEnd();
+
+	dIndexFiles.for_each ( [&] ( const auto& sFile ) { tOut.PutString (sFile); tOut.PutString (RealPath (sFile)); tOut.Commit(); } );
+	tOut.Eof ( false, iWarnings );
+}
+
+void HandleMysqlUnlockIndexes ( RowBuffer_i& tOut, const CSphString& sIndexes, CSphString& sWarningOut )
+{
+	// search through specified local indexes
+	StrVec_t dIndexes;
+
+	int iUnlocked=0;
+	ParseIndexList ( sIndexes, dIndexes );
+	for ( const auto& sIndex : dIndexes )
+	{
+		auto pIndex = GetServed ( sIndex );
+		if ( !ServedDesc_t::IsMutable ( pIndex ) )
+			continue;
+
+		RIdx_T<RtIndex_i*> pRt { pIndex };
+		pRt->EnableSave ();
+		++iUnlocked;
+	}
+
+	tOut.Ok ( iUnlocked );
+}
 
 RtAccum_t * CSphSessionAccum::GetAcc ( RtIndex_i * pIndex, CSphString & sError )
 {
@@ -16328,6 +16403,14 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 	case STMT_IMPORT_TABLE:
 		FreezeLastMeta();
 		HandleMysqlImportTable ( tOut, *pStmt, m_tLastMeta.m_sWarning );
+		return true;
+
+	case STMT_LOCK:
+		HandleMysqlLockIndexes ( tOut, pStmt->m_sIndex, m_tLastMeta.m_sWarning);
+		return true;
+
+	case STMT_UNLOCK:
+		HandleMysqlUnlockIndexes ( tOut, pStmt->m_sIndex, m_tLastMeta.m_sWarning );
 		return true;
 
 	default:
@@ -18701,7 +18784,12 @@ void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile, bool bTestMo
 	MutableIndexSettings_c::GetDefaults().m_iOptimizeCutoff = hSearchd.GetInt ( "optimize_cutoff", AutoOptimizeCutoff() );
 
 	g_bSplit = hSearchd.GetInt ( "pseudo_sharding", 1 )!=0;
-	SetSecondaryIndexDefault ( hSearchd.GetInt ( "secondary_indexes", GetSecondaryIndexDefault() )!=0 );
+
+	bool bGotSecondary = ( hSearchd.GetInt ( "secondary_indexes", GetSecondaryIndexDefault() )!=0 );
+	if ( bGotSecondary && !IsSecondaryLibLoaded() )
+		sphFatal ( "secondary_indexes set but failed to initialize secondary library: %s", g_sSecondaryError.cstr() );
+
+	SetSecondaryIndexDefault ( bGotSecondary );
 }
 
 // load index which is not yet load, and publish it in served indexes.
@@ -19077,7 +19165,8 @@ static void InitBanner()
 	if ( sSiVer )
 		sSi.SetSprintf ( " (secondary %s)", sSiVer );
 
-	g_sBanner.SetSprintf ( "%s%s%s%s",  szMANTICORE_NAME, sColumnar.cstr(), sSi.cstr(), szMANTICORE_BANNER_TEXT );
+	g_sBannerVersion.SetSprintf ( "%s%s%s", szMANTICORE_NAME, sColumnar.cstr(), sSi.cstr() );
+	g_sBanner.SetSprintf ( "%s%s", g_sBannerVersion.cstr(), szMANTICORE_BANNER_TEXT );
 	g_sMySQLVersion.SetSprintf ( "%s%s%s", szMANTICORE_VERSION, sColumnar.cstr(), sSi.cstr() );
 	g_sStatusVersion.SetSprintf ( "%s%s%s", szMANTICORE_VERSION, sColumnar.cstr(), sSi.cstr() );
 }
@@ -19141,10 +19230,10 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 
 	tzset();
 
-	CSphString sError, sErrorSI;
+	CSphString sError;
 	// initialize it before other code to fetch version string for banner
 	bool bColumnarError = !InitColumnar ( sError );
-	bool bSecondaryError = !InitSecondary ( sErrorSI );
+	g_bSecondaryError = !InitSecondary ( g_sSecondaryError );
 	sphCollationInit ();
 
 	InitBanner();
@@ -19154,14 +19243,11 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 
 	if ( bColumnarError )
 		sphWarning ( "Error initializing columnar storage: %s", sError.cstr() );
-	if ( bSecondaryError )
-		sphWarning ( "Error initializing secondary index: %s", sErrorSI.cstr() );
+	if ( g_bSecondaryError )
+		sphWarning ( "Error initializing secondary index: %s", g_sSecondaryError.cstr() );
 
 	if ( !sError.IsEmpty() )
 		sError = "";
-
-	if ( !sErrorSI.IsEmpty() )
-		sErrorSI = "";
 
 	const char * szEndian = sphCheckEndian();
 	if ( szEndian )

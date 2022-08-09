@@ -448,10 +448,22 @@ public:
 
 class QueryParser_i;
 
+enum class SecondaryIndexType_e
+{
+	NONE,
+	FILTER,
+	LOOKUP,
+	INDEX,
+	ANALYZER,
+
+	TOTAL
+};
+
+
 struct IndexHint_t
 {
 	CSphString		m_sIndex;
-	IndexHint_e		m_eHint{INDEX_HINT_USE};
+	IndexHint_e		m_dHints[DWORD(SecondaryIndexType_e::TOTAL)] = {};
 };
 
 const int DEFAULT_MAX_MATCHES = 1000;
@@ -580,6 +592,12 @@ struct CSphQueryStats
 };
 
 
+struct IteratorDesc_t
+{
+	CSphString	m_sAttr;
+	CSphString	m_sType;
+};
+
 /// search query meta-info
 class CSphQueryResultMeta
 {
@@ -612,6 +630,8 @@ public:
 	CSphString				m_sError;				///< error message
 	CSphString				m_sWarning;				///< warning message
 	QueryProfile_c *		m_pProfile		= nullptr;	///< filled when query profiling is enabled; NULL otherwise
+
+	CSphVector<IteratorDesc_t> m_dUsedIterators;	///< iterators used while calculating the query
 
 	virtual					~CSphQueryResultMeta () {}					///< dtor
 	void					AddStat ( const CSphString & sWord, int64_t iDocs, int64_t iHits );
@@ -696,8 +716,8 @@ struct AttrUpdateInc_t // for cascade (incremental) update
 
 	bool AllApplied () const
 	{
-		assert ( m_dUpdated.GetBits() >= m_iAffected );
-		return m_dUpdated.GetBits() == m_iAffected;
+		assert ( m_dUpdated.GetSize() >= m_iAffected );
+		return m_dUpdated.GetSize() == m_iAffected;
 	}
 };
 
@@ -1172,7 +1192,7 @@ public:
 	const char *				GetFilename () const { return m_sFilename.cstr(); }
 
 	/// get actual index files list
-	virtual void				GetIndexFiles ( CSphVector<CSphString> & dFiles, const FilenameBuilder_i * pFilenameBuilder ) const {}
+	virtual void				GetIndexFiles ( StrVec_t& dFiles, StrVec_t& dExt, const FilenameBuilder_i* = nullptr ) const {}
 
 	/// internal make document id list from external docinfo, DO NOT USE
 	virtual CSphVector<SphAttr_t> BuildDocList () const;
@@ -1182,7 +1202,9 @@ public:
 	// put external files (if any) into index folder
 	// copy the rest of the external files to index folder
 	virtual bool				CopyExternalFiles ( int iPostfix, StrVec_t & dCopied ) { return true; }
-	virtual void				CollectFiles ( StrVec_t & dFiles, StrVec_t & dExt ) const {}
+
+	// used for query optimizer calibration
+	virtual HistogramContainer_c * GetHistograms() const { return nullptr; }
 
 public:
 	int64_t						m_iTID = 0;				///< last committed transaction id

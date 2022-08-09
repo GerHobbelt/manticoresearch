@@ -74,13 +74,14 @@ More information on this topic can be found [here](../../Adding_data_from_extern
 #### Plain index files structure
 | Extension | Description |
 | - | - |
-|`.spa` | stores document attributes in [row-wise mode](../../Creating_an_index/Data_types#Row-wise-and-columnar-attribute-storages) |
-|`.spb` | stores blob attributes in [row-wise mode](../../Creating_an_index/Data_types#Row-wise-and-columnar-attribute-storages): strings, MVA, json |
-|`.spc` | stores document attributes in [columnar mode](../../Creating_an_index/Data_types#Row-wise-and-columnar-attribute-storages)  |
+|`.spa` | stores document attributes in [row-wise mode](../../Creating_an_index/Data_types.md#Row-wise-and-columnar-attribute-storages) |
+|`.spb` | stores blob attributes in [row-wise mode](../../Creating_an_index/Data_types.md#Row-wise-and-columnar-attribute-storages): strings, MVA, json |
+|`.spc` | stores document attributes in [columnar mode](../../Creating_an_index/Data_types.md#Row-wise-and-columnar-attribute-storages)  |
 |`.spd` | stores matching document ID lists for each word ID |
 |`.sph` | stores index header information |
 |`.sphi` | stores histograms of attribute values |
 |`.spi` | stores word lists (word IDs and pointers to `.spd` file) |
+|`.spidx` | stores secondary indexes data |
 |`.spk` | stores kill-lists |
 |`.spl` | lock file |
 |`.spm` | stores a bitmap of killed documents |

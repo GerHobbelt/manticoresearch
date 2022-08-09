@@ -205,7 +205,6 @@ CmdNotice_t DebugCmd::dCommands[(BYTE) Cmd_e::INVALID_CMD] = {
 	{ NEED_VIP | NO_WIN, "debug setgdb status", "show current mode of gdb dumping" },
 	{ NONE, "debug sleep <N>", "sleep for <N> seconds" },
 	{ NONE, "debug tasks", "display global tasks stat (use select from @@system.tasks instead)" },
-	{ NONE, "debug systhreads", "display task manager threads (use select from @@system.systhreads instead)" },
 	{ NONE, "debug sched", "display task manager schedule (use select from @@system.sched instead)" },
 	{ NONE, "debug merge <IDX> [chunk] <X> [into] [chunk] <Y> [option sync=1,byid=0]",
 			"For RT index <IDX> merge disk chunk X into disk chunk Y" },
@@ -218,6 +217,6 @@ CmdNotice_t DebugCmd::dCommands[(BYTE) Cmd_e::INVALID_CMD] = {
 			"Compress disk chunk X of RT index <IDX> (wipe out deleted documents)" },
 	{ NONE, "debug split <IDX> [chunk] <X> on @<uservar> [option sync=1]",
 			"Split disk chunk X of RT index <IDX> using set of DocIDs from @uservar" },
-	{ NO_WIN, "debug wait <cluster>", "wait until cluster <cluster> ready" },
-	{ NO_WIN, "debug wait <cluster> status <N>", "wait until cluster commit achieve <N>" },
+	{ NO_WIN, "debug wait <cluster> [like 'xx'] [option timeout=3]", "wait <cluster> ready, but no more than 3 secs." },
+	{ NO_WIN, "debug wait <cluster> status <N> [like 'xx'] [option timeout=13]", "wait <cluster> commit achieve <N>, but no more than 13 secs" },
 };

@@ -459,7 +459,7 @@ void RtSegment_t::BuildDocID2RowIDMap ( const CSphSchema & tSchema )
 	else
 	{
 		std::string sError;
-		auto pIt = CreateIterator ( m_pColumnar.get(), sphGetDocidName(), sError );
+		auto pIt = CreateColumnarIterator ( m_pColumnar.get(), sphGetDocidName(), sError );
 		assert ( pIt );
 		for ( RowID_t tRowID = 0; tRowID<m_uRows; tRowID++ )
 		{
@@ -1249,7 +1249,6 @@ public:
 	int64_t				GetLastFlushTimestamp() const final;
 	void				IndexDeleted() final { m_bIndexDeleted = true; }
 	bool				CopyExternalFiles ( int iPostfix, StrVec_t & dCopied ) final;
-	void				CollectFiles ( StrVec_t & dFiles, StrVec_t & dExt ) const final;
 	void				ProhibitSave() final;
 	void				EnableSave() final;
 	void				LockFileState ( CSphVector<CSphString> & dFiles ) final;
@@ -1295,6 +1294,8 @@ private:
 	Coro::Waitable_T<MergeSeg_e> m_eSegMergeQueued { MergeSeg_e::NEWSEG };
 	Coro::Waitable_T<bool>		m_bSegMergeWorking { false };
 	Coro::Waitable_T<CSphVector<int64_t>> m_tSaveTIDS { 0 }; // save operations performing now, and their TIDs
+	int							m_iSaveGeneration = 0;		// SaveDiskChunk() increases generation on finish
+	Coro::Waitable_T<int>		m_tNSavesNow { 0 };			// N of merge segment routines running right now
 
 	bool						m_bIndexDeleted = false;
 
@@ -1306,7 +1307,7 @@ private:
 	int							m_iWordsCheckpoint = RTDICT_CHECKPOINT_V5;
 	int							m_iMaxCodepointLength = 0;
 	TokenizerRefPtr_c			m_pTokenizerIndexing;
-	bool						m_bLoadRamPassedOk = true;
+	bool						m_bPreallocPassedOk = true;
 	std::atomic<WriteState_e>	m_eSaving { WriteState_e::ENABLED };
 	bool						m_bHasFiles = false;
 
@@ -1372,12 +1373,12 @@ private:
 	bool						Update_WriteBlobRow ( UpdateContext_t& tCtx, CSphRowitem* pDocinfo, const BYTE* pBlob, int iLength, int nBlobAttrs, const CSphAttrLocator& tBlobRowLoc, bool& bCritical, CSphString& sError ) override;
 	bool						Update_DiskChunks ( AttrUpdateInc_t& tUpd, const DiskChunkSlice_t& dDiskChunks, CSphString& sError );
 
-	void						GetIndexFiles ( CSphVector<CSphString> & dFiles, const FilenameBuilder_i * pParentBuilder ) const override;
+	void						GetIndexFiles ( StrVec_t& dFiles, StrVec_t& dExt, const FilenameBuilder_i* = nullptr ) const override;
 	DocstoreBuilder_i::Doc_t *	FetchDocFields ( DocstoreBuilder_i::Doc_t & tStoredDoc, const InsertDocData_t & tDoc, CSphSource_StringVector & tSrc, CSphVector<CSphVector<BYTE>> & dTmpAttrStorage ) const;
 
 	CSphString					MakeChunkName(int iChunkID);
 	void						UnlinkRAMChunk ( const char * szInfo=nullptr );
-	void 						WaitRAMSegmentsUnlocked () const REQUIRES ( m_tWorkers.SerialChunkAccess() );
+	void						WaitRAMSegmentsUnlocked ( bool bAllowOne = false ) const REQUIRES ( m_tWorkers.SerialChunkAccess() );
 	bool						MergeSegmentsStep( MergeSeg_e eVal ) REQUIRES ( m_tWorkers.SerialChunkAccess() );
 	void						RunMergeSegmentsWorker();
 	void						StartMergeSegments ( MergeSeg_e eMergeWhat, bool bNotify=true ) REQUIRES ( m_tWorkers.SerialChunkAccess() );
@@ -1453,11 +1454,11 @@ RtIndex_c::~RtIndex_c ()
 		// From serial worker resuming on Wait() will happen after whole merger coroutine finished.
 		ScopedScheduler_c tSerialFiber { m_tWorkers.SerialChunkAccess() };
 		StopMergeSegmentsWorker();
-		m_tSaveTIDS.WaitVoid ( [this] { return m_tSaveTIDS.GetValueRef().IsEmpty(); } );
+		m_tNSavesNow.Wait ( [] ( int iVal ) { return iVal==0; } );
 	}
 
 	int64_t tmSave = sphMicroTimer();
-	bool bValid = m_pTokenizer && m_pDict && m_bLoadRamPassedOk;
+	bool bValid = m_pTokenizer && m_pDict && m_bPreallocPassedOk;
 
 	if ( bValid )
 	{
@@ -2411,7 +2412,7 @@ void RtAccum_t::CleanupDuplicates ( int iRowSize )
 	std::unique_ptr<columnar::Iterator_i> pColumnarIdIterator;
 	if ( bColumnarId )
 	{
-		pColumnarIdIterator = CreateIterator ( pColumnar.get(), sphGetDocidName(), sError );
+		pColumnarIdIterator = CreateColumnarIterator ( pColumnar.get(), sphGetDocidName(), sError );
 		assert ( pColumnarIdIterator );
 	}
 
@@ -3455,7 +3456,19 @@ bool RtIndex_c::MergeSegmentsStep ( MergeSeg_e eVal ) REQUIRES ( m_tWorkers.Seri
 	if ( eMergeAction == CheckMerge_e::FLUSH || eMergeAction == CheckMerge_e::FLUSH_EM )
 	{
 		// here it might be no race, as we're in serial worker.
-		SaveDiskChunk ( false, eMergeAction == CheckMerge_e::FLUSH_EM );
+		auto iOldGen = m_iSaveGeneration;
+		m_tNSavesNow.Wait ( [] ( int iVal ) { return iVal < SIMULTANEOUS_SAVE_LIMIT; } );
+
+		// if a save finished during wait - limits and conditions may be changed, will restart to check whether save is still necessary
+		if ( m_iSaveGeneration != iOldGen )
+		{
+			RTLOGV << "Recheck due to just finished SaveDiskChunk";
+			return true;
+		}
+
+		Coro::Go ( [this, eMergeAction]() REQUIRES ( m_tWorkers.SerialChunkAccess() ) {
+			SaveDiskChunk ( false, eMergeAction == CheckMerge_e::FLUSH_EM );
+		}, m_tWorkers.SerialChunkAccess() );
 		return false; // exit into idle
 	}
 
@@ -3566,12 +3579,12 @@ int RtIndex_c::CommitReplayable ( RtSegment_t * pNewSeg, const CSphVector<DocID_
 	if ( pNewSeg && !CheckSegmentConsistency ( pNewSeg, false ) )
 		DumpInsert ( pNewSeg );
 
+	// We're going to modify segments, so fall into serial fiber. From here no concurrent changes may happen
+	ScopedScheduler_c tSerialFiber { m_tWorkers.SerialChunkAccess() };
+
 	// for pure kills it is not necessary to wait, as it can't increase N of segments.
 	if ( pNewSeg )
 		m_tUnLockedSegments.Wait ( [] ( int iVals ) { return iVals < MAX_SEGMENTS; } );
-
-	// We're going to modify segments, so fall into serial fiber. From here no concurrent changes may happen
-	ScopedScheduler_c tSerialFiber { m_tWorkers.SerialChunkAccess() };
 
 	RTLOGV << "CommitReplayable";
 
@@ -4060,7 +4073,7 @@ bool RtIndex_c::WriteDocs ( SaveDiskDataContext_t & tCtx, CSphWriter & tWriterDi
 		}
 
 		// read next words
-		for ( int i = 0; i < tSegsWithWord.GetBits(); ++i )
+		for ( int i = 0; i < tSegsWithWord.GetSize(); ++i )
 			if ( tSegsWithWord.BitGet(i) )
 				dWords[i] = dWordReaders[i].UnzipWord();
 	}
@@ -4352,9 +4365,9 @@ void RtIndex_c::SaveMeta()
 }
 
 // looks like spinlock, but actually we switch to parallel strand and back on every tick, so it should not burn CPU
-void RtIndex_c::WaitRAMSegmentsUnlocked () const
+void RtIndex_c::WaitRAMSegmentsUnlocked ( bool bAllowOne ) const
 {
-	m_tSaveTIDS.WaitVoid ( [this] { return m_tSaveTIDS.GetValueRef().IsEmpty(); } );
+	m_tNSavesNow.Wait ( [bAllowOne] ( int iVal ) { return iVal == ( bAllowOne ? 1 : 0 ); } );
 	m_tUnLockedSegments.WaitVoid ( [this] { return m_tRtChunks.RamSegs()->none_of ( [] ( const ConstRtSegmentRefPtf_t& a ) { return a->m_iLocked; } ); });
 }
 
@@ -4379,15 +4392,22 @@ bool RtIndex_c::SaveDiskChunk ( bool bForced, bool bEmergent, bool bBootstrap ) 
 
 	RTSAVELOG << "SaveDiskChunk (" << ( bForced ? "forced, " : "not forced, " ) << ( bEmergent ? "emergent, " : "not emergent, " ) << ( bBootstrap ? "bootstrap" : "usual" ) << ")";
 
+	m_tNSavesNow.Wait ( [] ( int iVal ) { return iVal < SIMULTANEOUS_SAVE_LIMIT; } );
+
+	// we're in serial worker - no concurrency, no race between wait() and modify()
+	m_tNSavesNow.ModifyValue ( [] ( int& iVal ) { ++iVal; } );
+	auto tFinallySetSaveUnactive = AtScopeExit ( [this] {
+		++m_iSaveGeneration;
+		m_tNSavesNow.ModifyValueAndNotifyAll ( [] ( int& iVal ) { --iVal; } );
+	} );
+
 	int iSaveOp = m_tWorkers.GetNextOpTicket();
 
 	// if forced - wait all segments. Otherwise, can continue with subset of currently available segments
 	// note that segments may be locked by currently executing MergeSegments or SaveDiskChunk. If so, we wait them finished and continue.
 	// that will cause another disk chunk written right after just finished, since op is forced it is ok.
 	if ( bForced )
-		WaitRAMSegmentsUnlocked ();
-
-	m_tSaveTIDS.WaitVoid ( [this] { return m_tSaveTIDS.GetValueRef().GetLength() < SIMULTANEOUS_SAVE_LIMIT; } );
+		WaitRAMSegmentsUnlocked ( true ); // true means to wait 1, not 0 active saves (as we already increased the counter)
 
 	// collect all non-occupied non-empty segments and lock them
 	int64_t iNotMyOpRAM {0};
@@ -4411,14 +4431,14 @@ bool RtIndex_c::SaveDiskChunk ( bool bForced, bool bEmergent, bool bBootstrap ) 
 
 	UpdateUnlockedCount();
 
-	RTSAVELOG << "SaveDiskChunk process " << dSegments.GetLength() << " segments. Active jobs " << m_tSaveTIDS.GetValueRef().GetLength() << ", op " << iSaveOp
+	RTSAVELOG << "SaveDiskChunk process " << dSegments.GetLength() << " segments. Active jobs " << m_tNSavesNow.GetValue() << ", op " << iSaveOp
 		<< " RAM visible+retired/locked/acquired " << iNotMyOpRAM + iMyOpRAM << "+" << m_iRamChunksAllocatedRAM.load ( std::memory_order_relaxed )- iNotMyOpRAM - iMyOpRAM << "/" << iNotMyOpRAM << "/" << iMyOpRAM;
 	if ( dSegments.IsEmpty() )
 		return !bBootstrap;
 
 	auto iTID = m_iTID;
 	m_tSaveTIDS.ModifyValue ( [iTID] ( CSphVector<int64_t>& dSaves ) { dSaves.Add ( iTID ); } );
-	auto tFinallySetSaveUnactive = AtScopeExit ( [this, iTID] { m_tSaveTIDS.ModifyValueAndNotifyAll ( [iTID] ( CSphVector<int64_t>& dSaves ) { dSaves.RemoveValueFromSorted ( iTID ); } ); } );
+	auto tFinallyRemoveTID = AtScopeExit ( [this, iTID] { m_tSaveTIDS.ModifyValueAndNotifyAll ( [iTID] ( CSphVector<int64_t>& dSaves ) { dSaves.RemoveValue ( iTID ); } ); } );
 
 	int64_t tmSaveWall = -sphMicroTimer(); // all time including waiting
 	int64_t tmSave; // only active time
@@ -4941,6 +4961,8 @@ bool RtIndex_c::Prealloc ( bool bStripPath, FilenameBuilder_i * pFilenameBuilder
 	// so we simply lock here, and ignore Lock/Unlock hassle caused by forks
 	assert ( m_iLockFD<0 );
 
+	m_bPreallocPassedOk = false;
+
 	CSphString sLock;
 	sLock.SetSprintf ( "%s.lock", m_sPath.cstr() );
 	m_iLockFD = ::open ( sLock.cstr(), SPH_O_NEW, 0644 );
@@ -4981,13 +5003,11 @@ bool RtIndex_c::Prealloc ( bool bStripPath, FilenameBuilder_i * pFilenameBuilder
 		return false;
 	}
 
-	m_bLoadRamPassedOk = false;
-
 	if ( m_bDebugCheck )
 	{
 		// load ram chunk
-		m_bLoadRamPassedOk = LoadRamChunk ( uVersion, bRebuildInfixes, false );
-		return m_bLoadRamPassedOk;
+		m_bPreallocPassedOk = LoadRamChunk ( uVersion, bRebuildInfixes, false );
+		return m_bPreallocPassedOk;
 	}
 
 	m_tWorkers.InitWorkers();
@@ -4997,7 +5017,7 @@ bool RtIndex_c::Prealloc ( bool bStripPath, FilenameBuilder_i * pFilenameBuilder
 		return false;
 
 	// load ram chunk
-	m_bLoadRamPassedOk = LoadRamChunk ( uVersion, bRebuildInfixes );
+	m_bPreallocPassedOk = LoadRamChunk ( uVersion, bRebuildInfixes );
 
 	// field lengths
 	ARRAY_FOREACH ( i, m_dFieldLens )
@@ -5012,7 +5032,7 @@ bool RtIndex_c::Prealloc ( bool bStripPath, FilenameBuilder_i * pFilenameBuilder
 	RecalculateRateLimit ( iUsedRam, 1, false );
 
 	RunMergeSegmentsWorker();
-	return m_bLoadRamPassedOk;
+	return m_bPreallocPassedOk;
 }
 
 
@@ -7296,6 +7316,9 @@ static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tR
 
 			tThMeta.m_bTotalMatchesApprox |= tChunkMeta.m_bTotalMatchesApprox;
 
+			for ( const auto & i : tChunkMeta.m_dUsedIterators )
+				tThMeta.m_dUsedIterators.Add(i);
+
 			if ( bInterrupt && !tChunkMeta.m_sError.IsEmpty() )
 				// FIXME? maybe handle this more gracefully (convert to a warning)?
 				tThMeta.m_sError = tChunkMeta.m_sError;
@@ -8554,7 +8577,7 @@ bool RtIndex_c::AddRemoveAttribute ( bool bAdd, const AttrAddRemoveCtx_t & tCtx,
 		return false;
 	}
 
-	// here must be exclusively LOCKED access, we don't rely from the topmost lock and go isolated ourselves
+	// here must be exclusively LOCKED access, we don't rely upon the topmost lock and go isolated ourselves
 
 	// stop all optimize tasks
 	OptimizeGuard_c tStopOptimize ( *this );
@@ -10091,40 +10114,31 @@ uint64_t sphGetSettingsFNV ( const CSphIndexSettings & tSettings )
 	return uHash;
 }
 
-void RtIndex_c::GetIndexFiles ( CSphVector<CSphString> & dFiles, const FilenameBuilder_i * pParentBuilder ) const
+void RtIndex_c::GetIndexFiles ( StrVec_t& dFiles, StrVec_t& dExt, const FilenameBuilder_i* pParentFilenameBuilder ) const
 {
-	CSphString & sMeta = dFiles.Add();
-	sMeta.SetSprintf ( "%s.meta", m_sPath.cstr() );
+	auto fnAddFile = [this, &dFiles] ( const char* szExt ) {
+		auto sFile = SphSprintf ( "%s%s", m_sPath.cstr(), szExt );
+		if ( sphIsReadable ( sFile.cstr() ) )
+			dFiles.Add ( std::move ( sFile ) );
+	};
 
-	CSphString & sRam = dFiles.Add();
-	sRam.SetSprintf ( "%s.ram", m_sPath.cstr() );
-	// RT index might be with flushed RAM into disk chunk
-	CSphString sTmpError;
-	if ( !sphIsReadable ( sRam.cstr(), &sTmpError ) )
-		dFiles.Pop();
-
-	std::unique_ptr<FilenameBuilder_i> pFilenameBuilder;
-	if ( !pParentBuilder && GetIndexFilenameBuilder() )
-	{
-		pFilenameBuilder = GetIndexFilenameBuilder() ( m_sIndexName.cstr() );
-		pParentBuilder = pFilenameBuilder.get();
-	}
-
-	GetSettingsFiles ( m_pTokenizer, m_pDict, GetSettings(), pParentBuilder, dFiles );
+	fnAddFile ( ".meta" );
+	fnAddFile ( ".ram" );
 
 	if ( m_tMutableSettings.NeedSave() ) // should be file already after post-setup
+		fnAddFile ( sphGetExt ( SPH_EXT_SETTINGS ) );
+
+	std::unique_ptr<FilenameBuilder_i> pFilenameBuilder { nullptr };
+	if ( !pParentFilenameBuilder && GetIndexFilenameBuilder() )
 	{
-		CSphString & sMutableSettings = dFiles.Add();
-		sMutableSettings.SetSprintf ( "%s%s", m_sPath.cstr(), sphGetExt ( SPH_EXT_SETTINGS ) );
+		pFilenameBuilder = GetIndexFilenameBuilder() ( m_sIndexName.cstr() );
+		pParentFilenameBuilder = pFilenameBuilder.get();
 	}
+	GetSettingsFiles ( m_pTokenizer, m_pDict, GetSettings(), pParentFilenameBuilder, dExt );
 
-	auto tGuard = RtGuard();
-	for ( const auto& pIndex : tGuard.m_dDiskChunks )
-		pIndex->Cidx().GetIndexFiles ( dFiles, pParentBuilder );
-
-	dFiles.Uniq(); // might be duplicates of tok \ dict files from disk chunks
+	RtGuard().m_dDiskChunks.for_each ( [&] ( ConstDiskChunkRefPtr_t& p ) { p->Cidx().GetIndexFiles ( dFiles, dExt, pParentFilenameBuilder ); } );
+	dExt.Uniq(); // might be duplicates of tok \ dict files from disk chunks
 }
-
 
 bool RtIndex_c::CopyExternalFiles ( int /*iPostfix*/, StrVec_t & dCopied )
 {
@@ -10198,43 +10212,6 @@ bool RtIndex_c::CopyExternalFiles ( int /*iPostfix*/, StrVec_t & dCopied )
 	return true;
 }
 
-// todo! Remove this, make using GetIndexFiles instead (this is duplication of existing functionality)
-void RtIndex_c::CollectFiles ( StrVec_t & dFiles, StrVec_t & dExt ) const
-{
-	if ( m_pTokenizer && !m_pTokenizer->GetSettings().m_sSynonymsFile.IsEmpty() )
-		dExt.Add ( m_pTokenizer->GetSettings ().m_sSynonymsFile );
-
-	if ( m_pDict )
-	{
-		const CSphString & sStopwords = m_pDict->GetSettings().m_sStopwords;
-		if ( !sStopwords.IsEmpty() )
-			sphSplit ( dExt, sStopwords.cstr(), sStopwords.Length(), " \t," );
-
-		m_pDict->GetSettings ().m_dWordforms.Apply ( [&dExt] ( const CSphString & a ) { dExt.Add ( a ); } );
-	}
-
-	{
-		auto tGuard = RtGuard();
-		tGuard.m_dDiskChunks.for_each ( [&] ( ConstDiskChunkRefPtr_t& p ) { p->Cidx().CollectFiles ( dFiles, dExt ); } );
-	}
-
-	CSphString sPath;
-	sPath.SetSprintf ( "%s.meta", m_sPath.cstr () );
-	if ( sphIsReadable ( sPath ) )
-		dFiles.Add ( sPath );
-	sPath.SetSprintf ( "%s.ram", m_sPath.cstr () );
-	if ( sphIsReadable ( sPath ) )
-		dFiles.Add ( sPath );
-
-	if ( !m_tMutableSettings.NeedSave() )
-		return;
-
-	// should be file already after post-setup
-	sPath.SetSprintf ( "%s%s", m_sPath.cstr(), sphGetExt ( SPH_EXT_SETTINGS ) );
-	if ( sphIsReadable ( sPath ) )
-		dFiles.Add ( sPath );
-}
-
 void RtIndex_c::ProhibitSave()
 {
 	StopOptimize();
@@ -10258,7 +10235,7 @@ void RtIndex_c::LockFileState ( CSphVector<CSphString>& dFiles )
 	SaveAttributes ( sError ); // fixme! report error, better discard whole locking
 	m_eSaving.store ( WriteState_e::DISABLED, std::memory_order_relaxed );
 	std::atomic_thread_fence ( std::memory_order_release );
-	GetIndexFiles ( dFiles, nullptr );
+	GetIndexFiles ( dFiles, dFiles );
 }
 
 

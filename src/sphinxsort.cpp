@@ -2727,6 +2727,10 @@ public:
 		if ( dRhs.IsEmpty () )
 		{
 			CSphMatchQueueTraits::SwapMatchQueueTraits ( dRhs );
+
+			// if rhs is empty, it might not have a complete schema
+			Swap ( m_pSchema, dRhs.m_pSchema );
+
 			m_hGroup2Match.Swap ( dRhs.m_hGroup2Match );
 			dRhs.m_bMatchesFinalized = m_bMatchesFinalized;
 			dRhs.m_iMaxUsed = m_iMaxUsed;
@@ -4026,6 +4030,7 @@ public:
 			m_pDistinctFetcher->SetColumnar(pColumnar);
 	}
 
+	bool	IsCutoffDisabled() const final { return true; }
 	bool	Push ( const CSphMatch & tEntry ) final							{ return PushEx<false>(tEntry); }
 	void	Push ( const VecTraits_T<const CSphMatch> & dMatches ) final	{ assert ( 0 && "Not supported in grouping"); }
 	bool	PushGrouped ( const CSphMatch & tEntry, bool ) final		{ return PushEx<true>(tEntry); }

@@ -77,8 +77,12 @@ public:
 
 
 // cluster related data
-struct ReplicationCluster_t : public ClusterDesc_t
+class ReplicationCluster_t : public ClusterDesc_t
 {
+public:
+	ReplicationCluster_t() = default;
+	virtual ~ReplicationCluster_t();
+
 	// replicator
 	wsrep_t *	m_pProvider = nullptr;
 
@@ -1161,17 +1165,20 @@ static void ReplicateClusterDone ( ReplicationClusterPtr_t & pCluster )
 		pProvider->disconnect ( pProvider );
 	}
 
-	sphLogDebug ( "disconnect from cluster invoked" );
+	sphLogDebug ( "disconnect from cluster %s invoked", pCluster->m_sName.cstr() );
+}
+
+ReplicationCluster_t::~ReplicationCluster_t()
+{
+	sphLogDebug ( "cluster %s wait to finish", m_sName.cstr() );
 	// Listening thread are now running and receiving writesets. Wait for them
 	// to join. Thread will join after signal handler closes wsrep connection
-	pCluster->m_bWorkerActive.Wait ( [] ( bool bWorking ) { return !bWorking; } );
+	m_bWorkerActive.Wait ( [] ( bool bWorking ) { return !bWorking; } );
 
-	pCluster->m_pProvider = nullptr;
-	pCluster->HeartBeat();
-	pCluster = ReplicationClusterPtr_t();
+	HeartBeat();
 
-	wsrep_unload ( pProvider );
-	sphLogDebug ( "ReplicateClusterDone finished, cluster deleted lib %p unloaded", pProvider );
+	wsrep_unload ( m_pProvider );
+	sphLogDebug ( "cluster %s finished, cluster deleted lib %p unloaded", m_sName.cstr(), m_pProvider );
 }
 
 // check return code from Galera calls
@@ -1445,7 +1452,7 @@ void ReplicateClustersDelete() EXCLUDES ( g_tClustersLock )
 		if ( !g_hClusters.GetLength() )
 			return;
 
-		for ( auto& tCluster : g_hClusters )
+		for ( auto & tCluster : g_hClusters )
 		{
 			sphLogDebug ( "ReplicateClustersDelete for %s", tCluster.first.cstr() );
 			ReplicateClusterDone ( tCluster.second );
@@ -2212,7 +2219,7 @@ static ServedIndexRefPtr_c LoadNewIndex ( const CSphString& sIndexPath, const CS
 	if ( !bPrealloc )
 		return pResult;
 
-	UnlockedHazardIdxFromServed ( *pNewServed )->GetIndexFiles ( tIndexFiles.m_dRef, nullptr );
+	UnlockedHazardIdxFromServed ( *pNewServed )->GetIndexFiles ( tIndexFiles.m_dRef, tIndexFiles.m_dRef );
 	for ( const auto & i : dWarnings )
 		sphWarning ( "index '%s': %s", sIndexName.cstr(), i.cstr() );
 
@@ -2230,7 +2237,7 @@ static bool LoadIndex ( const CSphString& sIndexPath, const CSphString& sIndexTy
 	{
 		WIdx_T<RtIndex_i*> pIndex { pOldIndex };
 		pIndex->ProhibitSave();
-		pIndex->GetIndexFiles ( tIndexFiles.m_dOld, nullptr );
+		pIndex->GetIndexFiles ( tIndexFiles.m_dOld, tIndexFiles.m_dOld );
 
 		auto pNewIndex = LoadNewIndex ( sIndexPath, sIndexType, sIndexName, sCluster, tIndexFiles, sError );
 		if (!pNewIndex)
@@ -3411,8 +3418,8 @@ public:
 		auto tReply = APIAnswer ( tOut );
 		tOut.SendByte ( tRes.m_bIndexActive );
 		SendArray ( pDst->m_dRemotePaths, tOut );
-		tOut.SendInt ( pDst->m_dNodeChunks.GetBits() );
-		tOut.SendBytes ( pDst->m_dNodeChunks.Begin(), sizeof(DWORD) * pDst->m_dNodeChunks.GetSize() );
+		tOut.SendInt ( pDst->m_dNodeChunks.GetSize() );
+		tOut.SendBytes ( pDst->m_dNodeChunks.Begin(), pDst->m_dNodeChunks.GetSizeBytes() );
 		tOut.SendUint64 ( pDst->m_tmTimeout );
 		tOut.SendUint64 ( pDst->m_tmTimeoutFile );
 	}
@@ -3427,7 +3434,7 @@ public:
 		GetArray ( pDst->m_dRemotePaths, tReq );
 		int iBits = tReq.GetInt();
 		pDst->m_dNodeChunks.Init ( iBits );
-		tReq.GetBytes ( pDst->m_dNodeChunks.Begin(), sizeof(DWORD) * pDst->m_dNodeChunks.GetSize() );
+		tReq.GetBytes ( pDst->m_dNodeChunks.Begin(), pDst->m_dNodeChunks.GetSizeBytes() );
 		pDst->m_tmTimeout = tReq.GetUint64();
 		pDst->m_tmTimeoutFile = tReq.GetUint64();
 
@@ -5180,7 +5187,7 @@ static bool NodesReplicateIndex ( const CSphString & sCluster, const CSphString 
 			 PQRemoteReply_t & tRes = PQRemoteBase_c::GetRes ( *dNodes[iNode] );
 			 const CSphBitvec & tFilesDst = tRes.m_pDst->m_dNodeChunks;
 			 bool bSameFiles = ( tSigSrc.m_dBaseNames.GetLength()==tRes.m_pDst->m_dRemotePaths.GetLength() );
-			 bool bSameHashes = ( tSigSrc.m_dHashes.GetLength() / HASH20_SIZE==tRes.m_pDst->m_dNodeChunks.GetBits() );
+			 bool bSameHashes = ( tSigSrc.m_dHashes.GetLength() / HASH20_SIZE==tRes.m_pDst->m_dNodeChunks.GetSize() );
 			 if ( !bSameFiles || !bSameHashes )
 			 {
 				if ( !sError.IsEmpty() )
@@ -5189,7 +5196,7 @@ static bool NodesReplicateIndex ( const CSphString & sCluster, const CSphString 
 				sError.SetSprintf ( "%s'%s:%d' wrong stored files %d(%d), hashes %d(%d)",
 					sError.scstr(), dNodes[iNode]->m_tDesc.m_sAddr.cstr(), dNodes[iNode]->m_tDesc.m_iPort,
 					tSigSrc.m_dBaseNames.GetLength(), tRes.m_pDst->m_dRemotePaths.GetLength(),
-					tSigSrc.m_dHashes.GetLength() / HASH20_SIZE, tRes.m_pDst->m_dNodeChunks.GetBits() );
+					tSigSrc.m_dHashes.GetLength() / HASH20_SIZE, tRes.m_pDst->m_dNodeChunks.GetSize() );
 				continue;
 			 }
 
