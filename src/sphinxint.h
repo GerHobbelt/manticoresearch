@@ -22,7 +22,7 @@
 #include "sphinxutils.h"
 #include "fileio.h"
 #include "match.h"
-#include "openhash.h"
+#include "std/openhash.h"
 #include "dict/dict_base.h"
 
 #include <float.h>
@@ -30,14 +30,6 @@
 //////////////////////////////////////////////////////////////////////////
 // INTERNAL CONSTANTS
 //////////////////////////////////////////////////////////////////////////
-
-// cover on strerror
-inline const char * strerrorm ( int errnum )
-{
-	if (errnum==EMFILE)
-		return "Too many open files (on linux see /etc/security/limits.conf, 'ulimit -n', max_open_files config option)";
-	return strerror (errnum);
-}
 
 // used as bufer size in num-to-string conversions
 #define SPH_MAX_NUMERIC_STR 64
@@ -1514,31 +1506,6 @@ inline DWORD PrereadMappingCountingBits ( const char * sIndexName, const char * 
 		sphWarning ( "index '%s': %s for %s", sIndexName, sWarning.cstr(), sFor );
 	return uBits;
 }
-
-#if PARANOID
-
-#define SPH_VARINT_DECODE(_type,_getexpr) \
-	DWORD b = 0; \
-	_type v = 0; \
-	int it = 0; \
-	do { b = _getexpr; v = ( v<<7 ) + ( b&0x7f ); it++; } while ( b&0x80 ); \
-	assert ( (it-1)*7<=sizeof(_type)*8 ); \
-	return v;
-
-#else
-
-#define SPH_VARINT_DECODE(_type,_getexpr) \
-	DWORD b = _getexpr; \
-	_type res = 0; \
-	while ( b & 0x80 ) \
-	{ \
-		res = ( res<<7 ) + ( b & 0x7f ); \
-		b = _getexpr; \
-	} \
-	res = ( res<<7 ) + b; \
-	return res;
-
-#endif // PARANOID
 
 // crash related code
 struct CrashQuery_t

@@ -405,6 +405,7 @@ public:
 	void				SetColumnar ( columnar::Columnar_i * pColumnar ) override { m_pColumnar = pColumnar; }
 	int64_t				GetTotalCount() const override { return m_iTotal; }
 	void				CloneTo ( ISphMatchSorter * pTrg ) const override;
+	bool				CanBeCloned() const override;
 	void				SetFilteredAttrs ( const sph::StringSet & hAttrs, bool bAddDocid ) override;
 	void				TransformPooled2StandalonePtrs ( GetBlobPoolFromMatch_fn fnBlobPoolFromMatch, GetColumnarFromMatch_fn fnGetColumnarFromMatch, bool bFinalizeSorters ) override;
 
@@ -454,6 +455,23 @@ void MatchSorter_c::CloneTo ( ISphMatchSorter * pTrg ) const
 	pTrg->SetRandom(m_bRandomize);
 	pTrg->SetState(m_tState);
 	pTrg->SetSchema ( m_pSchema->CloneMe(), false );
+}
+
+
+bool MatchSorter_c::CanBeCloned() const
+{
+	if ( !m_pSchema )
+		return true;
+
+	bool bGotStatefulUDF = false;
+	for ( int i = 0; i < m_pSchema->GetAttrsCount() && !bGotStatefulUDF; i++ )
+	{
+		auto & pExpr = m_pSchema->GetAttr(i).m_pExpr;
+		if ( pExpr )
+			pExpr->Command ( SPH_EXPR_GET_STATEFUL_UDF, &bGotStatefulUDF );
+	}
+
+	return !bGotStatefulUDF;
 }
 
 
@@ -2497,10 +2515,7 @@ public:
 		}
 	}
 
-	bool CanBeCloned () const final
-	{
-		return !DISTINCT;
-	}
+	bool CanBeCloned() const final { return !DISTINCT && BASE::CanBeCloned(); }
 
 protected:
 	ESphGroupBy 				m_eGroupBy;     ///< group-by function
@@ -2727,12 +2742,6 @@ public:
 		if ( dRhs.IsEmpty () )
 		{
 			CSphMatchQueueTraits::SwapMatchQueueTraits ( dRhs );
-
-			// if rhs is empty, it might not have a complete schema
-			// [tmg] - need to keep this.m_pSchema as m_tPrregroup and locators at other places have raw pointers into this.m_pSchema
-			// and this sorter will be used in next shards
-			dRhs.SetSchema ( m_pSchema->CloneMe(), false );
-
 			m_hGroup2Match.Swap ( dRhs.m_hGroup2Match );
 			dRhs.m_bMatchesFinalized = m_bMatchesFinalized;
 			dRhs.m_iMaxUsed = m_iMaxUsed;
@@ -4082,8 +4091,8 @@ public:
 			m_dUniq.Uniq();
 	}
 
-	int		GetLength() final		{ return m_bDataInitialized ? 1 : 0; }
-	bool	CanBeCloned() const final	{ return !DISTINCT; }
+	int		GetLength() final			{ return m_bDataInitialized ? 1 : 0; }
+	bool	CanBeCloned() const final	{ return !DISTINCT && BASE::CanBeCloned(); }
 
 	// TODO! test.
 	ISphMatchSorter * Clone () const final
@@ -4679,11 +4688,13 @@ private:
 	bool	PredictAggregates() const;
 	bool	ReplaceWithColumnarItem ( const CSphString & sAttr, ESphEvalStage eStage );
 	int		ReduceMaxMatches() const;
+	int		AdjustMaxMatches ( int iMaxMatches ) const;
 	bool	ConvertColumnarToDocstore();
 	const CSphColumnInfo * GetAliasedColumnarAttr ( const CSphColumnInfo & tAttr );
 	bool	SetupAggregateExpr ( CSphColumnInfo & tExprCol, const CSphString & sExpr, DWORD uQueryPackedFactorFlags );
 	bool	SetupColumnarAggregates ( CSphColumnInfo & tExprCol );
 	void	UpdateAggregateDependencies ( CSphColumnInfo & tExprCol );
+	int		GetGroupbyAttrIndex() const;
 
 	ISphMatchSorter *	SpawnQueue();
 	std::unique_ptr<ISphFilter>	CreateAggrFilter() const;
@@ -4932,24 +4943,7 @@ bool QueueCreator_c::SetupGroupbySettings ( bool bHasImplicitGrouping )
 	}
 
 	// setup groupby attr
-	int iGroupBy = tSchema.GetAttrIndex ( m_tQuery.m_sGroupBy.cstr() );
-
-	if ( iGroupBy<0 )
-	{
-		// try aliased groupby attr (facets)
-		ARRAY_FOREACH ( i, m_tQuery.m_dItems )
-			if ( m_tQuery.m_sGroupBy==m_tQuery.m_dItems[i].m_sExpr )
-			{
-				iGroupBy = tSchema.GetAttrIndex ( m_tQuery.m_dItems[i].m_sAlias.cstr() );
-				break;
-
-			} else if ( m_tQuery.m_sGroupBy==m_tQuery.m_dItems[i].m_sAlias )
-			{
-				iGroupBy = tSchema.GetAttrIndex ( m_tQuery.m_dItems[i].m_sExpr.cstr() );
-				break;
-			}
-	}
-
+	int iGroupBy = GetGroupbyAttrIndex();
 	if ( iGroupBy<0 )
 		return Err ( "group-by attribute '%s' not found", m_tQuery.m_sGroupBy.cstr() );
 
@@ -5459,6 +5453,32 @@ void QueueCreator_c::UpdateAggregateDependencies ( CSphColumnInfo & tExprCol )
 		if ( tDep.m_eStage>tExprCol.m_eStage )
 			tDep.m_eStage = tExprCol.m_eStage;
 	}
+}
+
+
+int QueueCreator_c::GetGroupbyAttrIndex() const
+{
+	assert ( m_pSorterSchema );
+	auto & tSchema = *m_pSorterSchema;
+
+	int iGroupBy = tSchema.GetAttrIndex ( m_tQuery.m_sGroupBy.cstr() );
+	if ( iGroupBy>=0 )
+		return iGroupBy;
+
+	// try aliased groupby attr (facets)
+	ARRAY_FOREACH ( i, m_tQuery.m_dItems )
+		if ( m_tQuery.m_sGroupBy==m_tQuery.m_dItems[i].m_sExpr )
+		{
+			iGroupBy = tSchema.GetAttrIndex ( m_tQuery.m_dItems[i].m_sAlias.cstr() );
+			break;
+
+		} else if ( m_tQuery.m_sGroupBy==m_tQuery.m_dItems[i].m_sAlias )
+		{
+			iGroupBy = tSchema.GetAttrIndex ( m_tQuery.m_dItems[i].m_sExpr.cstr() );
+			break;
+		}
+
+	return iGroupBy;
 }
 
 
@@ -6388,25 +6408,46 @@ int QueueCreator_c::ReduceMaxMatches() const
 }
 
 
+int QueueCreator_c::AdjustMaxMatches ( int iMaxMatches ) const
+{
+	assert ( m_bGotGroupby );
+	if ( m_tQuery.m_bExplicitMaxMatches )
+		return iMaxMatches;
+
+	int iGroupbyAttr = GetGroupbyAttrIndex();
+	if ( iGroupbyAttr<0 )
+		return iMaxMatches;
+
+	const int MAX_MAXMATCHES=16384;
+	int iCountDistinct = m_tSettings.m_fnGetCountDistinct ? m_tSettings.m_fnGetCountDistinct ( m_pSorterSchema->GetAttr(iGroupbyAttr).m_sName ) : -1;
+	if ( iCountDistinct>MAX_MAXMATCHES )
+		return iMaxMatches;
+
+	return Max ( iCountDistinct, iMaxMatches );
+}
+
+
 ISphMatchSorter * QueueCreator_c::SpawnQueue()
 {
 	bool bNeedFactors = !!(m_uPackedFactorFlags & SPH_FACTOR_ENABLE);
 
-	if ( !m_bGotGroupby )
+	if ( m_bGotGroupby )
 	{
-		if ( m_tSettings.m_pCollection )
-			return new CollectQueue_c ( m_tSettings.m_iMaxMatches, *m_tSettings.m_pCollection );
-
-		int iMaxMatches = ReduceMaxMatches();
-		ISphMatchSorter * pResult = CreatePlainSorter ( m_eMatchFunc, m_tQuery.m_bSortKbuffer, iMaxMatches, bNeedFactors );
-		if ( !pResult )
-			return nullptr;
-
-		return CreateColumnarProxySorter ( pResult, iMaxMatches, *m_pSorterSchema, m_tStateMatch, m_eMatchFunc, bNeedFactors, m_tSettings.m_bComputeItems, m_bMulti );
+		m_tGroupSorterSettings.m_iMaxMatches = AdjustMaxMatches ( m_tGroupSorterSettings.m_iMaxMatches );
+		return sphCreateSorter1st ( m_eMatchFunc, m_eGroupFunc, &m_tQuery, m_tGroupSorterSettings, bNeedFactors, PredictAggregates() );
 	}
 
-	return sphCreateSorter1st ( m_eMatchFunc, m_eGroupFunc, &m_tQuery, m_tGroupSorterSettings, bNeedFactors, PredictAggregates() );
+	if ( m_tSettings.m_pCollection )
+		return new CollectQueue_c ( m_tSettings.m_iMaxMatches, *m_tSettings.m_pCollection );
+
+	int iMaxMatches = ReduceMaxMatches();
+	ISphMatchSorter * pResult = CreatePlainSorter ( m_eMatchFunc, m_tQuery.m_bSortKbuffer, iMaxMatches, bNeedFactors );
+	if ( !pResult )
+		return nullptr;
+
+	return CreateColumnarProxySorter ( pResult, iMaxMatches, *m_pSorterSchema, m_tStateMatch, m_eMatchFunc, bNeedFactors, m_tSettings.m_bComputeItems, m_bMulti );
 }
+
 
 bool QueueCreator_c::SetupComputeQueue ()
 {
@@ -6594,7 +6635,7 @@ std::pair<bool,int> ApplyImplicitCutoff ( const CSphQuery & tQuery, const VecTra
 		return { false, -1 };
 
 	// implicit cutoff when there's no sorting and no grouping 
-	if ( tQuery.m_sSortBy=="@weight desc" && tQuery.m_sGroupBy.IsEmpty() && !tQuery.m_bFacet && !tQuery.m_bFacetHead )
+	if ( ( tQuery.m_sSortBy=="@weight desc" || tQuery.m_sSortBy.IsEmpty() ) && tQuery.m_sGroupBy.IsEmpty() && !tQuery.m_bFacet && !tQuery.m_bFacetHead )
 		return { true, tQuery.m_iLimit+tQuery.m_iOffset };
 
 	return { false, -1 };

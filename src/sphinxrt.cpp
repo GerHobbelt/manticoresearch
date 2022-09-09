@@ -32,6 +32,7 @@
 #include "binlog.h"
 #include "memio.h"
 #include "secondaryindex.h"
+#include "docidlookup.h"
 #include "columnarrt.h"
 #include "columnarmisc.h"
 #include "sphinx_alter.h"
@@ -150,29 +151,10 @@ void RunOptimizeRtIndexWeak ( OptimizeTask_t tTask )
 // Variable Length Byte (VLB) encoding
 // store int variable in as much bytes as actually needed to represent it
 template < typename T, typename P >
-static inline void ZipT ( CSphVector < BYTE, P > & dOut, T uValue )
+static inline void ZipT_LE ( CSphVector < BYTE, P > & dOut, T uValue )
 {
-	do
-	{
-		BYTE bOut = (BYTE)( uValue & 0x7f );
-		uValue >>= 7;
-		if ( uValue )
-			bOut |= 0x80;
-		dOut.Add ( bOut );
-	} while ( uValue );
+	ZipValueLE ( [&dOut] ( BYTE b ) { dOut.Add ( b ); }, uValue );
 }
-
-/* // note difference: sphZipValue packs in BE order (most significant bits cames first)
- template<typename T, typename WRITER>
-inline int sphZipValue ( WRITER fnPut, T tValue )
-{
-	int nBytes = sphCalcZippedLen ( tValue );
-	for ( int i = nBytes-1; i>=0; --i )
-		fnPut ( ( 0x7f & ( tValue >> ( 7 * i ) ) ) | ( i ? 0x80 : 0 ) );
-
-	return nBytes;
-}
- */
 
 #define SPH_MAX_KEYWORD_LEN (3*SPH_MAX_WORD_LEN+4)
 STATIC_ASSERT ( SPH_MAX_KEYWORD_LEN<255, MAX_KEYWORD_LEN_SHOULD_FITS_BYTE );
@@ -180,25 +162,16 @@ STATIC_ASSERT ( SPH_MAX_KEYWORD_LEN<255, MAX_KEYWORD_LEN_SHOULD_FITS_BYTE );
 
 // Variable Length Byte (VLB) decoding
 template < typename T >
-static inline void UnzipT ( T * pValue, const BYTE *& pIn )
+static inline void UnzipT_LE ( T * pValue, const BYTE *& pIn )
 {
-	T uValue = 0;
-	BYTE uIn;
-	int iOff = 0;
-
-	do
-	{
-		uIn = *pIn++;
-		uValue += ( T ( uIn & 0x7FU ) ) << iOff;
-		iOff += 7;
-	} while ( uIn & 0x80U );
-
-	*pValue = uValue;
+	*pValue = UnzipValueLE<T> ( [&pIn]() mutable { return *pIn++; } );
 }
 
 template < typename T >
-static inline T UnzipT ( const BYTE *& pIn )
+static inline T UnzipT_LE ( const BYTE *& pIn )
 {
+	return UnzipValueLE<T> ( [&pIn]() mutable { return *pIn++; } );
+
 	T uValue = 0;
 	BYTE uIn;
 	int iOff = 0;
@@ -213,20 +186,6 @@ static inline T UnzipT ( const BYTE *& pIn )
 	return uValue;
 }
 
-/* // Note difference: in code below zipped bytes came in BE order (most significant first)
- * #define SPH_VARINT_DECODE(_type,_getexpr) \
-	register DWORD b = _getexpr; \
-	register _type res = 0; \
-	while ( b & 0x80 ) \
-	{ \
-		res = ( res<<7 ) + ( b & 0x7f ); \
-		b = _getexpr; \
-	} \
-	res = ( res<<7 ) + b; \
-	return res;
-
- */
-
 // Variable Length Byte (VLB) skipping (BE/LE agnostic)
 static inline void SkipZipped ( const BYTE *& pIn )
 {
@@ -235,10 +194,10 @@ static inline void SkipZipped ( const BYTE *& pIn )
 	++pIn; // jump over last one
 }
 
-#define ZipDword ZipT<DWORD>
-#define ZipQword ZipT<uint64_t>
-#define UnzipDword UnzipT<DWORD>
-#define UnzipQword UnzipT<uint64_t>
+#define ZipDword ZipT_LE<DWORD>
+#define ZipQword ZipT_LE<uint64_t>
+#define UnzipDword UnzipT_LE<DWORD>
+#define UnzipQword UnzipT_LE<uint64_t>
 
 #define ZipDocid ZipQword
 #define ZipWordid ZipQword
@@ -754,31 +713,6 @@ ByteBlob_t GetHitsBlob ( const RtSegment_t& tSeg, const RtDoc_t& tDoc )
 	return { pHits, pEnd - pHits };
 }
 
-//////////////////////////////////////////////////////////////////////////
-
-uint64_t MemoryReader_c::UnzipOffset()
-{
-	assert ( m_pCur );
-	assert ( m_pCur<m_pData+m_iLen );
-	return UnzipQword ( m_pCur );
-}
-
-DWORD MemoryReader_c::UnzipInt()
-{
-	assert ( m_pCur );
-	assert ( m_pCur<m_pData+m_iLen );
-	return UnzipDword ( m_pCur );
-}
-
-void MemoryWriter_c::ZipOffset ( uint64_t uVal )
-{
-	ZipQword ( m_dBuf, uVal );
-}
-
-void MemoryWriter_c::ZipInt ( DWORD uVal )
-{
-	ZipDword ( m_dBuf, uVal );
-}
 //////////////////////////////////////////////////////////////////////////
 
 /// forward ref
@@ -3693,6 +3627,18 @@ struct SaveDiskDataContext_t : public BuildHeader_t
 };
 
 
+struct CmpDocidLookup_fn
+{
+	static inline bool IsLess ( const DocidRowidPair_t & a, const DocidRowidPair_t & b )
+	{
+		if ( a.m_tDocID==b.m_tDocID )
+			return a.m_tRowID < b.m_tRowID;
+
+		return (uint64_t)a.m_tDocID < (uint64_t)b.m_tDocID;
+	}
+};
+
+
 bool RtIndex_c::WriteAttributes ( SaveDiskDataContext_t & tCtx, CSphString & sError ) const
 {
 	CSphString sSPA, sSPB, sSPT, sSPHI, sSPDS, sSPC, sSIdx;
@@ -3838,7 +3784,7 @@ bool RtIndex_c::WriteAttributes ( SaveDiskDataContext_t & tCtx, CSphString & sEr
 	if ( pDocstoreBuilder )
 		pDocstoreBuilder->Finalize();
 
-	dLookup.Sort ( bind ( &DocidRowidPair_t::m_tDocID ) );
+	dLookup.Sort ( CmpDocidLookup_fn() );
 
 	if ( !WriteDocidLookup ( sSPT, dLookup, sError ) )
 		return false;
@@ -7315,9 +7261,7 @@ static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tR
 				tThMeta.m_sWarning = tChunkMeta.m_sWarning;
 
 			tThMeta.m_bTotalMatchesApprox |= tChunkMeta.m_bTotalMatchesApprox;
-
-			for ( const auto & i : tChunkMeta.m_dUsedIterators )
-				tThMeta.m_dUsedIterators.Add(i);
+			tThMeta.m_tIteratorStats.Merge ( tChunkMeta.m_tIteratorStats );
 
 			if ( bInterrupt && !tChunkMeta.m_sError.IsEmpty() )
 				// FIXME? maybe handle this more gracefully (convert to a warning)?

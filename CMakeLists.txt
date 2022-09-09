@@ -112,26 +112,30 @@ if (NOT WIN32)
 
 	set ( STATIC_BINARY OFF CACHE BOOL "Produce statically linked ELF" )
 	add_feature_info ( Static STATIC_BINARY "make pure static build undependent of any local libraries" )
-	if (STATIC_BINARY)
-		# options for clang/gcc c and c++
-		target_compile_options ( lextra INTERFACE $<${ONLYGNUCLANGC_CXX}:-static> )
-		set ( HAVE_DLOPEN 0 CACHE BOOL "" FORCE )
-		set ( HAVE_DLERROR 0 CACHE BOOL "" FORCE )
-		set ( HAVE_GETADDRINFO_A 0 CACHE BOOL "" FORCE )
-		set ( WITH_ODBC 0 CACHE BOOL "" FORCE )
-		set ( WITH_MYSQL 0 CACHE BOOL "" FORCE )
-		set ( WITH_POSTGRESQL 0 CACHE BOOL "" FORCE )
-		set ( WITH_GALERA 0 CACHE BOOL "" FORCE )
-		set ( WITH_SSL 0 CACHE BOOL "" FORCE )
-		SET ( BUILD_TESTING 0 CACHE BOOL "" FORCE )
-	elseif (NOT WIN32)
-		if (CMAKE_DL_LIBS)
-			target_link_libraries ( lextra INTERFACE ${CMAKE_DL_LIBS} )
-		endif ()
-		set ( CMAKE_REQUIRED_LIBRARIES "${CMAKE_DL_LIBS}" )
-		check_symbol_exists ( dlopen "dlfcn.h" HAVE_DLOPEN )
-		check_symbol_exists ( dlerror "dlfcn.h" HAVE_DLERROR )
+endif ()
+if (STATIC_BINARY)
+	# options for clang/gcc c and c++
+	target_compile_options ( lextra INTERFACE $<${ONLYGNUCLANGC_CXX}:-static> )
+	set ( HAVE_DLOPEN 0 CACHE BOOL "" FORCE )
+	set ( HAVE_DLERROR 0 CACHE BOOL "" FORCE )
+	set ( HAVE_GETADDRINFO_A 0 CACHE BOOL "" FORCE )
+	set ( WITH_ODBC 0 CACHE BOOL "" FORCE )
+	set ( WITH_MYSQL 0 CACHE BOOL "" FORCE )
+	set ( WITH_POSTGRESQL 0 CACHE BOOL "" FORCE )
+	set ( WITH_GALERA 0 CACHE BOOL "" FORCE )
+	set ( WITH_SSL 0 CACHE BOOL "" FORCE )
+	set ( WITH_ZSTD 0 CACHE BOOL "" FORCE )
+	SET ( BUILD_TESTING 0 CACHE BOOL "" FORCE )
+elseif (NOT WIN32)
+	if (CMAKE_DL_LIBS) # CMAKE internal, usually '-ldl' on most UNIX machines
+		target_link_libraries ( lextra INTERFACE ${CMAKE_DL_LIBS} )
 	endif ()
+	set ( CMAKE_REQUIRED_LIBRARIES "${CMAKE_DL_LIBS}" )
+	check_symbol_exists ( dlopen "dlfcn.h" HAVE_DLOPEN )
+	check_symbol_exists ( dlerror "dlfcn.h" HAVE_DLERROR )
+else ()
+	set ( HAVE_DLOPEN 1 CACHE BOOL "Use emulated dlopen" FORCE )
+	set ( HAVE_DLERROR 1 CACHE BOOL "Use emulated dlerror" FORCE )
 endif ()
 
 include ( TestBigEndian ) # fixme! That is deprecated in cmake 3.20 in favor to CMAKE_<LANG>_BYTE_ORDER var
@@ -142,7 +146,7 @@ check_include_file ( "stdint.h" HAVE_STDINT_H )
 check_include_file ( "inttypes.h" HAVE_INTTYPES_H )
 check_include_file ( "malloc.h" HAVE_MALLOC_H )
 
-target_compile_options ( lextra INTERFACE $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:-D_CRT_SECURE_NO_WARNINGS -wd4996 -wd4706 -wd4244 -wd4702> )
+target_compile_options ( lextra INTERFACE $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:-D_CRT_SECURE_NO_WARNINGS -wd4996 -wd4706 -wd4244 -wd4702 -wd4577> )
 
 include ( CheckFunctionExists )
 check_function_exists ( strnlen HAVE_STRNLEN )
@@ -165,6 +169,16 @@ target_compile_options ( lextra INTERFACE $<${CLANGWIN}:-fno-strict-aliasing -Wn
 
 # disable rtti
 target_compile_options ( lextra INTERFACE $<${ONLYGNUCLANGCXX}:-fno-rtti>$<${MSCXX}:/GR-> ) # no rtti
+
+if (WIN32)
+	target_compile_definitions ( lextra INTERFACE
+			_CRT_SECURE_NO_DEPRECATE=1
+			_CRT_NONSTDC_NO_DEPRECATE=1
+			)
+
+	# that is necessary only for IDE correct highlighting. Note, that is only global (not target-located) definitions, global-wide
+#	add_compile_definitions ( _WIN32=1 )
+endif()
 
 
 if (COVERAGE_TEST)

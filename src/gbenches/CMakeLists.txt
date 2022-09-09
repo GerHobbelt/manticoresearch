@@ -6,7 +6,7 @@ if (NOT TARGET benchmark::benchmark_main)
 	return ()
 endif ()
 
-add_executable ( gmanticorebench
+add_executable ( gmanticorebench EXCLUDE_FROM_ALL
 		functions.cpp
 		text.cpp
 		json.cpp
@@ -15,7 +15,7 @@ add_executable ( gmanticorebench
 		popcount.cpp
 		)
 
-target_include_directories ( gmanticorebench PRIVATE .. )
+target_include_directories ( gmanticorebench PRIVATE "${MANTICORE_SOURCE_DIR}/src" )
 target_link_libraries ( gmanticorebench
 		lmanticore
 		lsearchd

@@ -207,6 +207,7 @@ ThreadRole HandlerThread; // thread which serves clients
 static CSphString		g_sConfigFile;
 static bool				g_bCleanLoadedConfig = true; // whether to clean config when it parsed and no more necessary
 static bool				LOG_LEVEL_SHUTDOWN = val_from_env("MANTICORE_TRACK_DAEMON_SHUTDOWN",false); // verbose logging when daemon shutdown, ruled by this env variable
+static CSphString		g_sConfigPath; // for resolve paths to absolute
 
 static auto&			g_bSeamlessRotate	= sphGetSeamlessRotate ();
 
@@ -291,10 +292,6 @@ static void sphLogEntry ( ESphLogLevel , char * sBuf, char * sTtyBuf )
 #endif
 {
 #if _WIN32
-
-#pragma message( "Automatically linking with AdvAPI32.Lib" )
-#pragma comment( lib, "AdvAPI32.Lib" )
-
 	if ( g_bService && g_iLogFile==STDOUT_FILENO )
 	{
 		HANDLE hEventSource;
@@ -5515,13 +5512,14 @@ void SearchHandler_c::OnRunFinished()
 
 SphQueueSettings_t SearchHandler_c::MakeQueueSettings ( const CSphIndex * pIndex, int iMaxMatches, ISphExprHook * pHook ) const
 {
-	SphQueueSettings_t tQueueSettings ( pIndex->GetMatchSchema (), m_pProfile );
-	tQueueSettings.m_bComputeItems = true;
-	tQueueSettings.m_pCollection = m_pCollectedDocs;
-	tQueueSettings.m_pHook = pHook;
-	tQueueSettings.m_iMaxMatches = GetMaxMatches ( iMaxMatches, pIndex );
-	tQueueSettings.m_bNeedDocids = m_bNeedDocIDs;	// need docids to merge results from indexes
-	return tQueueSettings;
+	SphQueueSettings_t tQS ( pIndex->GetMatchSchema (), m_pProfile );
+	tQS.m_bComputeItems = true;
+	tQS.m_pCollection = m_pCollectedDocs;
+	tQS.m_pHook = pHook;
+	tQS.m_iMaxMatches = GetMaxMatches ( iMaxMatches, pIndex );
+	tQS.m_bNeedDocids = m_bNeedDocIDs;	// need docids to merge results from indexes
+	tQS.m_fnGetCountDistinct = [pIndex]( const CSphString & sAttr ){ return pIndex->GetCountDistinct(sAttr); };
+	return tQS;
 }
 
 
@@ -5638,8 +5636,7 @@ struct LocalSearchRef_t
 			tResult.m_iSuccesses += tChild.m_iSuccesses;
 			tResult.m_tIOStats.Add ( tChild.m_tIOStats );
 
-			for ( const auto & i : tChild.m_dUsedIterators )
-				tResult.m_dUsedIterators.Add(i);
+			tResult.m_tIteratorStats.Merge ( tChild.m_tIteratorStats );
 
 			// failures
 			m_dFailuresSet[i].Append ( dChild.m_dFailuresSet[i] );
@@ -7510,6 +7507,7 @@ static const char * g_dSqlStmts[] =
 	"flush_hostnames", "flush_logs", "reload_indexes", "sysfilters", "debug", "alter_killlist_target",
 	"alter_index_settings", "join_cluster", "cluster_create", "cluster_delete", "cluster_index_add",
 	"cluster_index_delete", "cluster_update", "explain", "import_table", "lock_indexes", "unlock_indexes",
+	"show_settings"
 };
 
 
@@ -9087,10 +9085,8 @@ void BuildMeta ( VectorLike & dStatus, const CSphQueryResultMeta & tMeta )
 	}
 
 	StringBuilder_c sIterators { ", " };
-	CSphVector<IteratorDesc_t> dIterators = tMeta.m_dUsedIterators;
-	dIterators.Uniq();
-	for ( const auto & i : dIterators )
-		sIterators.Appendf ( "%s:%s", i.m_sAttr.cstr(), i.m_sType.cstr() );
+	for ( const auto & i : tMeta.m_tIteratorStats.m_dIterators )
+		sIterators.Appendf ( "%s:%s (%d%%)", i.m_sAttr.cstr(), i.m_sType.cstr(), int(float(i.m_iUsed)/tMeta.m_tIteratorStats.m_iTotal*100.0f) );
 
 	if ( !sIterators.IsEmpty() )
 		dStatus.MatchTuplet ( "index", sIterators.cstr() );
@@ -9293,7 +9289,7 @@ struct StringPtrTraits_t
 		m_dOff[iOffset] = m_dPackedData.GetLength ();
 
 		BYTE * pPacked = m_dPackedData.AddN ( sphCalcPackedLength(iBlobSize) );
-		pPacked += sphZipToPtr ( pPacked, iBlobSize );
+		pPacked += ZipToPtrBE ( pPacked, iBlobSize );
 		return pPacked;
 	}
 };
@@ -15966,6 +15962,8 @@ void ClientSession_c::FreezeLastMeta()
 	m_tLastMeta.m_sWarning = "";
 }
 
+static void HandleMysqlShowSettings ( const CSphConfig & hConf, RowBuffer_i & tOut );
+
 // just execute one sphinxql statement
 //
 // IMPORTANT! this does NOT start or stop profiling, as there a few external
@@ -16411,6 +16409,10 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 
 	case STMT_UNLOCK:
 		HandleMysqlUnlockIndexes ( tOut, pStmt->m_sIndex, m_tLastMeta.m_sWarning );
+		return true;
+
+	case STMT_SHOW_SETTINGS:
+		HandleMysqlShowSettings ( g_hCfg, tOut );
 		return true;
 
 	default:
@@ -18790,6 +18792,102 @@ void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile, bool bTestMo
 		sphFatal ( "secondary_indexes set but failed to initialize secondary library: %s", g_sSecondaryError.cstr() );
 
 	SetSecondaryIndexDefault ( bGotSecondary );
+	g_sConfigPath = sphGetCwd();
+}
+
+static void PutPath ( const CSphString & sCwd, const CSphString & sVar, RowBuffer_i & tOut )
+{
+	if ( !IsPathAbsolute ( sVar ) )
+	{
+		CSphString sPath;
+		sPath.SetSprintf ( "%s/%s", sCwd.cstr(), sVar.cstr() );
+		tOut.PutString ( sPath );
+	} else
+	{
+		tOut.PutString ( sVar );
+	}
+}
+
+class StringSetStatic_c : public sph::StringSet
+{
+public:
+	StringSetStatic_c ( std::initializer_list<const char *> dArgs )
+	{
+		for ( const char * sName : dArgs )
+			Add ( sName );
+	}
+};
+
+static StringSetStatic_c g_hSearchdPathVars {
+  "binlog_path"
+, "data_dir"
+, "lemmatizer_base"
+, "log"
+, "pid_file"
+, "plugin_dir"
+, "query_log"
+, "snippets_file_prefix"
+, "sphinxql_state" 
+, "ssl_ca"
+, "ssl_cert"
+, "ssl_key"
+};
+
+static void DumpSettingsSection ( const CSphConfig & hConf, const char * sSectionName, RowBuffer_i & tOut )
+{
+	if ( !hConf.Exists ( sSectionName ) || !hConf[sSectionName].Exists ( sSectionName ) )
+		return;
+
+	StringBuilder_c tTmp;
+	const CSphConfigSection & hNode = hConf[sSectionName][sSectionName];
+
+	for ( const auto & tIt : hNode )
+	{
+		tTmp.Clear();
+		tTmp.Appendf ( "%s.%s", sSectionName, tIt.first.cstr() );
+
+		const CSphVariant * pVal = &tIt.second;
+
+		do
+		{
+			// data packets
+			tOut.PutString ( tTmp.cstr() );
+
+			if ( g_hSearchdPathVars[tIt.first] )
+				PutPath ( g_sConfigPath, pVal->strval(), tOut );
+			else
+				tOut.PutString ( pVal->strval() );
+
+			tOut.Commit();
+
+			pVal = pVal->m_pNext;
+		} while ( pVal );
+	}
+}
+
+void HandleMysqlShowSettings ( const CSphConfig & hConf, RowBuffer_i & tOut )
+{
+	tOut.HeadBegin( 2 );
+	tOut.HeadColumn ( "Setting_name" );
+	tOut.HeadColumn ( "Value" );
+	tOut.HeadEnd();
+
+	// configuration file path
+	tOut.PutString ( "configuration_file" );
+	PutPath ( g_sConfigPath, g_sConfigFile, tOut );
+	tOut.Commit();
+	// pid 
+	tOut.PutString ( "worker_pid" );
+	tOut.PutNumAsString ( (int)getpid() );
+	tOut.Commit();
+
+	DumpSettingsSection ( hConf, "searchd", tOut );
+	DumpSettingsSection ( hConf, "common", tOut );
+	DumpSettingsSection ( hConf, "indexer", tOut );
+
+	// done
+	tOut.Eof();
+
 }
 
 // load index which is not yet load, and publish it in served indexes.
@@ -18916,49 +19014,59 @@ static void ConfigureAndPreloadOnStartup ( const CSphConfig & hConf, const StrVe
 		fprintf ( stdout, "precached %d indexes in %0.3f sec\n", iCounter, float(tmLoad)/1000000 );
 }
 
+
+static CSphString FixupFilename ( const CSphString & sFilename )
+{
+	CSphString sFixed = sFilename;
+
+#if _WIN32
+	sFixed = AppendWinInstallDir(sFixed);
+#endif
+
+	return sFixed;
+}
+
+
 void OpenDaemonLog ( const CSphConfigSection & hSearchd, bool bCloseIfOpened=false )
 {
-	// create log
-		const char * sLog = "searchd.log";
-		if ( hSearchd.Exists ( "log" ) )
+	CSphString sLog = "searchd.log";
+	if ( hSearchd.Exists ( "log" ) )
+	{
+		if ( hSearchd["log"]=="syslog" )
 		{
-			if ( hSearchd["log"]=="syslog" )
-			{
 #if !USE_SYSLOG
-				if ( g_iLogFile<0 )
-				{
-					g_iLogFile = STDOUT_FILENO;
-					sphWarning ( "failed to use syslog for logging. You have to reconfigure --with-syslog and rebuild the daemon!" );
-					sphInfo ( "will use default file 'searchd.log' for logging." );
-				}
-#else
-				g_bLogSyslog = true;
-#endif
-			} else
-			{
-				sLog = hSearchd["log"].cstr();
-			}
-		}
-
-		umask ( 066 );
-		if ( bCloseIfOpened && g_iLogFile!=STDOUT_FILENO )
-		{
-			close ( g_iLogFile );
-			g_iLogFile = STDOUT_FILENO;
-		}
-		if ( !g_bLogSyslog )
-		{
-			g_iLogFile = open ( sLog, O_CREAT | O_RDWR | O_APPEND, S_IREAD | S_IWRITE );
 			if ( g_iLogFile<0 )
 			{
 				g_iLogFile = STDOUT_FILENO;
-				sphFatal ( "failed to open log file '%s': %s", sLog, strerrorm(errno) );
+				sphWarning ( "failed to use syslog for logging. You have to reconfigure --with-syslog and rebuild the daemon!" );
+				sphInfo ( "will use default file 'searchd.log' for logging." );
 			}
-			LogChangeMode ( g_iLogFile, g_iLogFileMode );
-		}
+#else
+			g_bLogSyslog = true;
+#endif
+		} else
+			sLog = FixupFilename ( hSearchd["log"].cstr() );
+	}
 
-		g_sLogFile = sLog;
-		g_bLogTty = isatty ( g_iLogFile )!=0;
+	umask ( 066 );
+	if ( bCloseIfOpened && g_iLogFile!=STDOUT_FILENO )
+	{
+		close ( g_iLogFile );
+		g_iLogFile = STDOUT_FILENO;
+	}
+	if ( !g_bLogSyslog )
+	{
+		g_iLogFile = open ( sLog.cstr(), O_CREAT | O_RDWR | O_APPEND, S_IREAD | S_IWRITE );
+		if ( g_iLogFile<0 )
+		{
+			g_iLogFile = STDOUT_FILENO;
+			sphFatal ( "failed to open log file '%s': %s", sLog.cstr(), strerrorm(errno) );
+		}
+		LogChangeMode ( g_iLogFile, g_iLogFileMode );
+	}
+
+	g_sLogFile = sLog;
+	g_bLogTty = isatty ( g_iLogFile )!=0;
 }
 
 static void SetUidShort ( bool bTestMode )
@@ -19011,10 +19119,10 @@ void StopOrStopWaitAnother ( CSphVariant * v, bool bWait ) REQUIRES ( MainThread
 	if ( !v )
 		sphFatal ( "stop: option 'pid_file' not found in '%s' section 'searchd'", g_sConfigFile.cstr () );
 
-	const char * sPid = v->cstr (); // shortcut
-	FILE * fp = fopen ( sPid, "r" );
+	CSphString sPidFile = FixupFilename ( v->cstr () );
+	FILE * fp = fopen ( sPidFile.cstr(), "r" );
 	if ( !fp )
-		sphFatal ( "stop: pid file '%s' does not exist or is not readable", sPid );
+		sphFatal ( "stop: pid file '%s' does not exist or is not readable", sPidFile.cstr() );
 
 	char sBuf[16];
 	int iLen = (int) fread ( sBuf, 1, sizeof(sBuf)-1, fp );
@@ -19023,7 +19131,7 @@ void StopOrStopWaitAnother ( CSphVariant * v, bool bWait ) REQUIRES ( MainThread
 
 	int iPid = atoi(sBuf);
 	if ( iPid<=0 )
-		sphFatal ( "stop: failed to read valid pid from '%s'", sPid );
+		sphFatal ( "stop: failed to read valid pid from '%s'", sPidFile.cstr() );
 
 	int iWaitTimeout = g_iShutdownTimeoutUs + 100000;
 
@@ -19249,10 +19357,6 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	if ( !sError.IsEmpty() )
 		sError = "";
 
-	const char * szEndian = sphCheckEndian();
-	if ( szEndian )
-		sphDie ( "%s", szEndian );
-
 	//////////////////////
 	// parse command line
 	//////////////////////
@@ -19345,6 +19449,11 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	if ( i!=argc )
 		sphFatal ( "malformed or unknown option near '%s'; use '-h' or '--help' to see available options.", argv[i] );
 
+#if _WIN32
+	CheckWinInstall();
+#endif
+
+	SetupLemmatizerBase();
 	g_sConfigFile = sphGetConfigFile ( szCmdConfigFile );
 #if _WIN32
 	// init WSA on Windows
@@ -19356,7 +19465,6 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 
 	if ( !LoadExFunctions () )
 		sphFatal ( "failed to initialize extended socket functions: %s", sphSockError ( iStartupErr ) );
-
 
 	// i want my windows sessions to log onto stdout
 	// both in Debug and Release builds
@@ -19473,7 +19581,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	// create the pid
 	if ( bOptPIDFile )
 	{
-		g_sPidFile = hSearchdpre["pid_file"].cstr();
+		g_sPidFile = FixupFilename ( hSearchdpre["pid_file"].cstr() );
 
 		g_iPidFD = ::open ( g_sPidFile.scstr(), O_CREAT | O_WRONLY, S_IREAD | S_IWRITE );
 		if ( g_iPidFD<0 )
@@ -19506,7 +19614,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	SetSignalHandlers ( g_bOptNoDetach );
 
 	// create logs
-	if ( !g_bOptNoLock )
+	//if ( !g_bOptNoLock )
 	{
 		// create log
 		OpenDaemonLog ( hSearchd, true );
@@ -19514,17 +19622,21 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 		// create query log if required
 		if ( hSearchd.Exists ( "query_log" ) )
 		{
-			if ( hSearchd["query_log"]=="syslog" )
+			CSphString sQueryLog = hSearchd["query_log"].cstr();
+			if ( sQueryLog=="syslog" )
 				g_bQuerySyslog = true;
 			else
 			{
-				g_iQueryLogFile = open ( hSearchd["query_log"].cstr(), O_CREAT | O_RDWR | O_APPEND, S_IREAD | S_IWRITE );
+#if _WIN32
+				sQueryLog = AppendWinInstallDir(sQueryLog);
+#endif
+				g_iQueryLogFile = open ( sQueryLog.cstr(), O_CREAT | O_RDWR | O_APPEND, S_IREAD | S_IWRITE );
 				if ( g_iQueryLogFile<0 )
-					sphFatal ( "failed to open query log file '%s': %s", hSearchd["query_log"].cstr(), strerrorm(errno) );
+					sphFatal ( "failed to open query log file '%s': %s", sQueryLog.cstr(), strerrorm(errno) );
 
 				LogChangeMode ( g_iQueryLogFile, g_iLogFileMode );
 			}
-			g_sQueryLogFile = hSearchd["query_log"].cstr();
+			g_sQueryLogFile = sQueryLog.cstr();
 		}
 	}
 
@@ -19804,8 +19916,10 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 
 	gStats().m_uStarted = (DWORD)time(NULL);
 
-	// threads mode
-	if ( !InitSphinxqlState ( hSearchd.GetStr ( "sphinxql_state" ), sError ))
+	CSphString sSQLStateDefault;
+	if ( IsConfigless() )
+		sSQLStateDefault.SetSprintf ( "%s/state.sql", GetDataDirInt().cstr() );
+	if ( !InitSphinxqlState ( hSearchd.GetStr ( "sphinxql_state", sSQLStateDefault.scstr() ), sError ))
 		sphWarning ( "sphinxql_state flush disabled: %s", sError.cstr ());
 
 	ServeUserVars ();
@@ -19854,7 +19968,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 
 	// time for replication to sync with cluster
 	searchd::AddShutdownCb ( ReplicateClustersDelete );
-	ReplicationStart ( hSearchd, std::move ( dListenerDescs ), bNewCluster, bNewClusterForce );
+	ReplicationStart ( std::move ( dListenerDescs ), bNewCluster, bNewClusterForce );
 
 	g_bJsonConfigLoadedOk = true;
 

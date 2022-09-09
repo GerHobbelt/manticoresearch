@@ -1581,16 +1581,22 @@ bool SendRotate ( const CSphConfig & hConf, bool bForce )
 		return false;
 	}
 
+	CSphString sPidFile = hSearchd["pid_file"].cstr();
+
+#if _WIN32
+	sPidFile = AppendWinInstallDir(sPidFile);
+#endif
+
 	// read in PID
-	FILE * fp = fopen ( hSearchd["pid_file"].cstr(), "r" );
+	FILE * fp = fopen ( sPidFile.cstr(), "r" );
 	if ( !fp )
 	{
-		fprintf ( stdout, "WARNING: failed to open pid_file '%s'.\n", hSearchd["pid_file"].cstr() );
+		fprintf ( stdout, "WARNING: failed to open pid_file '%s'.\n", sPidFile.cstr() );
 		return false;
 	}
 	if ( fscanf ( fp, "%d", &iPID )!=1 || iPID<=0 )
 	{
-		fprintf ( stdout, "WARNING: failed to scanf pid from pid_file '%s'.\n", hSearchd["pid_file"].cstr() );
+		fprintf ( stdout, "WARNING: failed to scanf pid from pid_file '%s'.\n", sPidFile.cstr() );
 		fclose ( fp );
 		return false;
 	}
@@ -1889,13 +1895,6 @@ int main ( int argc, char ** argv )
 	if ( bSecondaryError )
 		sphWarning ( "Error initializing secondary index: %s", sErrorSI.cstr() );
 
-	const char* sEndian = sphCheckEndian();
-	if ( sEndian )
-	{
-		fprintf ( stdout, "%s", sEndian );
-		return 1;
-	}
-
 	if ( !isatty ( fileno(stdout) ) )
 		g_bProgress = false;
 
@@ -1926,7 +1925,14 @@ int main ( int argc, char ** argv )
 
 	if ( !sphInitCharsetAliasTable ( sError ) )
 		sphDie ( "failed to init charset alias table: %s", sError.cstr() );
+
 	sphCollationInit ();
+
+#if _WIN32
+	CheckWinInstall();
+#endif
+
+	SetupLemmatizerBase();
 
 	auto hConf = sphLoadConfig ( sOptConfig, g_bQuiet, false, &sOptConfig );
 

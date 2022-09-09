@@ -2111,7 +2111,7 @@ static bool DoUpdate ( AttrUpdateArgs & tUpd, const cServedIndexRefPtr_c& pDesc,
 {
 	if ( bUpdateAPI )
 	{
-		bool bOk = bNeedWlock
+		Debug ( bool bOk = ) bNeedWlock
 			? HandleUpdateAPI ( tUpd, WIdx_c ( pDesc ), iUpdated )
 			: HandleUpdateAPI ( tUpd, RWIdx_c ( pDesc ), iUpdated );
 		assert ( bOk ); // fixme! handle this
@@ -2587,7 +2587,7 @@ private:
 };
 
 // start clusters on daemon start
-void ReplicationStart ( const CSphConfigSection & hSearchd, CSphVector<ListenerDesc_t> dListeners,
+void ReplicationStart ( CSphVector<ListenerDesc_t> dListeners,
 	bool bNewCluster, bool bForce ) EXCLUDES ( g_tClustersLock )
 {
 	SetListener ( dListeners );

@@ -272,11 +272,11 @@ Below is the list of data types supported by Manticore Search:
 ## Document ID
 
 <!-- example id -->
-Document identifier is a mandatory attribute. Document IDs must be **unique signed positive non-zero 64-bit integers**. Note that no negative or zero values are allowed. Document ID can be specified explicitly, but if it's not it's still enabled. Document IDs can't be [UPDATE](../Updating_documents/UPDATE.md)'ed.
+Document identifier is a mandatory attribute. Document IDs must be **unique signed 64-bit integers**. Document ID can be specified explicitly, but if it's not it's still enabled. Document IDs can't be [UPDATE](../Updating_documents/UPDATE.md)'ed.
 
 <!-- request Explicit ID -->
 
-When you create a table you can specify ID explicitly, but no matter what datatype you use it will be always as said previously - signed positive non-zero 64-bit integer.
+When you create a table you can specify ID explicitly, but no matter what datatype you use it will be always as said previously - signed 64-bit integer.
 
 ```sql
 CREATE TABLE tbl(id bigint, content text);
@@ -569,6 +569,8 @@ utilsApi.sql("CREATE TABLE products(title text indexed)");
 <!-- example for string attributes  -->
 
 Unlike full-text fields, string attributes (just `string` or `string/text attribute`) are stored as they are received and cannot be used in full-text searches. Instead they are returned in results, they can be used in `WHERE` clause for comparison filtering or `REGEX` and they can be used for sorting and aggregation. In general it's not recommended to store large texts in string attributes, but use string attributes for metadata like names, titles, tags, keys.
+
+If want to also index the string attribute, can specify both as `string attribute indexed`. Will allow full-text searching, and works as an attribute.
 
 <!-- intro -->
 ##### SQL:

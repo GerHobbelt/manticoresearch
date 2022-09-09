@@ -13,16 +13,17 @@
 #pragma once
 
 #include "client_task_info.h"
+#include "coroutine.h"
 
 using StackSizeTuplet_t = std::pair<int,int>; // create, eval
 
 template <typename T>
-bool EvalStackForTree ( const CSphVector<T> & dTree, int iStartNode, StackSizeTuplet_t tNodeStackSize, int iTreeSizeThresh, int & iStackNeeded, const char * szName, CSphString & sError )
+bool EvalStackForTree ( const VecTraits_T<T> & dTree, int iStartNode, StackSizeTuplet_t tNodeStackSize, int iTreeSizeThresh, int & iStackNeeded, const char * szName, CSphString & sError )
 {
 	enum eStackSizePurpose { CREATE, EVAL };
 	iStackNeeded = -1;
-	int64_t iCalculatedStack = sphGetStackUsed() + (int64_t)dTree.GetLength()*std::get<EVAL>(tNodeStackSize);
-	int64_t iCurStackSize = sphMyStackSize();
+	int64_t iCalculatedStack = Threads::GetStackUsed() + (int64_t)dTree.GetLength()*std::get<EVAL>(tNodeStackSize);
+	int64_t iCurStackSize = Threads::MyStackSize();
 	if ( dTree.GetLength()<=iTreeSizeThresh )
 		return true;
 
@@ -39,12 +40,12 @@ bool EvalStackForTree ( const CSphVector<T> & dTree, int iStartNode, StackSizeTu
 		if ( tItem.m_iRight>=0 )	dNodes.Add ( { tItem.m_iRight, tParent.second+1 } );
 	}
 
-	iCalculatedStack = sphGetStackUsed() + iMaxHeight* std::get<CREATE> ( tNodeStackSize );
+	iCalculatedStack = Threads::GetStackUsed() + iMaxHeight* std::get<CREATE> ( tNodeStackSize );
 
 	if ( iCalculatedStack<=iCurStackSize )
 		return true;
 
-	if ( iCalculatedStack>g_iMaxCoroStackSize )
+	if ( iCalculatedStack > Threads::GetMaxCoroStackSize() )
 	{
 		sError.SetSprintf ( "query %s too complex, not enough stack (thread_stack=%dK or higher required)", szName, (int)( ( iCalculatedStack + 1024 - ( iCalculatedStack%1024 ) ) / 1024 ) );
 		return false;

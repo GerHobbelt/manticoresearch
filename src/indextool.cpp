@@ -16,7 +16,7 @@
 #include "fileutils.h"
 #include "sphinxrt.h"
 #include "killlist.h"
-#include "secondaryindex.h"
+#include "docidlookup.h"
 #include "indexfiles.h"
 #include "stripper/html_stripper.h"
 #include "tokenizer/charset_definition_parser.h"
@@ -1380,7 +1380,9 @@ int main ( int argc, char ** argv )
 
 	if ( !sphInitCharsetAliasTable ( sError ) )
 		sphDie ( "failed to init charset alias table: %s", sError.cstr() );
+
 	sphCollationInit ();
+	SetupLemmatizerBase();
 
 	auto hConf = sphLoadConfig ( sOptConfig, bQuiet, true );
 

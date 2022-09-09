@@ -740,7 +740,7 @@ TEST ( functions, SHA1_hashing )
 //////////////////////////////////////////////////////////////////////////
 unsigned int nlog2 ( uint64_t x )
 {
-	x |= ( x >> 1 );
+	x |= ( x >> 1 ) | 1;
 	x |= ( x >> 2 );
 	x |= ( x >> 4 );
 	x |= ( x >> 8 );
@@ -752,6 +752,7 @@ unsigned int nlog2 ( uint64_t x )
 
 TEST ( functions, Log2 )
 {
+	EXPECT_EQ ( sphLog2 ( 0 ), 1 );
 	EXPECT_EQ ( sphLog2 ( 1 ), 1 );
 	EXPECT_EQ ( sphLog2 ( 2 ), 2 );
 	EXPECT_EQ ( sphLog2 ( 3 ), 2 );
@@ -774,7 +775,8 @@ TEST ( functions, Log2 )
 	EXPECT_EQ ( sphLog2 ( 0xefffffffffffffffULL ), 64 );
 	EXPECT_EQ ( sphLog2 ( 0x7fffffffffffffffULL ), 63 );
 
-	EXPECT_EQ ( nlog2 ( 1 ), 1 ) << "emulated";
+	EXPECT_EQ ( nlog2 ( 0 ), 1 ) << "emulated";
+	EXPECT_EQ ( nlog2 ( 1 ), 1 );
 	EXPECT_EQ ( nlog2 ( 2 ), 2 );
 	EXPECT_EQ ( nlog2 ( 3 ), 2 );
 	EXPECT_EQ ( nlog2 ( 4 ), 3 );
@@ -795,7 +797,87 @@ TEST ( functions, Log2 )
 	EXPECT_EQ ( nlog2 ( 0xfffffffffffffffeULL ), 64 );
 	EXPECT_EQ ( nlog2 ( 0xefffffffffffffffULL ), 64 );
 	ASSERT_EQ ( sphLog2 ( 0x7fffffffffffffffULL ), 63 );
-	EXPECT_EQ ( sphLog2 ( 0 ), 0 );
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+TEST ( functions, sphCalcZippedLen )
+{
+	EXPECT_EQ ( sphCalcZippedLen ( 0 ), 1 );
+	EXPECT_EQ ( sphCalcZippedLen ( 1 ), 1 );
+	EXPECT_EQ ( sphCalcZippedLen ( 2 ), 1 );
+	EXPECT_EQ ( sphCalcZippedLen ( 4 ), 1 );
+	EXPECT_EQ ( sphCalcZippedLen ( 8 ), 1 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x10 ), 1 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x20 ), 1 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x40 ), 1 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x7F ), 1 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x80 ), 2 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0100 ), 2 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0200 ), 2 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0400 ), 2 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0800 ), 2 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x1000 ), 2 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x2000 ), 2 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x3FFF ), 2 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x4000 ), 3 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x8000 ), 3 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x00010000 ), 3 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x00020000 ), 3 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x00040000 ), 3 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x00080000 ), 3 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x00100000 ), 3 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x001FFFFF ), 3 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x00200000 ), 4 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x00400000 ), 4 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x00800000 ), 4 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x01000000 ), 4 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x02000000 ), 4 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x04000000 ), 4 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x08000000 ), 4 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0FFFFFFF ), 4 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x10000000 ), 5 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x20000000 ), 5 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x40000000 ), 5 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x80000000 ), 5 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000000100000000 ), 5 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000000200000000 ), 5 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000000400000000 ), 5 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x00000007FFFFFFFF ), 5 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000000800000000 ), 6 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000001000000000 ), 6 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000002000000000 ), 6 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000004000000000 ), 6 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000008000000000 ), 6 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000010000000000 ), 6 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000020000000000 ), 6 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x000003FFFFFFFFFF ), 6 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000040000000000 ), 7 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000080000000000 ), 7 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000100000000000 ), 7 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000200000000000 ), 7 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000400000000000 ), 7 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0000800000000000 ), 7 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0001000000000000 ), 7 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0001FFFFFFFFFFFF ), 7 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0002000000000000 ), 8 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0004000000000000 ), 8 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0008000000000000 ), 8 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0010000000000000 ), 8 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0020000000000000 ), 8 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0040000000000000 ), 8 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0080000000000000 ), 8 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x00FFFFFFFFFFFFFF ), 8 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0100000000000000 ), 9 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0200000000000000 ), 9 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0400000000000000 ), 9 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x0800000000000000 ), 9 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x1000000000000000 ), 9 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x2000000000000000 ), 9 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x4000000000000000 ), 9 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x7FFFFFFFFFFFFFFF ), 9 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0x8000000000000000 ), 10 );
+	EXPECT_EQ ( sphCalcZippedLen ( 0xFFFFFFFFFFFFFFFF ), 10 );
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -819,6 +901,76 @@ TEST (functions, Mutex)
 	sphSleepMsec ( 3500 );
 	ASSERT_TRUE ( g_Mutex1.Unlock () ) << "unlocked";
 	ASSERT_TRUE ( Threads::Join ( &th ) ) << "timedlock thread done";
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+class TZip: public ::testing::Test
+{
+protected:
+	void SetUp() override
+	{
+		uint64_t uBase = 0xDEADBEAF12345678;
+		for ( auto i = 0; i < 65; ++i )
+		{
+			uint64_t c64 = uBase >> i;
+			dValues64.Add ( c64 );
+			ZipValueBE ( [this] ( BYTE b ) mutable { dBufBE64.Add ( b ); }, c64 );
+			ZipValueLE ( [this] ( BYTE b ) mutable { dBufLE64.Add ( b ); }, c64 );
+
+			DWORD c32 = c64 & 0xFFFFFFFF;
+			dValues32.Add ( c32 );
+			ZipValueBE ( [this] ( BYTE b ) mutable { dBufBE.Add ( b ); }, c32 );
+			ZipValueLE ( [this] ( BYTE b ) mutable { dBufLE.Add ( b ); }, c32 );
+		}
+	}
+
+	CSphVector<DWORD> dValues32;
+	CSphVector<uint64_t> dValues64;
+	CSphVector<BYTE> dBufBE;
+	CSphVector<BYTE> dBufLE;
+	CSphVector<BYTE> dBufBE64;
+	CSphVector<BYTE> dBufLE64;
+};
+
+TEST_F ( TZip, BE32 )
+{
+	const BYTE* pBuf = dBufBE.begin();
+	for ( auto& ref : dValues32 )
+	{
+		auto val = UnzipIntBE ( pBuf );
+		ASSERT_EQ ( ref, val );
+	}
+}
+
+TEST_F ( TZip, BE64 )
+{
+	const BYTE* pBuf = dBufBE64.begin();
+	for ( auto& ref : dValues64 )
+	{
+		auto val = UnzipOffsetBE ( pBuf );
+		ASSERT_EQ ( ref, val );
+	}
+}
+
+TEST_F ( TZip, LE32 )
+{
+	const BYTE* pBuf = dBufLE.begin();
+	for ( auto& ref : dValues32 )
+	{
+		auto val = UnzipIntLE ( pBuf );
+		ASSERT_EQ ( ref, val );
+	}
+}
+
+TEST_F ( TZip, LE64 )
+{
+	const BYTE* pBuf = dBufLE64.begin();
+	for ( auto& ref : dValues64 )
+	{
+		auto val = UnzipOffsetLE ( pBuf );
+		ASSERT_EQ ( ref, val );
+	}
 }
 
 //////////////////////////////////////////////////////////////////////////

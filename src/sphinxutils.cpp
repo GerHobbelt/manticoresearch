@@ -22,6 +22,7 @@
 #include "threadutils.h"
 #include "indexfiles.h"
 
+#include <codecvt>
 #include <ctype.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -45,6 +46,7 @@
 #endif
 
 #include "libutils.h"
+#include "coroutine.h"
 
 #ifdef HAVE_MALLOC_H
 #include <malloc.h>
@@ -52,6 +54,10 @@
 
 #ifdef HAVE_JEMALLOC_JEMALLOC_H
 #include <jemalloc/jemalloc.h>
+#endif
+
+#if _WIN32
+CSphString g_sWinInstallPath;
 #endif
 
 //////////////////////////////////////////////////////////////////////////
@@ -1497,6 +1503,58 @@ bool CSphConfigParser::Parse ( const char * sFileName, const char * pBuffer )
 }
 
 /////////////////////////////////////////////////////////////////////////////
+
+#if _WIN32
+#pragma message( "Automatically linking with AdvAPI32.Lib" )
+#pragma comment( lib, "AdvAPI32.Lib" )
+
+void CheckWinInstall()
+{
+	HKEY hKey;
+	LONG iRes = RegOpenKeyExW ( HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Manticore Software LTD\\manticore", 0, KEY_READ, &hKey );
+	if ( iRes!=ERROR_SUCCESS )
+		return;
+
+	WCHAR szBuffer[512];
+	DWORD uBufferSize = sizeof(szBuffer);
+	iRes = RegQueryValueExW ( hKey, L"", 0, NULL, (LPBYTE)szBuffer, &uBufferSize);
+	if ( iRes!=ERROR_SUCCESS )
+		return;
+
+	g_sWinInstallPath = std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t>().to_bytes(szBuffer).c_str();
+}
+
+
+CSphString GetWinInstallDir()
+{
+	return g_sWinInstallPath;
+}
+
+
+CSphString AppendWinInstallDir ( const CSphString & sDir )
+{
+	if ( GetWinInstallDir().IsEmpty() )
+		return sDir;
+	
+	CSphString sPath1 = sphNormalizePath ( sDir );
+	CSphString sPath2 = sphNormalizePath ( GetWinInstallDir() );
+	sPath1.ToLower();
+	sPath2.ToLower();
+
+	if ( sPath1.Begins ( sPath2.cstr() ) )
+		return sDir;
+
+	const char * DEFAULT_INSTALL_PATH = "c:/manticore";
+	if ( !sPath1.Begins(DEFAULT_INSTALL_PATH) )
+		return sDir;
+
+	CSphString sCut = sPath1.SubString ( strlen(DEFAULT_INSTALL_PATH), sPath1.Length()-strlen(DEFAULT_INSTALL_PATH) );
+	sCut.SetSprintf ( "%s%s", sPath2.cstr(), sCut.cstr() );
+	return sCut;
+}
+#endif
+
+/////////////////////////////////////////////////////////////////////////////
 const char * sphGetConfigFile ( const char * sHint )
 {
 	if ( sHint )
@@ -1512,6 +1570,16 @@ const char * sphGetConfigFile ( const char * sHint )
 	static const char* sWorkingConfiFile = "./manticore.conf";
 	if ( sphIsReadable ( sWorkingConfiFile ) )
 		return sWorkingConfiFile;
+
+#if _WIN32
+	if ( !GetWinInstallDir().IsEmpty() )
+	{
+		static CSphString sConf;
+		sConf.SetSprintf ( "%s/etc/manticoresearch/manticore.conf", GetWinInstallDir().cstr() );
+		if ( sphIsReadable ( sConf.cstr() ) )
+			return sConf.cstr();
+	}
+#endif
 
 	sphFatal ( "no readable config file (looked in "
 #ifdef SYSCONFDIR
@@ -2738,6 +2806,22 @@ const char * DoBacktrace ( int, int )
 }
 #endif
 
+#if !_WIN32
+inline bool IsLtLib()
+{
+#ifndef _CS_GNU_LIBPTHREAD_VERSION
+	return false;
+#else
+	char buff[64];
+	confstr ( _CS_GNU_LIBPTHREAD_VERSION, buff, 64 );
+
+	if ( !strncasecmp ( buff, "linuxthreads", 12 ) )
+		return true;
+	return false;
+#endif
+}
+#endif
+
 #define BOOST_STACKTRACE_GNU_SOURCE_NOT_REQUIRED 1
 #include <boost/stacktrace.hpp>
 
@@ -2765,8 +2849,8 @@ void sphBacktrace ( int iFD, bool bSafe )
 	int iStackSize = 0;
 	if ( !bSafe )
 	{
-		pMyStack = sphMyStack();
-		iStackSize = sphMyStackSize();
+		pMyStack = Threads::MyStack();
+		iStackSize = Threads::MyStackSize();
 	}
 	sphSafeInfo ( iFD, "Stack bottom = 0x%p, thread stack size = 0x%x", pMyStack, iStackSize );
 
@@ -2776,7 +2860,7 @@ void sphBacktrace ( int iFD, bool bSafe )
 		BYTE ** pFramePointer = NULL;
 
 		int iFrameCount = 0;
-		int iReturnFrameCount = sphIsLtLib() ? 2 : 1;
+		int iReturnFrameCount = IsLtLib() ? 2 : 1;
 
 #ifdef __i386__
 #define SIGRETURN_FRAME_OFFSET 17
@@ -3206,6 +3290,7 @@ bool CSphDynamicLibrary::LoadSymbols ( const char** sNames, void*** pppFuncs, in
 
 CSphDynamicLibrary::CSphDynamicLibrary ( const char * ) {};
 bool CSphDynamicLibrary::LoadSymbols ( const char **, void ***, int ) { return false; }
+CSphDynamicLibrary::~CSphDynamicLibrary() = default;
 
 #endif
 
@@ -3236,7 +3321,7 @@ void RebalanceWeights ( const CSphFixedVector<int64_t> & dTimers, CSphFixedVecto
 	float fEmptyPercent = 0.0f;
 
 	// balance weights
-	float fCheck = 0;
+	Debug ( float fCheck = 0; )
 	ARRAY_FOREACH ( i, dFrequencies )
 	{
 		// mirror weight is inverse of timer \ query time
@@ -3248,7 +3333,7 @@ void RebalanceWeights ( const CSphFixedVector<int64_t> & dTimers, CSphFixedVecto
 
 		assert ( fWeight>=0.0 && fWeight<=100.0 );
 		dWeights[i] = fWeight;
-		fCheck += fWeight;
+		Debug ( fCheck += fWeight; )
 	}
 	assert ( fCheck<=100.000001 && fCheck>=99.99999);
 }
@@ -3486,67 +3571,3 @@ BYTE Pearson8 ( const BYTE * pBuf, int iLen )
 }
 
 
-namespace { // to make logMutex static inside .o
-//	CSphMutex & logMutex ()
-//	{
-//		return Single_T<CSphMutex, LogMessage_t> ();
-//	}
-}
-
-LogMessage_t::LogMessage_t ( BYTE uLevel )
-	: m_eLevel ( (ESphLogLevel) uLevel )
-{
-//	logMutex ().Lock ();
-}
-
-LogMessage_t::~LogMessage_t ()
-{
-//	logMutex ().Unlock ();
-//	sphLogDebugv ( "%s", m_dLog.cstr() );
-	sphLogf ( m_eLevel, "%s", m_dLog.cstr() );
-}
-
-LocMessage_c::LocMessage_c ( LocMessages_c* pOwner )
-	: m_pOwner ( pOwner )
-{
-//	m_pOwner->m_tLock.Lock();
-}
-
-LocMessage_c::~LocMessage_c ()
-{
-//	m_pOwner->m_tLock.Unlock ();
-	m_pOwner->Append ( m_dLog );
-}
-
-void LocMessages_c::Append ( StringBuilder_c& dMsg )
-{
-	auto pLeaf = new MsgList;
-	dMsg.MoveTo(pLeaf->m_sMsg);
-	pLeaf->m_pNext = m_sMsgs;
-	m_sMsgs = pLeaf;
-	++m_iMsgs;
-}
-
-void LocMessages_c::Swap ( LocMessages_c & rhs ) noexcept
-{
-	::Swap (m_sMsgs, rhs.m_sMsgs);
-	::Swap ( m_iMsgs, rhs.m_iMsgs );
-}
-
-
-int LocMessages_c::Print () const
-{
-	for ( auto pHead = m_sMsgs; pHead; pHead = pHead->m_pNext )
-		sphLogDebug ( "%s", pHead->m_sMsg.scstr() );
-	return m_iMsgs;
-}
-
-LocMessages_c::~LocMessages_c()
-{
-	for ( auto pHead = m_sMsgs; pHead!=nullptr; )
-	{
-		auto pNext = pHead->m_pNext;
-		SafeDelete ( pHead );
-		pHead = pNext;
-	}
-}

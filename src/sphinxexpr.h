@@ -14,6 +14,9 @@
 #define _sphinxexpr_
 
 #include "collation.h"
+#include "std/refcounted_mt.h"
+#include "std/string.h"
+#include "std/sharedptr.h"
 
 /// forward decls
 class CSphMatch;
@@ -83,6 +86,7 @@ enum ESphExprCommand
 	SPH_EXPR_GET_DEPENDENT_COLS,	///< used to determine proper evaluating stage
 	SPH_EXPR_UPDATE_DEPENDENT_COLS,
 	SPH_EXPR_GET_UDF,
+	SPH_EXPR_GET_STATEFUL_UDF,
 	SPH_EXPR_SET_COLUMNAR,
 	SPH_EXPR_SET_COLUMNAR_COL,
 	SPH_EXPR_GET_COLUMNAR_COL,
@@ -134,6 +138,9 @@ public:
 
 	/// was this expression spawned in place of a columnar expression?
 	virtual bool IsStored() const { return false; }
+
+	/// does this expression use docstore (at any eval stage)?
+	virtual bool UsesDocstore() const { return false; }
 
 	/// check for stringptr subtype
 	virtual bool IsDataPtrAttr () const { return false; }
