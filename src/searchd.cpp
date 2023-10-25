@@ -200,9 +200,10 @@ CSphString				g_sBannerVersion { szMANTICORE_NAME };
 CSphString				g_sBanner;
 CSphString				g_sStatusVersion = szMANTICORE_VERSION;
 CSphString				g_sSecondaryError;
-bool					g_bSecondaryError { false };
 static CSphString		g_sBuddyPath;
 static bool				g_bTelemetry = val_from_env ( "MANTICORE_TELEMETRY", true );
+static bool				g_bHasBuddyPath = false;
+static bool				g_bAutoSchema = true;
 
 // for CLang thread-safety analysis
 ThreadRole MainThread; // functions which called only from main thread
@@ -673,7 +674,7 @@ void Shutdown () REQUIRES ( MainThread ) NO_THREAD_SAFETY_ANALYSIS
 	WaitPrereadFinished ( g_iShutdownTimeoutUs );
 
 	// save attribute updates for all local indexes
-	SHUTINFO << "Finally save indexes ...";
+	SHUTINFO << "Finally save tables ...";
 	bAttrsSaveOk = FinallySaveIndexes();
 
 	// right before unlock loop
@@ -716,7 +717,7 @@ void Shutdown () REQUIRES ( MainThread ) NO_THREAD_SAFETY_ANALYSIS
 	}
 
 	// unlock indexes and release locks if needed
-	SHUTINFO << "Unlock indexes ...";
+	SHUTINFO << "Unlock tables ...";
 	{
 		ServedSnap_t hLocal = g_pLocalIndexes->GetHash();
 		for ( const auto& tIt : *hLocal )
@@ -724,11 +725,11 @@ void Shutdown () REQUIRES ( MainThread ) NO_THREAD_SAFETY_ANALYSIS
 	}
 
 	Threads::CallCoroutine ( [] {
-		SHUTINFO << "Abandon local indexes list ...";
+		SHUTINFO << "Abandon local tables list ...";
 		g_pLocalIndexes->ReleaseAndClear();
 
 		// unlock Distr indexes automatically done by d-tr
-		SHUTINFO << "Abandon distr indexes list ...";
+		SHUTINFO << "Abandon distr tables list ...";
 		g_pDistIndexes->ReleaseAndClear();
 	} );
 
@@ -740,10 +741,10 @@ void Shutdown () REQUIRES ( MainThread ) NO_THREAD_SAFETY_ANALYSIS
 	if ( pPool )
 		pPool->StopAll();
 
-	SHUTINFO << "Remove local indexes list ...";
+	SHUTINFO << "Remove local tables list ...";
 	g_pLocalIndexes.reset();
 
-	SHUTINFO << "Remove distr indexes list ...";
+	SHUTINFO << "Remove distr tables list ...";
 	g_pDistIndexes.reset();
 
 	// clear shut down of rt indexes + binlog
@@ -1580,7 +1581,7 @@ public:
 	void		BuildRequest ( const AgentConn_t & tAgent, ISphOutputBuffer & tOut ) const final;
 
 protected:
-	void		SendQuery ( const char * sIndexes, ISphOutputBuffer & tOut, const CSphQuery & q, int iWeight, int iAgentQueryTimeout ) const;
+	void		SendQuery ( const char * sIndexes, ISphOutputBuffer & tOut, const CSphQuery & q, int iWeight ) const;
 
 protected:
 	const VecTraits_T<CSphQuery> &		m_dQueries;
@@ -1638,7 +1639,7 @@ void operator>> ( InputBuffer_c & dIn, CSphNamedInt & tValue )
 	tValue.second = dIn.GetInt ();
 }
 
-void SearchRequestBuilder_c::SendQuery ( const char * sIndexes, ISphOutputBuffer & tOut, const CSphQuery & q, int iWeight, int iAgentQueryTimeout ) const
+void SearchRequestBuilder_c::SendQuery ( const char * sIndexes, ISphOutputBuffer & tOut, const CSphQuery & q, int iWeight ) const
 {
 	bool bAgentWeight = ( iWeight!=-1 );
 	// starting with command version 1.27, flags go first
@@ -1776,8 +1777,7 @@ void SearchRequestBuilder_c::SendQuery ( const char * sIndexes, ISphOutputBuffer
 		for ( const auto& dWeight : q.m_dIndexWeights )
 			tOut << dWeight;
 	}
-	DWORD iQueryTimeout = ( q.m_uMaxQueryMsec ? q.m_uMaxQueryMsec : iAgentQueryTimeout );
-	tOut.SendDword ( iQueryTimeout );
+	tOut.SendDword ( q.m_uMaxQueryMsec );
 	tOut.SendInt ( q.m_dFieldWeights.GetLength() );
 	for ( const auto & dWeight : q.m_dFieldWeights )
 		tOut << dWeight;
@@ -1847,7 +1847,7 @@ void SearchRequestBuilder_c::BuildRequest ( const AgentConn_t & tAgent, ISphOutp
 	tOut.SendInt ( VER_COMMAND_SEARCH_MASTER );
 	tOut.SendInt ( m_dQueries.GetLength() );
 	for ( auto& dQuery : m_dQueries )
-		SendQuery ( tAgent.m_tDesc.m_sIndexes.cstr (), tOut, dQuery, tAgent.m_iWeight, tAgent.m_iMyQueryTimeoutMs );
+		SendQuery ( tAgent.m_tDesc.m_sIndexes.cstr (), tOut, dQuery, tAgent.m_iWeight );
 }
 
 
@@ -5198,9 +5198,17 @@ private:
 	VecTraits_T<CSphQueryResult>		m_dNResults;		///< working subset of result pointers
 	VecTraits_T<SearchFailuresLog_c>	m_dNFailuresSet;	///< working subset of failures
 
-	CSphVector<std::pair<int,bool>>		m_dSplits;
+	struct IndexPSInfo_t
+	{
+		int		m_iThreads = 0;		// threads per index
+		int		m_iMaxThreads = 0;	// max threads per index (used for consistency between GetPseudoShardingMetric() and SpawnIterators()
+		bool	m_bForceSingleThread = false;	// for disk chunks; means "run all disk chunk searches in a single thread"
+	};
+
+	CSphVector<IndexPSInfo_t>			m_dPSInfo;
 
 	StringBuilder_c						m_sError;
+
 private:
 	bool							ParseSysVar();
 	bool							ParseIdxSubkeys();
@@ -5219,7 +5227,10 @@ private:
 	SphQueueSettings_t				MakeQueueSettings ( const CSphIndex * pIndex, int iMaxMatches, bool bForceSingleThread, ISphExprHook * pHook ) const;
 	cServedIndexRefPtr_c			CheckIndexSelectable ( const CSphString& sLocal, const char * szParent, VecTraits_T<SearchFailuresLog_c> * pNFailuresSet=nullptr ) const;
 	bool							CreateValidSorters ( VecTraits_T<ISphMatchSorter *> & dSrt, SphQueueRes_t * pQueueRes, VecTraits_T<SearchFailuresLog_c> & dFlr, StrVec_t * pExtra, const CSphIndex* pIndex, const CSphString & sLocal, const char * szParent, ISphExprHook * pHook );
-	void							CalcSplits ( int iConcurrency );
+
+	void							PopulateCountDistinct ( CSphVector<CSphVector<int64_t>> & dCountDistinct ) const;
+	void							CalcMaxThreadsPerIndex ( CSphVector<std::pair<int64_t,int>> & dSplitData, int iConcurrency ) const;
+	void							CalcThreadsPerIndex ( int iConcurrency );
 };
 
 PubSearchHandler_c::PubSearchHandler_c ( int iQueries, std::unique_ptr<QueryParser_i> pQueryParser, QueryType_e eQueryType, bool bMaster )
@@ -5513,7 +5524,7 @@ int SearchHandler_c::CreateMultiQueryOrFacetSorters ( const CSphIndex * pIndex, 
 {
 	int iValidSorters = 0;
 
-	auto tQueueSettings = MakeQueueSettings ( pIndex, m_dNQueries.First ().m_iMaxMatches, m_dSplits.First().second, pHook );
+	auto tQueueSettings = MakeQueueSettings ( pIndex, m_dNQueries.First ().m_iMaxMatches, m_dPSInfo.First().m_bForceSingleThread, pHook );
 	sphCreateMultiQueue ( tQueueSettings, m_dNQueries, dSorters, dErrors, tQueueRes, pExtra, m_pProfile );
 
 	m_dNQueries.First().m_bZSlist = tQueueRes.m_bZonespanlist;
@@ -5540,7 +5551,7 @@ int SearchHandler_c::CreateSingleSorters ( const CSphIndex * pIndex, VecTraits_T
 		CSphQuery & tQuery = m_dNQueries[iQuery];
 
 		// create queue
-		auto tQueueSettings = MakeQueueSettings ( pIndex, tQuery.m_iMaxMatches, m_dSplits.First().second, pHook );
+		auto tQueueSettings = MakeQueueSettings ( pIndex, tQuery.m_iMaxMatches, m_dPSInfo.First().m_bForceSingleThread, pHook );
 		ISphMatchSorter * pSorter = sphCreateQueue ( tQueueSettings, tQuery, dErrors[iQuery], tQueueRes, pExtra, m_pProfile );
 		if ( !pSorter )
 			continue;
@@ -5684,7 +5695,7 @@ cServedIndexRefPtr_c SearchHandler_c::CheckIndexSelectable ( const CSphString & 
 	{
 		if ( pNFailuresSet )
 			for ( auto & dFailureSet : *pNFailuresSet )
-				dFailureSet.SubmitEx ( sLocal, nullptr, "%s", "index is not suitable for select" );
+				dFailureSet.SubmitEx ( sLocal, nullptr, "%s", "table is not suitable for select" );
 
 		return cServedIndexRefPtr_c{};
 	}
@@ -5717,32 +5728,10 @@ bool SearchHandler_c::CreateValidSorters ( VecTraits_T<ISphMatchSorter *> & dSrt
 }
 
 
-void SearchHandler_c::CalcSplits ( int iConcurrency )
+void SearchHandler_c::PopulateCountDistinct ( CSphVector<CSphVector<int64_t>> & dCountDistinct ) const
 {
-	if ( !g_bSplit )
-	{
-		// let's set the 'force single thread' flag for all indexes to make sure max_matches won't be increased when it is not necessary
-		for ( auto & i : m_dSplits )
-			i = { 1, true };
+	dCountDistinct.Resize ( m_dLocal.GetLength() );
 
-		return;
-	}
-
-	if ( !iConcurrency )
-		iConcurrency = g_iThreads;
-
-	struct SplitData_t
-	{
-		bool	m_bEnabled = false;
-		int64_t	m_iMetric = 0;
-	};
-
-	CSphFixedVector<SplitData_t> dSplitData { m_dLocal.GetLength() };
-
-	// FIXME! what about PQ?
-	int64_t iTotalMetric = 0;
-	int iSingleSplits = 0;
-	int iEnabled = 0;
 	ARRAY_FOREACH ( iLocal, m_dLocal )
 	{
 		const LocalIndex_t & tLocal = m_dLocal[iLocal];
@@ -5750,43 +5739,103 @@ void SearchHandler_c::CalcSplits ( int iConcurrency )
 		if ( !pIndex )
 			continue;
 
-		CSphVector<int64_t> dCountDistinct { m_dNQueries.GetLength() };
-		dCountDistinct.Fill(-1);
-		ARRAY_FOREACH ( i, dCountDistinct )
+		auto & dIndexCountDistinct = dCountDistinct[iLocal];
+		dIndexCountDistinct.Resize ( m_dNQueries.GetLength() );
+		dIndexCountDistinct.Fill(-1);
+		ARRAY_FOREACH ( i, dIndexCountDistinct )
 		{
 			auto & tQuery = m_dNQueries[i];
 			int iGroupby = GetAliasedAttrIndex ( tQuery.m_sGroupBy, tQuery, RIdx_c(pIndex)->GetMatchSchema() );
-			if ( iGroupby>=0 )
-			{
-				auto & sAttr = RIdx_c(pIndex)->GetMatchSchema().GetAttr(iGroupby).m_sName;
-				dCountDistinct[i] = RIdx_c(pIndex)->GetCountDistinct(sAttr);
-			}
-		}
+			if ( iGroupby<0 )
+				continue;
 
-		SplitData_t & tSplitData = dSplitData[iLocal];
-		int64_t iMetric = RIdx_c ( pIndex )->GetPseudoShardingMetric ( m_dNQueries, dCountDistinct, iConcurrency, m_dSplits[iLocal].second );
-		if ( iMetric==-1 )
-		{
-			iSingleSplits++;
+			auto & sAttr = RIdx_c(pIndex)->GetMatchSchema().GetAttr(iGroupby).m_sName;
+			dIndexCountDistinct[i] = RIdx_c(pIndex)->GetCountDistinct(sAttr);
+		}
+	}
+}
+
+
+void SearchHandler_c::CalcMaxThreadsPerIndex ( CSphVector<std::pair<int64_t,int>> & dSplitData, int iConcurrency ) const
+{
+	dSplitData.Resize ( m_dLocal.GetLength() );
+	dSplitData.Fill ( { -1, 0 } );
+
+	int iNumValid = 0;
+	ARRAY_FOREACH ( i, m_dLocal )
+	{
+		auto pIndex = CheckIndexSelectable ( m_dLocal[i].m_sName, m_dLocal[i].m_sParentIndex.cstr(), nullptr );
+		if ( !pIndex )
 			continue;
-		}
 
-		tSplitData.m_bEnabled = true;
-		tSplitData.m_iMetric = iMetric;
-		iTotalMetric += tSplitData.m_iMetric;
-		iEnabled++;
+		iNumValid++;
 	}
 
-	if ( iConcurrency>iSingleSplits+iEnabled )
+	int iMaxThreadsPerIndex = iNumValid<iConcurrency ? ( iConcurrency-iNumValid ) + 1 : 1;
+	for ( auto & i : dSplitData )
+		i.second = iMaxThreadsPerIndex;
+}
+
+
+void SearchHandler_c::CalcThreadsPerIndex ( int iConcurrency )
+{
+	if ( !iConcurrency )
+		iConcurrency = g_iThreads;
+
+	CSphVector<CSphVector<int64_t>> dCountDistinct;
+	PopulateCountDistinct ( dCountDistinct );
+
+	CSphVector<std::pair<int64_t,int>> dSplitData;
+	CalcMaxThreadsPerIndex ( dSplitData, iConcurrency );
+
+	// FIXME! what about PQ?
+	int64_t iTotalMetric = 0;
+	int iSingleSplits = 0;
+	int iMTSplits = 0;
+
+	ARRAY_FOREACH ( iLocal, m_dLocal )
+	{
+		const LocalIndex_t & tLocal = m_dLocal[iLocal];
+		auto pIndex = CheckIndexSelectable ( tLocal.m_sName, tLocal.m_sParentIndex.cstr(), nullptr );
+		if ( !pIndex )
+			continue;
+
+		auto & tPSInfo = m_dPSInfo[iLocal];
+
+		if ( g_bSplit || RIdx_c(pIndex)->IsRT() )
+		{
+			// do metric calcs
+			auto & tSplitData = dSplitData[iLocal];
+			tPSInfo.m_iMaxThreads = tSplitData.second;
+			int64_t iMetric = RIdx_c ( pIndex )->GetPseudoShardingMetric ( m_dNQueries, dCountDistinct[iLocal], tPSInfo.m_iMaxThreads, tPSInfo.m_bForceSingleThread );
+			if ( iMetric==-1 )
+				iSingleSplits++;
+			else
+			{
+				tSplitData.first = iMetric;
+				iTotalMetric += iMetric;
+				iMTSplits++;
+			}
+		}
+		else
+		{
+			// don't do metric calcs; we are guaranteed to have one thread
+			// set the 'force single thread' flag to make sure max_matches won't be increased when it is not necessary
+			tPSInfo = { 1, 1, true };
+			iSingleSplits++;
+		}
+	}
+
+	if ( iConcurrency>iSingleSplits+iMTSplits )
 	{
 		int iLeft = iConcurrency-iSingleSplits;
 		ARRAY_FOREACH ( i, dSplitData )
 		{
-			const SplitData_t & tSplitData = dSplitData[i];
-			if ( !tSplitData.m_bEnabled )
+			const auto & tSplitData = dSplitData[i];
+			if ( tSplitData.first==-1 )
 				continue;
 
-			m_dSplits[i].first = Max ( (int)round ( double(tSplitData.m_iMetric) / iTotalMetric * iLeft ), 1 );
+			m_dPSInfo[i].m_iThreads = Max ( (int)round ( double(tSplitData.first) / iTotalMetric * iLeft ), 1 );
 		}
 	}
 }
@@ -5958,8 +6007,8 @@ void SearchHandler_c::RunLocalSearches ()
 
 	GlobalSorters_c tGlobalSorters ( m_dNQueries, dLocalIndexes );
 
-	m_dSplits.Resize(iNumLocals);
-	m_dSplits.Fill ( { 1, false } );
+	m_dPSInfo.Resize(iNumLocals);
+	m_dPSInfo.Fill ( { 1, 1, false } );
 
 	CSphFixedVector<int> dOrder { iNumLocals };
 	for ( int i = 0; i<iNumLocals; ++i )
@@ -5986,7 +6035,7 @@ void SearchHandler_c::RunLocalSearches ()
 			return m_dLocal[a].m_iMass>m_dLocal[b].m_iMass;
 		} ) );
 
-		CalcSplits ( pDispatcher->GetConcurrency() );
+		CalcThreadsPerIndex ( pDispatcher->GetConcurrency() );
 	}
 
 //	for ( int iOrder : dOrder )
@@ -6076,8 +6125,8 @@ void SearchHandler_c::RunLocalSearches ()
 				bool bCanBeCloned = dSorters.all_of ( []( auto * pSorter ){ return pSorter ? pSorter->CanBeCloned() : true; } );
 
 				// fixme: previous calculations are wrong; we are not splitting the query if we are using non-clonable sorters
-				tMultiArgs.m_iThreads = bCanBeCloned ? m_dSplits[iLocal].first : 1;
-				tMultiArgs.m_iTotalThreads = pDispatcher->GetConcurrency();
+				tMultiArgs.m_iThreads = bCanBeCloned ? m_dPSInfo[iLocal].m_iThreads : 1;
+				tMultiArgs.m_iTotalThreads = m_dPSInfo[iLocal].m_iMaxThreads;
 				tMultiArgs.m_bFinalizeSorters = !tGlobalSorters.NeedGlobalSorters();
 
 				dNAggrResults.First().m_tIOStats.Start ();
@@ -6459,7 +6508,7 @@ bool SearchHandler_c::ParseIdxSubkeys ()
 		fnFeed = [this] ( RowBuffer_i * pBuf ) { HandleSelectFiles ( *pBuf, m_pStmt ); };
 	else
 	{
-		m_sError << "No such index " << sVar;
+		m_sError << "No such table " << sVar;
 		dSubkeys.for_each ([this] (const auto& s) { m_sError << s;});
 		return false;
 	}
@@ -6558,7 +6607,7 @@ bool SearchHandler_c::AcquireInvokedIndexes()
 		return true;
 
 	// report failed
-	m_sError << "unknown local index(es) '" << sFailed << "' in search request";
+	m_sError << "unknown local table(s) '" << sFailed << "' in search request";
 	return false;
 }
 
@@ -6843,7 +6892,7 @@ bool SearchHandler_c::BuildIndexList ( int & iDivideLimits, VecRefPtrsAgentConn_
 		else
 		{
 			for ( auto& dResult : m_dNAggrResults )
-				dResult.m_sWarning.SetSprintf ( "distributed multi-index query '%s' doesn't support divide_remote_ranges", tQuery.m_sIndexes.cstr() );
+				dResult.m_sWarning.SetSprintf ( "distributed multi-table query '%s' doesn't support divide_remote_ranges", tQuery.m_sIndexes.cstr() );
 		}
 	}
 
@@ -6952,7 +7001,7 @@ void SearchHandler_c::RunSubset ( int iStart, int iEnd )
 	// sanity check
 	if ( dRemotes.IsEmpty() && m_dLocal.IsEmpty() )
 	{
-		m_sError << "no enabled indexes to search";
+		m_sError << "no enabled tables to search";
 		return;
 	}
 
@@ -7353,7 +7402,7 @@ void HandleCommandSearch ( ISphOutputBuffer & tOut, WORD uVer, InputBuffer_c & t
 		tHandler.SetQueryParser ( std::move ( pParser ), eQueryType );
 
 		const CSphQuery & q = tHandler.m_dQueries[0];
-		myinfo::SetTaskInfo ( R"(api-search query="%s" comment="%s" index="%s")", q.m_sQuery.scstr (), q.m_sComment.scstr (), q.m_sIndexes.scstr () );
+		myinfo::SetTaskInfo ( R"(api-search query="%s" comment="%s" table="%s")", q.m_sQuery.scstr (), q.m_sComment.scstr (), q.m_sIndexes.scstr () );
 	}
 
 	// run queries, send response
@@ -8082,13 +8131,13 @@ bool MakeSnippets ( CSphString sIndex, CSphVector<ExcerptQuery_t> & dQueries,
 	{
 		if ( pDist->m_dLocal.GetLength()!=1 )
 		{
-			sError.SetSprintf ( "%s", "distributed index for snippets must have exactly one local agent" );
+			sError.SetSprintf ( "%s", "distributed table for snippets must have exactly one local agent" );
 			return false;
 		}
 
 		if ( !q.m_uFilesMode )
 		{
-			sError.SetSprintf ( "%s", "distributed index for snippets available only when using external files" );
+			sError.SetSprintf ( "%s", "distributed table for snippets available only when using external files" );
 			return false;
 		}
 
@@ -8099,7 +8148,7 @@ bool MakeSnippets ( CSphString sIndex, CSphVector<ExcerptQuery_t> & dQueries,
 	auto pServed = GetServed ( sIndex );
 	if ( !pServed )
 	{
-		sError.SetSprintf ( "unknown local index '%s' in search request", sIndex.cstr() );
+		sError.SetSprintf ( "unknown local table '%s' in search request", sIndex.cstr() );
 		return false;
 	}
 
@@ -8628,13 +8677,13 @@ void HandleCommandUpdate ( ISphOutputBuffer & tOut, int iVer, InputBuffer_c & tR
 	ParseIndexList ( sIndexes, dIndexNames );
 
 	if ( dIndexNames.IsEmpty() )
-		return SendErrorReply ( tOut, "no valid indexes in update request" );
+		return SendErrorReply ( tOut, "no valid tables in update request" );
 
 	DistrPtrs_t dDistributed;
 	// copy distributed indexes description
 	CSphString sMissed;
 	if ( !ExtractDistributedIndexes ( dIndexNames, dDistributed, sMissed ) )
-		return SendErrorReply ( tOut, "unknown index '%s' in update request", sMissed.cstr() );
+		return SendErrorReply ( tOut, "unknown table '%s' in update request", sMissed.cstr() );
 
 	// do update
 	SearchFailuresLog_c dFails;
@@ -8977,7 +9026,7 @@ void BuildAgentStatus ( VectorLike &dStatus, const CSphString& sIndexOrAgent )
 			if ( pAgent )
 				BuildOneAgentStatus ( dStatus, pAgent );
 			else
-				dStatus.MatchTupletf ( "status_error", "No such distributed index or agent: %s", sIndexOrAgent.cstr () );
+				dStatus.MatchTupletf ( "status_error", "No such distributed table or agent: %s", sIndexOrAgent.cstr () );
 		}
 		return;
 	}
@@ -9828,10 +9877,10 @@ static void PQLocalMatch ( const BlobVec_t & dDocs, const CSphString & sIndex, c
 
 	auto pServed = GetServed ( sIndex );
 	if ( !pServed )
-		return sMsg.Err ( "unknown local index '%s' in search request", sIndex.cstr () );
+		return sMsg.Err ( "unknown local table '%s' in search request", sIndex.cstr () );
 
 	if ( pServed->m_eType!=IndexType_e::PERCOLATE )
-		return sMsg.Err ( "index '%s' is not percolate", sIndex.cstr () );
+		return sMsg.Err ( "table '%s' is not percolate", sIndex.cstr () );
 
 	RIdx_T<PercolateIndex_i*> pIndex { pServed };
 	RtAccum_t * pAccum = tAcc.GetAcc ( pIndex, sError );
@@ -10169,7 +10218,7 @@ static void HandleMysqlCallPQ ( RowBuffer_i & tOut, SqlStmt_t & tStmt, CSphSessi
 	// index name, document | documents list, [named opts]
 	if ( tStmt.m_dInsertValues.GetLength()!=2 )
 	{
-		tOut.Error ( tStmt.m_sStmt, "PQ() expects exactly 2 arguments (index, document(s))" );
+		tOut.Error ( tStmt.m_sStmt, "PQ() expects exactly 2 arguments (table, document(s))" );
 		return;
 	}
 	auto &dStmtIndex = tStmt.m_dInsertValues[0];
@@ -10817,7 +10866,7 @@ void sphHandleMysqlInsert ( StmtErrorReporter_i & tOut, SqlStmt_t & tStmt )
 	auto pServed = GetServed ( tStmt.m_sIndex );
 	if ( !ServedDesc_t::IsMutable ( pServed ) )
 	{
-		tOut.Error ( "index '%s' absent, or does not support INSERT", tStmt.m_sIndex.cstr ());
+		tOut.Error ( "table '%s' absent, or does not support INSERT", tStmt.m_sIndex.cstr ());
 		return;
 	}
 
@@ -10978,7 +11027,7 @@ void HandleMysqlCallSnippets ( RowBuffer_i & tOut, SqlStmt_t & tStmt )
 	// string data, string index, string query, [named opts]
 	if ( tStmt.m_dInsertValues.GetLength()!=3 )
 	{
-		tOut.Error ( tStmt.m_sStmt, "SNIPPETS() expects exactly 3 arguments (data, index, query)" );
+		tOut.Error ( tStmt.m_sStmt, "SNIPPETS() expects exactly 3 arguments (data, table, query)" );
 		return;
 	}
 	if ( tStmt.m_dInsertValues[0].m_iType!=SqlInsert_t::QUOTED_STRING && tStmt.m_dInsertValues[0].m_iType!=SqlInsert_t::CONST_STRINGS )
@@ -11150,7 +11199,7 @@ bool DoGetKeywords ( const CSphString & sIndex, const CSphString & sQuery, const
 
 	if ( !pLocal && !pDistributed )
 	{
-		sError.SetSprintf ( "no such index %s", sIndex.cstr() );
+		sError.SetSprintf ( "no such table %s", sIndex.cstr() );
 		return false;
 	}
 
@@ -11169,7 +11218,7 @@ bool DoGetKeywords ( const CSphString & sIndex, const CSphString & sQuery, const
 			auto pServed = GetServed ( sLocal );
 			if ( !pServed )
 			{
-				tFailureLog.Submit ( sLocal.cstr(), sIndex.cstr(), "missed index" );
+				tFailureLog.Submit ( sLocal.cstr(), sIndex.cstr(), "missed table" );
 				continue;
 			}
 
@@ -11532,7 +11581,7 @@ void HandleMysqlCallSuggest ( RowBuffer_i & tOut, SqlStmt_t & tStmt, bool bQuery
 		auto pServed = GetServed ( tStmt.m_dInsertValues[1].m_sVal );
 		if ( !pServed )
 		{
-			sError.SetSprintf ( "no such index %s", tStmt.m_dInsertValues[1].m_sVal.cstr () );
+			sError.SetSprintf ( "no such table %s", tStmt.m_dInsertValues[1].m_sVal.cstr () );
 			tOut.Error ( tStmt.m_sStmt, sError.cstr () );
 			return;
 		}
@@ -11751,7 +11800,7 @@ void HandleMysqlDescribe ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 		auto pDistr = GetDistr ( tStmt.m_sIndex );
 		if ( !pDistr )
 		{
-			tOut.ErrorAbsent ( tStmt.m_sStmt, "no such index '%s'", tStmt.m_sIndex.cstr () );
+			tOut.ErrorAbsent ( tStmt.m_sStmt, "no such table '%s'", tStmt.m_sIndex.cstr () );
 			return;
 		}
 		DescribeDistributedSchema ( dOut, pDistr );
@@ -11842,7 +11891,7 @@ static bool CheckExistingTables ( const SqlStmt_t & tStmt, CSphString & sError )
 			return true;
 		else
 		{
-			sError.SetSprintf ( "index '%s' already exists", tStmt.m_sIndex.cstr() );
+			sError.SetSprintf ( "table '%s' already exists", tStmt.m_sIndex.cstr() );
 			return false;
 		}
 	}
@@ -11908,7 +11957,7 @@ static void HandleMysqlCreateTable ( RowBuffer_i & tOut, const SqlStmt_t & tStmt
 
 	if ( !CheckCreateTable ( tStmt, sError ) )
 	{
-		sError.SetSprintf ( "index '%s': CREATE TABLE failed: %s", tStmt.m_sIndex.cstr(), sError.cstr() );
+		sError.SetSprintf ( "table '%s': CREATE TABLE failed: %s", tStmt.m_sIndex.cstr(), sError.cstr() );
 		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		return;
 	}
@@ -11919,7 +11968,7 @@ static void HandleMysqlCreateTable ( RowBuffer_i & tOut, const SqlStmt_t & tStmt
 
 	if ( !bCreatedOk )
 	{
-		sError.SetSprintf ( "error adding index '%s': %s", tStmt.m_sIndex.cstr(), sError.cstr() );
+		sError.SetSprintf ( "error adding table '%s': %s", tStmt.m_sIndex.cstr(), sError.cstr() );
 		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		return;
 	}
@@ -11960,7 +12009,7 @@ static void HandleMysqlCreateTableLike ( RowBuffer_i & tOut, const SqlStmt_t & t
 
 	if ( !CheckExistingTables ( tStmt, sError ) )
 	{
-		sError.SetSprintf ( "index '%s': CREATE TABLE failed: %s", tStmt.m_sIndex.cstr(), sError.cstr() );
+		sError.SetSprintf ( "table '%s': CREATE TABLE failed: %s", tStmt.m_sIndex.cstr(), sError.cstr() );
 		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		return;
 	}
@@ -11970,7 +12019,7 @@ static void HandleMysqlCreateTableLike ( RowBuffer_i & tOut, const SqlStmt_t & t
 	switch ( IndexIsServed ( sLike ) )
 	{
 	case RunIdx_e::NOTSERVED:
-		sError.SetSprintf ( "index '%s': CREATE TABLE LIKE failed: no index '%s' found", tStmt.m_sIndex.cstr(), sLike.cstr() );
+		sError.SetSprintf ( "table '%s': CREATE TABLE LIKE failed: no table '%s' found", tStmt.m_sIndex.cstr(), sLike.cstr() );
 		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		return;
 	case RunIdx_e::LOCAL:
@@ -11979,7 +12028,7 @@ static void HandleMysqlCreateTableLike ( RowBuffer_i & tOut, const SqlStmt_t & t
 		assert ( pServed );
 		if ( !ServedDesc_t::IsMutable ( pServed ) )
 		{
-			tOut.ErrorAbsent ( tStmt.m_sStmt, "index '%s' is not real-time or percolate", sError.cstr() );
+			tOut.ErrorAbsent ( tStmt.m_sStmt, "table '%s' is not real-time or percolate", sError.cstr() );
 			return;
 		}
 		RIdx_c pIdx { pServed };
@@ -12043,13 +12092,13 @@ void HandleMysqlShowCreateTable ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 	auto pDist = GetDistr ( tStmt.m_sIndex );
 	if ( !pServed && !pDist )
 	{
-		tOut.ErrorAbsent ( tStmt.m_sStmt, "no such index '%s'", tStmt.m_sIndex.cstr () );
+		tOut.ErrorAbsent ( tStmt.m_sStmt, "no such table '%s'", tStmt.m_sIndex.cstr () );
 		return;
 	}
 
 	if ( pServed && !ServedDesc_t::IsMutable ( pServed ) )
 	{
-		tOut.ErrorAbsent ( tStmt.m_sStmt, "index '%s' is not real-time or percolate", tStmt.m_sIndex.cstr () );
+		tOut.ErrorAbsent ( tStmt.m_sStmt, "table '%s' is not real-time or percolate", tStmt.m_sIndex.cstr () );
 		return;
 	}
 
@@ -12149,7 +12198,13 @@ void HandleMysqlShowThreads ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 		iCols = pStmt->m_iThreadsCols;
 	}
 
-	tOut.HeadBegin ( bAll ? 15 : 14 ); // 15 with chain
+	int iColCount = 15;
+	if ( !bAll )
+		iColCount -= 1;
+	if ( !g_bCpuStats )
+		iColCount -= 2;
+
+	tOut.HeadBegin ( iColCount ); // 15 with chain
 	tOut.HeadColumn ( "Tid", MYSQL_COL_LONG );
 	tOut.HeadColumn ( "Name" );
 	tOut.HeadColumn ( "Proto" );
@@ -12158,8 +12213,11 @@ void HandleMysqlShowThreads ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 	tOut.HeadColumn ( "ConnID", MYSQL_COL_LONGLONG );
 	tOut.HeadColumn ( "Time", MYSQL_COL_FLOAT );
 	tOut.HeadColumn ( "Work time" );
-	tOut.HeadColumn ( "Work time CPU" );
-	tOut.HeadColumn ( "Thd efficiency", MYSQL_COL_FLOAT);
+	if ( g_bCpuStats )
+	{
+		tOut.HeadColumn ( "Work time CPU" );
+		tOut.HeadColumn ( "Thd efficiency", MYSQL_COL_FLOAT);
+	}
 	tOut.HeadColumn ( "Jobs done", MYSQL_COL_LONG );
 	tOut.HeadColumn ( "Last job took" );
 	tOut.HeadColumn ( "In idle" );
@@ -12192,8 +12250,11 @@ void HandleMysqlShowThreads ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 		int64_t tmNow = sphMicroTimer (); // short-term cache
 		tOut.PutMicrosec ( tmNow-dThd.m_tmStart.value_or(tmNow) ); // time
 		tOut.PutTimeAsString ( dThd.m_tmTotalWorkedTimeUS ); // work time
-		tOut.PutTimeAsString ( dThd.m_tmTotalWorkedCPUTimeUS ); // work CPU time
-		tOut.PutPercentAsString ( dThd.m_tmTotalWorkedCPUTimeUS, dThd.m_tmTotalWorkedTimeUS ); // work CPU time %
+		if ( g_bCpuStats )
+		{
+			tOut.PutTimeAsString ( dThd.m_tmTotalWorkedCPUTimeUS ); // work CPU time
+			tOut.PutPercentAsString ( dThd.m_tmTotalWorkedCPUTimeUS, dThd.m_tmTotalWorkedTimeUS ); // work CPU time %
+		}
 		tOut.PutNumAsString ( dThd.m_iTotalJobsDone ); // jobs done
 		if ( dThd.m_tmLastJobStartTimeUS<0 )
 		{
@@ -12399,7 +12460,7 @@ static bool SendUserVar ( const char * sIndex, const char * sUserVarName, CSphVe
 	auto pIndex = GetDistr ( sIndex );
 	if ( !pIndex )
 	{
-		sError.SetSprintf ( "unknown index '%s' in Set statement", sIndex );
+		sError.SetSprintf ( "unknown table '%s' in Set statement", sIndex );
 		return false;
 	}
 
@@ -12535,7 +12596,7 @@ static void DoExtendedUpdate ( const SqlStmt_t & tStmt, const CSphString & sInde
 	// checks
 	if ( !pServed )
 	{
-		dFails.Submit ( sIndex, sDistributed, "index not available" );
+		dFails.Submit ( sIndex, sDistributed, "table not available" );
 		return;
 	}
 
@@ -12632,7 +12693,7 @@ void sphHandleMysqlUpdate ( StmtErrorReporter_i & tOut, const SqlStmt_t & tStmt,
 	ParseIndexList ( tStmt.m_sIndex, dIndexNames );
 	if ( dIndexNames.IsEmpty() )
 	{
-		tOut.Error ( "no such index '%s'", tStmt.m_sIndex.cstr() );
+		tOut.Error ( "no such table '%s'", tStmt.m_sIndex.cstr() );
 		return;
 	}
 
@@ -12641,7 +12702,7 @@ void sphHandleMysqlUpdate ( StmtErrorReporter_i & tOut, const SqlStmt_t & tStmt,
 	CSphString sMissed;
 	if ( !ExtractDistributedIndexes ( dIndexNames, dDistributed, sMissed ) )
 	{
-		tOut.Error ( "unknown index '%s' in update request", sMissed.cstr() );
+		tOut.Error ( "unknown table '%s' in update request", sMissed.cstr() );
 		return;
 	}
 
@@ -13205,7 +13266,7 @@ static int LocalIndexDoDeleteDocuments ( const CSphString & sName, const char * 
 
 	cServedIndexRefPtr_c pServed { GetServed ( sName ) };
 	if ( !ServedDesc_t::IsMutable ( pServed ) )
-		return err ( "index not available, or does not support DELETE" );
+		return err ( "table not available, or does not support DELETE" );
 
 	GlobalCrashQueryGetRef().m_dIndex = FromStr ( sName );
 	if ( !CheckIndexCluster ( sName, *pServed, sCluster, IsHttpStmt ( tStmt ), sError ) )
@@ -13215,7 +13276,7 @@ static int LocalIndexDoDeleteDocuments ( const CSphString & sName, const char * 
 	if ( bOnlyStoreDocIDs )
 	{
 		if ( pServed->m_eType == IndexType_e::PERCOLATE )
-			return err ( "Storing del subset not implemented for PQ indexes" );
+			return err ( "Storing del subset not implemented for PQ tables" );
 
 		assert ( sStore.Begins ( "@" ) );
 		DocsCollector_c dData { tStmt.m_tQuery, tStmt.m_bJson, sName, pServed, &sError };
@@ -13308,7 +13369,7 @@ void sphHandleMysqlDelete ( StmtErrorReporter_i & tOut, const SqlStmt_t & tStmt,
 	ParseIndexList ( tStmt.m_sIndex, dNames );
 	if ( dNames.IsEmpty() )
 	{
-		tOut.Error ( "no such index '%s'", tStmt.m_sIndex.cstr () );
+		tOut.Error ( "no such table '%s'", tStmt.m_sIndex.cstr () );
 		return;
 	}
 
@@ -13316,7 +13377,7 @@ void sphHandleMysqlDelete ( StmtErrorReporter_i & tOut, const SqlStmt_t & tStmt,
 	CSphString sMissed;
 	if ( !ExtractDistributedIndexes ( dNames, dDistributed, sMissed ) )
 	{
-		tOut.Error ( "unknown index '%s' in delete request", sMissed.cstr () );
+		tOut.Error ( "unknown table '%s' in delete request", sMissed.cstr () );
 		return;
 	}
 
@@ -13328,7 +13389,7 @@ void sphHandleMysqlDelete ( StmtErrorReporter_i & tOut, const SqlStmt_t & tStmt,
 			if ( !pDist || pDist->m_dAgents.IsEmpty() )
 				continue;
 
-			tOut.Error ( "index '%s': DELETE is not supported on agents when autocommit=0", tStmt.m_sIndex.cstr() );
+			tOut.Error ( "table '%s': DELETE is not supported on agents when autocommit=0", tStmt.m_sIndex.cstr() );
 			return;
 		}
 	}
@@ -13795,7 +13856,7 @@ void HandleMysqlSet ( RowBuffer_i & tOut, SqlStmt_t & tStmt, CSphSessionAccum & 
 			g_bSplit = !!tStmt.m_iSetValue;
 		} else if ( tStmt.m_sSetName=="secondary_indexes" )
 		{
-			SetSecondaryIndexDefault ( !!tStmt.m_iSetValue );
+			SetSecondaryIndexDefault ( tStmt.m_iSetValue!=0 ? SIDefault_e::ENABLED : SIDefault_e::DISABLED );
 
 		} else if ( tStmt.m_sSetName=="accurate_aggregation" )
 		{
@@ -13860,13 +13921,13 @@ void HandleMysqlAttach ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, CSphString
 
 	bool bOk = false;
 	if ( !pServedFrom )
-		tOut.ErrorEx ( nullptr, "no such index '%s'", sFrom.cstr() );
+		tOut.ErrorEx ( nullptr, "no such table '%s'", sFrom.cstr() );
 	else if ( pServedFrom->m_eType != IndexType_e::PLAIN )
-		tOut.Error ( tStmt.m_sStmt, "1st argument to ATTACH must be a plain index" );
+		tOut.Error ( tStmt.m_sStmt, "1st argument to ATTACH must be a plain table" );
 	else if ( !pServedTo )
-		tOut.ErrorEx ( nullptr, "no such index '%s'", sTo.cstr() );
+		tOut.ErrorEx ( nullptr, "no such table '%s'", sTo.cstr() );
 	else if ( pServedTo->m_eType!=IndexType_e::RT )
-		tOut.Error ( tStmt.m_sStmt, "2nd argument to ATTACH must be a RT index" );
+		tOut.Error ( tStmt.m_sStmt, "2nd argument to ATTACH must be a RT table" );
 	else
 		bOk = true;
 	if (!bOk)
@@ -13876,7 +13937,7 @@ void HandleMysqlAttach ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, CSphString
 	auto tCluster = IsPartOfCluster ( pServedTo );
 	if ( tCluster )
 	{
-		tOut.ErrorEx ( nullptr, "index %s is part of cluster %s, can not issue ATTACH", sTo.cstr(), tCluster->cstr(), sError.cstr () );
+		tOut.ErrorEx ( nullptr, "table %s is part of cluster %s, can not issue ATTACH", sTo.cstr(), tCluster->cstr(), sError.cstr () );
 		return;
 	}
 
@@ -13908,7 +13969,7 @@ void HandleMysqlFlushRtindex ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 
 	if ( !ServedDesc_t::IsMutable ( pIndex ) )
 	{
-		tOut.Error ( tStmt.m_sStmt, "FLUSH RTINDEX requires an existing RT index" );
+		tOut.Error ( tStmt.m_sStmt, "FLUSH RTINDEX requires an existing RT table" );
 		return;
 	}
 
@@ -13922,7 +13983,7 @@ void HandleMysqlFlushRamchunk ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 	auto pIndex = GetServed ( tStmt.m_sIndex );
 	if ( !ServedDesc_t::IsMutable ( pIndex ) )
 	{
-		tOut.Error ( tStmt.m_sStmt, "FLUSH RAMCHUNK requires an existing RT index" );
+		tOut.Error ( tStmt.m_sStmt, "FLUSH RAMCHUNK requires an existing RT table" );
 		return;
 	}
 
@@ -13930,7 +13991,7 @@ void HandleMysqlFlushRamchunk ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 	if ( !pRt->ForceDiskChunk() )
 	{
 		CSphString sError;
-		sError.SetSprintf ( "index '%s': FLUSH RAMCHUNK failed; INDEX UNUSABLE (%s)", tStmt.m_sIndex.cstr(), pRt->GetLastError().cstr() );
+		sError.SetSprintf ( "table '%s': FLUSH RAMCHUNK failed; TABLE UNUSABLE (%s)", tStmt.m_sIndex.cstr(), pRt->GetLastError().cstr() );
 		tOut.Error ( tStmt.m_sStmt, sError.cstr () );
 		g_pLocalIndexes->Delete ( tStmt.m_sIndex );
 		return;
@@ -13977,7 +14038,7 @@ void HandleMysqlOptimizeManual ( RowBuffer_i & tOut, const DebugCmd::DebugComman
 	auto pIndex = GetServed ( sIndex );
 	if ( !ServedDesc_t::IsMutable ( pIndex ) )
 	{
-		tOut.Error ( tCmd.m_szStmt, "MERGE requires an existing RT index" );
+		tOut.Error ( tCmd.m_szStmt, "MERGE requires an existing RT table" );
 		return;
 	}
 
@@ -14006,7 +14067,7 @@ void HandleMysqlDropManual ( RowBuffer_i & tOut, const DebugCmd::DebugCommand_t 
 	auto pIndex = GetServed ( sIndex );
 	if ( !ServedDesc_t::IsMutable ( pIndex ) )
 	{
-		tOut.Error ( tCmd.m_szStmt, "DROP requires an existing RT index" );
+		tOut.Error ( tCmd.m_szStmt, "DROP requires an existing RT table" );
 		return;
 	}
 
@@ -14032,7 +14093,7 @@ void HandleMysqlCompress ( RowBuffer_i & tOut, const DebugCmd::DebugCommand_t & 
 	auto pIndex = GetServed ( sIndex );
 	if ( !ServedDesc_t::IsMutable ( pIndex ) )
 	{
-		tOut.Error ( tCmd.m_szStmt, "COMPRESS requires an existing RT index" );
+		tOut.Error ( tCmd.m_szStmt, "COMPRESS requires an existing RT table" );
 		return;
 	}
 
@@ -14063,7 +14124,7 @@ void HandleMysqlSplit ( RowBuffer_i & tOut, const DebugCmd::DebugCommand_t & tCm
 	auto pIndex = GetServed ( sIndex );
 	if ( !ServedDesc_t::IsMutable ( pIndex ) )
 	{
-		tOut.Error ( tCmd.m_szStmt, "SPLIT requires an existing RT index" );
+		tOut.Error ( tCmd.m_szStmt, "SPLIT requires an existing RT table" );
 		return;
 	}
 
@@ -14111,7 +14172,7 @@ void HandleMysqlfiles ( RowBuffer_i & tOut, const DebugCmd::DebugCommand_t & tCm
 	auto pIndex = GetServed ( sIndex );
 	if ( !ServedDesc_t::IsLocal ( pIndex ) )
 	{
-		tOut.Error ( tCmd.m_szStmt, "FILES requires an existing local index" );
+		tOut.Error ( tCmd.m_szStmt, "FILES requires an existing local table" );
 		return;
 	}
 
@@ -14156,7 +14217,7 @@ void HandleSelectFiles ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 	auto pServed = GetServed ( tStmt.m_sIndex );
 	if ( !ServedDesc_t::IsLocal ( pServed ) )
 	{
-		tOut.Error ( tStmt.m_sStmt, "FILES requires an existing local index" );
+		tOut.Error ( tStmt.m_sStmt, "FILES requires an existing local table" );
 		return;
 	}
 
@@ -14490,7 +14551,7 @@ void HandleMysqlDebug ( RowBuffer_i &tOut, Str_t sCommand, const QueryProfile_c 
 	// display a short help
 	tOut.HeadTuplet ( "command", "meaning" );
 	tOut.DataTuplet ( "flush logs", "emulate USR1 signal" );
-	tOut.DataTuplet ( "reload indexes", "emulate HUP signal" );
+	tOut.DataTuplet ( "reload tables", "emulate HUP signal" );
 	for ( const auto& dCommand : DebugCmd::dCommands )
 		if ( ( dCommand.m_uTraits & uMask )==dCommand.m_uTraits )
 			tOut.DataTuplet ( dCommand.m_szExample, dCommand.m_szExplanation );
@@ -14529,7 +14590,7 @@ void HandleMysqlTruncate ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 		auto pIndex = GetServed ( sIndex );
 		if ( !ServedDesc_t::IsMutable ( pIndex ) )
 		{
-			tOut.Error ( tStmt.m_sStmt, "TRUNCATE RTINDEX requires an existing RT index" );
+			tOut.Error ( tStmt.m_sStmt, "TRUNCATE RTINDEX requires an existing RT table" );
 			return;
 		}
 
@@ -14562,7 +14623,7 @@ void HandleMysqlOptimize ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 	auto pIndex = GetServed ( sIndex );
 	if ( !ServedDesc_t::IsMutable ( pIndex ) )
 	{
-		tOut.Error ( tStmt.m_sStmt, "OPTIMIZE INDEX requires an existing RT index" );
+		tOut.Error ( tStmt.m_sStmt, "OPTIMIZE TABLE requires an existing RT table" );
 		return;
 	}
 
@@ -14810,7 +14871,17 @@ void HandleMysqlShowVariables ( RowBuffer_i & dRows, const SqlStmt_t & tStmt )
 		});
 	}
 	dTable.MatchTuplet ( "pseudo_sharding", g_bSplit ? "1" : "0" );
-	dTable.MatchTuplet ( "secondary_indexes", GetSecondaryIndexDefault() ? "1" : "0" );
+
+	switch ( GetSecondaryIndexDefault() )
+	{
+	case SIDefault_e::FORCE:
+		dTable.MatchTuplet ( "secondary_indexes", "force" ); break;
+	case SIDefault_e::ENABLED:
+		dTable.MatchTuplet ( "secondary_indexes", "1" ); break;
+	default:
+		dTable.MatchTuplet ( "secondary_indexes", "0" );
+	}
+
 	dTable.MatchTuplet ( "accurate_aggregation", GetAccurateAggregationDefault() ? "1" : "0" );
 	dTable.MatchTupletFn ( "threads_ex_effective", [] {
 		StringBuilder_c tBuf;
@@ -15078,7 +15149,7 @@ void HandleMysqlShowIndexStatus ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, b
 			{
 				if ( !pIndex )
 				{
-					tOut.Error ( tStmt.m_sStmt, "SHOW INDEX STATUS requires an existing index" );
+					tOut.Error ( tStmt.m_sStmt, "SHOW TABLE STATUS requires an existing table" );
 					return;
 				}
 
@@ -15096,7 +15167,7 @@ void HandleMysqlShowIndexStatus ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, b
 	if ( pIndex )
 		AddDistibutedIndexStatus ( tOut, pIndex, bFederatedUser, tStmt.m_sIndex, tStmt.m_sStringParam );
 	else
-		tOut.Error ( tStmt.m_sStmt, "SHOW INDEX STATUS requires an existing index" );
+		tOut.Error ( tStmt.m_sStmt, "SHOW TABLE STATUS requires an existing table" );
 }
 
 void PutIndexStatus ( RowBuffer_i & tOut, const CSphIndex * pIndex )
@@ -15144,7 +15215,7 @@ void HandleSelectIndexStatus ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 
 	if ( !ServedDesc_t::IsLocal ( pServed ) )
 	{
-		tOut.Error ( tStmt.m_sStmt, "select INDEX.status requires an existing index" );
+		tOut.Error ( tStmt.m_sStmt, "select TABLE.status requires an existing table" );
 		return;
 	}
 
@@ -15187,7 +15258,7 @@ void HandleMysqlShowIndexSettings ( RowBuffer_i & tOut, const SqlStmt_t & tStmt 
 	auto pServed = GetServed ( tStmt.m_sIndex );
 	if ( !pServed )
 	{
-		tOut.Error ( tStmt.m_sStmt, "SHOW INDEX SETTINGS requires an existing index" );
+		tOut.Error ( tStmt.m_sStmt, "SHOW TABLE SETTINGS requires an existing table" );
 		return;
 	}
 
@@ -15379,7 +15450,7 @@ static void HandleMysqlAlter ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, Alte
 	ParseIndexList ( tStmt.m_sIndex, dNames );
 	if ( dNames.IsEmpty() )
 	{
-		sError.SetSprintf ( "no such index '%s'", tStmt.m_sIndex.cstr() );
+		sError.SetSprintf ( "no such table '%s'", tStmt.m_sIndex.cstr() );
 		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		return;
 	}
@@ -15388,7 +15459,7 @@ static void HandleMysqlAlter ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, Alte
 		if ( !g_pLocalIndexes->Contains ( sName )
 			&& g_pDistIndexes->Contains ( sName ) )
 		{
-			sError.SetSprintf ( "ALTER is only supported for local (not distributed) indexes" );
+			sError.SetSprintf ( "ALTER is only supported for local (not distributed) tables" );
 			tOut.Error ( tStmt.m_sStmt, sError.cstr () );
 			return;
 		}
@@ -15398,7 +15469,7 @@ static void HandleMysqlAlter ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, Alte
 		auto pServed = GetServed ( sName );
 		if ( !pServed )
 		{
-			dErrors.Submit ( sName, nullptr, "unknown local index in ALTER request" );
+			dErrors.Submit ( sName, nullptr, "unknown local table in ALTER request" );
 			continue;
 		}
 
@@ -15448,13 +15519,13 @@ static bool PrepareReconfigure ( const char * szIndex, const CSphConfigSection &
 
 	if ( !sphRTSchemaConfigure ( hIndex, tSettings.m_tSchema, tSettings.m_tIndex, sError, !tSettings.m_bChangeSchema, false ) )
 	{
-		sError.SetSprintf ( "failed to parse index '%s' schema, error: '%s'", szIndex, sError.cstr() );
+		sError.SetSprintf ( "failed to parse table '%s' schema, error: '%s'", szIndex, sError.cstr() );
 		return false;
 	}
 
 	if ( !tSettings.m_tIndex.Setup ( hIndex, szIndex, sWarning, sError ) )
 	{
-		sError.SetSprintf ( "failed to parse index '%s' settings, error: '%s'", szIndex, sError.cstr() );
+		sError.SetSprintf ( "failed to parse table '%s' settings, error: '%s'", szIndex, sError.cstr() );
 		return false;
 	}
 
@@ -15476,13 +15547,13 @@ static bool PrepareReconfigure ( const char * szIndex, CSphReconfigureSettings &
 
 	if ( !hCfg.Exists ( "index" ) )
 	{
-		sError.SetSprintf ( "failed to find any index in config file '%s'; using previous settings", g_sConfigFile.cstr () );
+		sError.SetSprintf ( "failed to find any table in config file '%s'; using previous settings", g_sConfigFile.cstr () );
 		return false;
 	}
 
 	if ( !hCfg["index"].Exists ( szIndex ) )
 	{
-		sError.SetSprintf ( "failed to find index '%s' in config file '%s'; using previous settings", szIndex, g_sConfigFile.cstr () );
+		sError.SetSprintf ( "failed to find table '%s' in config file '%s'; using previous settings", szIndex, g_sConfigFile.cstr () );
 		return false;
 	}
 
@@ -15528,7 +15599,7 @@ static void HandleMysqlReconfigure ( RowBuffer_i & tOut, const SqlStmt_t & tStmt
 	{
 		if ( !pRT->Reconfigure ( tSetup ) )
 		{
-			sError.SetSprintf ( "index '%s': reconfigure failed; INDEX UNUSABLE (%s)", tStmt.m_sIndex.cstr(), pRT->GetLastError().cstr() );
+			sError.SetSprintf ( "table '%s': reconfigure failed; TABLE UNUSABLE (%s)", tStmt.m_sIndex.cstr(), pRT->GetLastError().cstr() );
 			g_pLocalIndexes->Delete ( tStmt.m_sIndex );
 		}
 	}
@@ -15564,9 +15635,9 @@ static void HandleMysqlAlterKlist ( RowBuffer_i & tOut, const SqlStmt_t & tStmt,
 	if ( !pServed )
 	{
 		if ( g_pDistIndexes->Contains ( tStmt.m_sIndex ) )
-			sError.SetSprintf ( "ALTER is only supported for local (not distributed) indexes" );
+			sError.SetSprintf ( "ALTER is only supported for local (not distributed) tables" );
 		else
-			sError.SetSprintf ( "index '%s' not found", tStmt.m_sIndex.cstr () );
+			sError.SetSprintf ( "table '%s' not found", tStmt.m_sIndex.cstr () );
 	}
 	else if ( ServedDesc_t::IsMutable ( pServed ) )
 		sError.SetSprintf ( "'%s' does not support ALTER (real-time or percolate)", tStmt.m_sIndex.cstr () );
@@ -15662,7 +15733,7 @@ static void HandleMysqlAlterIndexSettings ( RowBuffer_i & tOut, const SqlStmt_t 
 	auto pServed = GetServed ( tStmt.m_sIndex.cstr() );
 	if ( !pServed || pServed->m_eType != IndexType_e::RT )
 	{
-		tOut.ErrorEx ( tStmt.m_sStmt, "index '%s' is not found, or not real-time", tStmt.m_sIndex.cstr() );
+		tOut.ErrorEx ( tStmt.m_sStmt, "table '%s' is not found, or not real-time", tStmt.m_sIndex.cstr() );
 		return;
 	}
 
@@ -15680,7 +15751,7 @@ static void HandleMysqlAlterIndexSettings ( RowBuffer_i & tOut, const SqlStmt_t 
 
 	if ( dCreateTableStmts.GetLength()!=1 )
 	{
-		tOut.Error ( tStmt.m_sStmt, "Unable to alter index settings" );
+		tOut.Error ( tStmt.m_sStmt, "Unable to alter table settings" );
 		return;
 	}
 
@@ -15734,7 +15805,7 @@ static void HandleMysqlAlterIndexSettings ( RowBuffer_i & tOut, const SqlStmt_t 
 		bool bOk = pRtIndex->Reconfigure(tSetup);
 		if ( !bOk )
 		{
-			sError.SetSprintf ( "index '%s': alter failed; INDEX UNUSABLE (%s)", tStmt.m_sIndex.cstr(), pRtIndex->GetLastError().cstr() );
+			sError.SetSprintf ( "table '%s': alter failed; TABLE UNUSABLE (%s)", tStmt.m_sIndex.cstr(), pRtIndex->GetLastError().cstr() );
 			g_pLocalIndexes->Delete ( tStmt.m_sIndex );
 		}
 	}
@@ -15798,13 +15869,13 @@ static void HandleMysqlReloadIndex ( RowBuffer_i & tOut, const SqlStmt_t & tStmt
 	cServedIndexRefPtr_c pServed = GetServed ( tStmt.m_sIndex );
 	if ( !pServed )
 	{
-		tOut.ErrorEx ( tStmt.m_sStmt, "unknown local index '%s'", tStmt.m_sIndex.cstr() );
+		tOut.ErrorEx ( tStmt.m_sStmt, "unknown local table '%s'", tStmt.m_sIndex.cstr() );
 		return;
 	}
 
 	if ( ServedDesc_t::IsMutable ( pServed ) )
 	{
-		tOut.ErrorEx ( tStmt.m_sStmt, "can not reload real-time or percolate index" );
+		tOut.ErrorEx ( tStmt.m_sStmt, "can not reload real-time or percolate table" );
 		return;
 	}
 
@@ -15872,7 +15943,7 @@ void HandleMysqlExplain ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, bool bDot
 	auto pServed = GetServed ( tStmt.m_sIndex );
 	if ( !pServed )
 	{
-		tOut.ErrorEx ( tStmt.m_sStmt, "unknown local index '%s'", tStmt.m_sIndex.cstr ());
+		tOut.ErrorEx ( tStmt.m_sStmt, "unknown local table '%s'", tStmt.m_sIndex.cstr ());
 		return;
 	}
 
@@ -15915,7 +15986,7 @@ void HandleMysqlImportTable ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, CSphS
 
 	if ( IndexIsServed ( tStmt.m_sIndex ) )
 	{
-		sError.SetSprintf ( "index '%s' already exists", tStmt.m_sIndex.cstr() );
+		sError.SetSprintf ( "table '%s' already exists", tStmt.m_sIndex.cstr() );
 		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		return;
 	}
@@ -15924,14 +15995,14 @@ void HandleMysqlImportTable ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, CSphS
 	StrVec_t dWarnings;
 	if ( !CopyIndexFiles ( tStmt.m_sIndex, tStmt.m_sStringParam, bPQ, dWarnings, sError ) )
 	{
-		sError.SetSprintf ( "unable to import index '%s': %s", tStmt.m_sIndex.cstr(), sError.cstr() );
+		sError.SetSprintf ( "unable to import table '%s': %s", tStmt.m_sIndex.cstr(), sError.cstr() );
 		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		return;
 	}
 
 	if ( !AddExistingIndexConfigless ( tStmt.m_sIndex, bPQ ? IndexType_e::PERCOLATE : IndexType_e::RT, dWarnings, sError ) )
 	{
-		sError.SetSprintf ( "unable to import index '%s': %s", tStmt.m_sIndex.cstr(), sError.cstr() );
+		sError.SetSprintf ( "unable to import table '%s': %s", tStmt.m_sIndex.cstr(), sError.cstr() );
 		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		return;
 	}
@@ -15972,7 +16043,7 @@ void HandleMysqlFreezeIndexes ( RowBuffer_i& tOut, const CSphString& sIndexes, C
 	if ( !dNonlockedIndexes.IsEmpty() )
 	{
 		StringBuilder_c sWarning;
-		sWarning << "Some indexes are not suitable for freezing: ";
+		sWarning << "Some tables are not suitable for freezing: ";
 		sWarning.StartBlock();
 		dNonlockedIndexes.for_each ( [&sWarning] ( const auto& sValue ) { sWarning << sValue; } );
 		sWarning.FinishBlocks ();
@@ -16773,14 +16844,14 @@ static bool ApplyIndexKillList ( const CSphIndex * pIndex, CSphString & sWarning
 		return true;
 
 	if ( bShowMessage )
-		sphInfo ( "applying killlist of index '%s'", pIndex->GetName() );
+		sphInfo ( "applying killlist of table '%s'", pIndex->GetName() );
 
 	for ( const auto & tIndex : tTargets.m_dTargets )
 	{
 		// just in case; otherwise we'll be rlocking an already rlocked index
 		if ( tIndex.m_sIndex==pIndex->GetName() )
 		{
-			sWarning.SetSprintf ( "index '%s': applying killlist to itself", tIndex.m_sIndex.cstr() );
+			sWarning.SetSprintf ( "table '%s': applying killlist to itself", tIndex.m_sIndex.cstr() );
 			continue;
 		}
 
@@ -16797,7 +16868,7 @@ static bool ApplyIndexKillList ( const CSphIndex * pIndex, CSphString & sWarning
 				pIndex->KillExistingDocids ( pTarget );
 		}
 		else
-			sWarning.SetSprintf ( "index '%s' from killlist_target not found", tIndex.m_sIndex.cstr() );
+			sWarning.SetSprintf ( "table '%s' from killlist_target not found", tIndex.m_sIndex.cstr() );
 	}
 
 	return true;
@@ -16857,22 +16928,22 @@ bool PreloadKlistTarget ( const ServedDesc_t & tServed, RotateFrom_e eFrom, StrV
 
 static bool ApplyOthersKillListsToMe ( CSphIndex* pIndex, const char* szIndex, CSphString& sError )
 {
-	sphLogDebug ( "rotating index '%s': applying other indexes' killlists", szIndex );
+	sphLogDebug ( "rotating table '%s': applying other tables killlists", szIndex );
 
 	// apply other indexes' killlists to THIS index
 	if ( !ApplyKillListsTo ( pIndex, sError ) )
 	{
-		sphWarning ( "rotating index '%s': %s", szIndex, sError.cstr() );
+		sphWarning ( "rotating table '%s': %s", szIndex, sError.cstr() );
 		return false;
 	}
 
-	sphLogDebug ( "rotating index '%s': applying other indexes' killlists... DONE", szIndex );
+	sphLogDebug ( "rotating table '%s': applying other tables killlists... DONE", szIndex );
 	return true;
 }
 
 static bool ApplyMyKillListsToOthers ( const CSphIndex* pIndex, const char* szIndex, CSphString& sError )
 {
-	sphLogDebug ( "rotating index '%s': apply killlist from this index to other indexes (killlist_target)", szIndex );
+	sphLogDebug ( "rotating table '%s': apply killlist from this table to other tables (killlist_target)", szIndex );
 
 	// apply killlist from this index to other indexes (killlist_target)
 	// if this fails, only show a warning
@@ -16880,13 +16951,13 @@ static bool ApplyMyKillListsToOthers ( const CSphIndex* pIndex, const char* szIn
 	if ( !ApplyIndexKillList ( pIndex, sWarning, sError ) )
 	{
 		return false;
-		sphWarning ( "rotating index '%s': %s", szIndex, sError.cstr() );
+		sphWarning ( "rotating table '%s': %s", szIndex, sError.cstr() );
 	}
 
 	if ( sWarning.Length() )
-		sphWarning ( "rotating index '%s': %s", szIndex, sWarning.cstr() );
+		sphWarning ( "rotating table '%s': %s", szIndex, sWarning.cstr() );
 
-	sphLogDebug ( "rotating index '%s': apply killlist from this index to other indexes (killlist_target)... DONE", szIndex );
+	sphLogDebug ( "rotating table '%s': apply killlist from this table to other tables (killlist_target)... DONE", szIndex );
 	return true;
 }
 
@@ -16924,7 +16995,7 @@ bool RotateIndexGreedy ( const ServedIndex_c& tServed, const char* szIndex, CSph
 
 	if ( !dFreshFiles.HasAllFiles() )
 	{
-		sphWarning ( "rotating index '%s': unreadable: %s; abort rotation", szIndex, strerrorm ( errno ) );
+		sphWarning ( "rotating table '%s': unreadable: %s; abort rotation", szIndex, strerrorm ( errno ) );
 		return false;
 	}
 
@@ -16956,7 +17027,7 @@ bool RotateIndexGreedy ( const ServedIndex_c& tServed, const char* szIndex, CSph
 	StrVec_t dWarnings;
 	if ( !pIdx->Prealloc ( g_bStripPath, nullptr, dWarnings ) )
 	{
-		sphWarning ( "rotating index '%s': .new preload failed: %s", szIndex, pIdx->GetLastError().cstr() );
+		sphWarning ( "rotating table '%s': .new preload failed: %s", szIndex, pIdx->GetLastError().cstr() );
 		if ( tActions )
 		{
 			if ( !tActions->UnRunDefers() )
@@ -16972,7 +17043,7 @@ bool RotateIndexGreedy ( const ServedIndex_c& tServed, const char* szIndex, CSph
 			sphLogDebug ( "PreallocIndexGreedy: has recovered. Prealloc it." );
 			if ( !pIdx->Prealloc ( g_bStripPath, nullptr, dWarnings ) )
 			{
-				sError.SetSprintf ( "rotating index '%s': .new preload failed; ROLLBACK FAILED; INDEX UNUSABLE", szIndex );
+				sError.SetSprintf ( "rotating table '%s': .new preload failed; ROLLBACK FAILED; TABLE UNUSABLE", szIndex );
 				return false;
 			}
 		}
@@ -16981,10 +17052,10 @@ bool RotateIndexGreedy ( const ServedIndex_c& tServed, const char* szIndex, CSph
 	assert ( pIdx->GetTokenizer() && pIdx->GetDictionary() );
 
 	for ( const auto& i : dWarnings )
-		sphWarning ( "rotating index '%s': %s", szIndex, i.cstr() );
+		sphWarning ( "rotating table '%s': %s", szIndex, i.cstr() );
 
 	if ( !pIdx->GetLastWarning().IsEmpty() )
-		sphWarning ( "rotating index '%s': %s", szIndex, pIdx->GetLastWarning().cstr() );
+		sphWarning ( "rotating table '%s': %s", szIndex, pIdx->GetLastWarning().cstr() );
 
 	// unlink .old
 	if ( bHasOldServedFiles )
@@ -16995,7 +17066,7 @@ bool RotateIndexGreedy ( const ServedIndex_c& tServed, const char* szIndex, CSph
 		return false;
 
 	// uff. all done
-	sphInfo ( "rotating index '%s': success", szIndex );
+	sphInfo ( "rotating table '%s': success", szIndex );
 	return true;
 }
 
@@ -17108,11 +17179,11 @@ bool RotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString & sIndex,
 {
 	assert ( pNewServed && pNewServed->m_eType == IndexType_e::PLAIN );
 
-	sphInfo ( "rotating index '%s': started", sIndex.cstr() );
+	sphInfo ( "rotating table '%s': started", sIndex.cstr() );
 	CheckIndexRotate_c tCheck ( *pNewServed );
 	if ( tCheck.NothingToRotate() )
 	{
-		sError.SetSprintf ( "nothing to rotate for index '%s'", sIndex.cstr() );
+		sError.SetSprintf ( "nothing to rotate for table '%s'", sIndex.cstr() );
 		return false;
 	}
 
@@ -17124,7 +17195,7 @@ bool RotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString & sIndex,
 		pNewIndex->SetFilebase ( IndexFiles_c::MakePath ( ".new", pNewServed->m_sIndexPath ) );
 
 	// prealloc enough RAM and lock new index
-	sphLogDebug ( "prealloc enough RAM and lock new index" );
+	sphLogDebug ( "prealloc enough RAM and lock new table" );
 
 	if ( !PreallocNewIndex ( *pNewServed, sIndex.cstr(), dWarnings, sError ) )
 		return false;
@@ -17136,7 +17207,7 @@ bool RotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString & sIndex,
 	/// activate new index
 	//////////////////////
 
-	sphLogDebug ( "activate new index" );
+	sphLogDebug ( "activate new table" );
 	if ( tCheck.RotateFromNew() )
 	{
 		ActionSequence_c tActions;
@@ -17150,7 +17221,7 @@ bool RotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString & sIndex,
 		{
 			bool bFatal;
 			std::tie ( sError, bFatal ) = tActions.GetError();
-			sphWarning ( "RotateIndexMT error: index %s, error %s", sIndex.cstr(), sError.cstr() );
+			sphWarning ( "RotateIndexMT error: table %s, error %s", sIndex.cstr(), sError.cstr() );
 			if ( bFatal )
 				g_pLocalIndexes->Delete ( sIndex );
 			return false;
@@ -17170,7 +17241,7 @@ bool RotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString & sIndex,
 	sphLogDebug ( "all went fine; swap them" );
 	Binlog::NotifyIndexFlush ( sIndex.cstr(), pNewIndex->m_iTID, false );
 	g_pLocalIndexes->AddOrReplace ( pNewServed, sIndex );
-	sphInfo ( "rotating index '%s': success", sIndex.cstr() );
+	sphInfo ( "rotating table '%s': success", sIndex.cstr() );
 	return true;
 }
 
@@ -17182,7 +17253,7 @@ static void InvokeRotation ( VecOfServed_c&& dDeferredIndexes ) REQUIRES ( MainT
 		// want to track rotation thread only at work
 		auto pDesc = PublishSystemInfo ( "ROTATION" );
 
-		sphLogDebug ( "TaskRotation starts with %d deferred indexes", dIndexes.GetLength() );
+		sphLogDebug ( "TaskRotation starts with %d deferred tables", dIndexes.GetLength() );
 		for ( auto& tIndex : dIndexes )
 		{
 			ServedIndexRefPtr_c& pReplacementServed = tIndex.second;
@@ -17196,27 +17267,27 @@ static void InvokeRotation ( VecOfServed_c&& dDeferredIndexes ) REQUIRES ( MainT
 			CSphString sError;
 			if ( ServedDesc_t::IsMutable ( pReplacementServed ) )
 			{
-				sphLogDebug ( "seamless rotate (prealloc) mutable index %s", sIndex.cstr() );
+				sphLogDebug ( "seamless rotate (prealloc) mutable table %s", sIndex.cstr() );
 				if ( PreallocNewIndex ( *pReplacementServed, sIndex.cstr(), dWarnings, sError ) )
 					g_pLocalIndexes->AddOrReplace ( pReplacementServed, sIndex );
 				else
-					sphWarning ( "index '%s': %s", sIndex.cstr(), sError.cstr() );
+					sphWarning ( "table '%s': %s", sIndex.cstr(), sError.cstr() );
 			} else
 			{
-				sphLogDebug ( "seamless rotate local index %s", sIndex.cstr() );
+				sphLogDebug ( "seamless rotate local table %s", sIndex.cstr() );
 				if ( !RotateIndexMT ( pReplacementServed, sIndex, dWarnings, sError ) )
-					sphWarning ( "index '%s': %s", sIndex.cstr(), sError.cstr() );
+					sphWarning ( "table '%s': %s", sIndex.cstr(), sError.cstr() );
 			}
 
 			for ( const auto& i : dWarnings )
-				sphWarning ( "index '%s': %s", sIndex.cstr(), i.cstr() );
+				sphWarning ( "table '%s': %s", sIndex.cstr(), i.cstr() );
 
 			g_pDistIndexes->Delete ( sIndex ); // postponed delete of same-named distributed (if any)
 		}
 
 		g_bInRotate = false;
 		RotateGlobalIdf();
-		sphInfo ( "rotating index: all indexes done" );
+		sphInfo ( "rotating table: all tables done" );
 	});
 }
 
@@ -17255,13 +17326,13 @@ void ConfigureDistributedIndex ( std::function<bool(const CSphString&)>&& fnChec
 	{
 		bSetHA = ParseStrategyHA ( hIndex["ha_strategy"].cstr(), tIdx.m_eHaStrategy );
 		if ( !bSetHA )
-			sphWarning ( "index '%s': ha_strategy (%s) is unknown for me, will use random", szIndexName, hIndex["ha_strategy"].cstr() );
+			sphWarning ( "table '%s': ha_strategy (%s) is unknown for me, will use random", szIndexName, hIndex["ha_strategy"].cstr() );
 	}
 
 	bool bEnablePersistentConns = ( g_iPersistentPoolSize>0 );
 	if ( hIndex ( "agent_persistent" ) && !bEnablePersistentConns )
 	{
-			sphWarning ( "index '%s': agent_persistent used, but no persistent_connections_limit defined. Fall back to non-persistent agent", szIndexName );
+			sphWarning ( "table '%s': agent_persistent used, but no persistent_connections_limit defined. Fall back to non-persistent agent", szIndexName );
 			bEnablePersistentConns = false;
 	}
 
@@ -17275,7 +17346,7 @@ void ConfigureDistributedIndex ( std::function<bool(const CSphString&)>&& fnChec
 		{
 			if ( !fnCheck ( sLocal ) )
 			{
-				sphWarning ( "index '%s': no such local index '%s', SKIPPED", szIndexName, sLocal.cstr() );
+				sphWarning ( "table '%s': no such local table '%s', SKIPPED", szIndexName, sLocal.cstr() );
 				continue;
 			}
 			tIdx.m_dLocal.Add ( sLocal );
@@ -17286,7 +17357,7 @@ void ConfigureDistributedIndex ( std::function<bool(const CSphString&)>&& fnChec
 	if ( hIndex ( "agent_retry_count" ) )
 	{
 		if ( hIndex["agent_retry_count"].intval ()<=0 )
-			sphWarning ( "index '%s': agent_retry_count must be positive, ignored", szIndexName );
+			sphWarning ( "table '%s': agent_retry_count must be positive, ignored", szIndexName );
 		else
 			tIdx.m_iAgentRetryCount = hIndex["agent_retry_count"].intval ();
 	}
@@ -17294,11 +17365,11 @@ void ConfigureDistributedIndex ( std::function<bool(const CSphString&)>&& fnChec
 	if ( hIndex ( "mirror_retry_count" ) )
 	{
 		if ( hIndex["mirror_retry_count"].intval ()<=0 )
-			sphWarning ( "index '%s': mirror_retry_count must be positive, ignored", szIndexName );
+			sphWarning ( "table '%s': mirror_retry_count must be positive, ignored", szIndexName );
 		else
 		{
 			if ( tIdx.m_iAgentRetryCount>0 )
-				sphWarning ("index '%s': `agent_retry_count` and `mirror_retry_count` both specified (they are aliases)."
+				sphWarning ("table '%s': `agent_retry_count` and `mirror_retry_count` both specified (they are aliases)."
 					"Value of `mirror_retry_count` will be used", szIndexName );
 			tIdx.m_iAgentRetryCount = hIndex["mirror_retry_count"].intval ();
 		}
@@ -17331,7 +17402,7 @@ void ConfigureDistributedIndex ( std::function<bool(const CSphString&)>&& fnChec
 	if ( hIndex("agent_connect_timeout") )
 	{
 		if ( hIndex["agent_connect_timeout"].intval()<=0 )
-			sphWarning ( "index '%s': agent_connect_timeout must be positive, ignored", szIndexName );
+			sphWarning ( "table '%s': agent_connect_timeout must be positive, ignored", szIndexName );
 		else
 			tIdx.m_iAgentConnectTimeoutMs = hIndex.GetMsTimeMs ( "agent_connect_timeout" );
 	}
@@ -17341,7 +17412,7 @@ void ConfigureDistributedIndex ( std::function<bool(const CSphString&)>&& fnChec
 	if ( hIndex("agent_query_timeout") )
 	{
 		if ( hIndex["agent_query_timeout"].intval()<=0 )
-			sphWarning ( "index '%s': agent_query_timeout must be positive, ignored", szIndexName );
+			sphWarning ( "table '%s': agent_query_timeout must be positive, ignored", szIndexName );
 		else
 			tIdx.m_iAgentQueryTimeoutMs = hIndex.GetMsTimeMs ( "agent_query_timeout");
 	}
@@ -17350,7 +17421,7 @@ void ConfigureDistributedIndex ( std::function<bool(const CSphString&)>&& fnChec
 
 	// configure ha_strategy
 	if ( bSetHA && !bHaveHA )
-		sphWarning ( "index '%s': ha_strategy defined, but no ha agents in the index", szIndexName );
+		sphWarning ( "table '%s': ha_strategy defined, but no ha agents in the table", szIndexName );
 }
 
 //////////////////////////////////////////////////
@@ -17364,14 +17435,14 @@ static ResultAndIndex_t AddDistributedIndex ( const char * szIndexName, const CS
 
 	if ( pIdx->IsEmpty () )
 	{
-		sError.SetSprintf ( "index '%s': no valid local/remote indexes in distributed index", szIndexName );
+		sError.SetSprintf ( "table '%s': no valid local/remote tables in distributed table", szIndexName );
 		return { ADD_ERROR, nullptr };
 	}
 
 	// finally, check and add distributed index to global table
 	if ( !g_pDistIndexes->Add ( pIdx, szIndexName ) )
 	{
-		sError.SetSprintf ( "index '%s': unable to add name (duplicate?)", szIndexName );
+		sError.SetSprintf ( "table '%s': unable to add name (duplicate?)", szIndexName );
 		return { ADD_ERROR, nullptr };
 	}
 
@@ -17387,17 +17458,17 @@ static bool ConfigureRTPercolate ( CSphSchema & tSchema, CSphIndexSettings & tSe
 		CSphString sWarning;
 		if ( !tSettings.Setup ( hIndex, szIndexName, sWarning, sError ) )
 		{
-			sphWarning ( "index '%s': %s - NOT SERVING", szIndexName, sError.cstr() );
+			sphWarning ( "table '%s': %s - NOT SERVING", szIndexName, sError.cstr() );
 			return false;
 		}
 
 		if ( !sWarning.IsEmpty() )
-			sphWarning ( "index '%s': %s", szIndexName, sWarning.cstr() );
+			sphWarning ( "table '%s': %s", szIndexName, sWarning.cstr() );
 	}
 
 	if ( !sphRTSchemaConfigure ( hIndex, tSchema, tSettings, sError, bPercolate, bPercolate ) )
 	{
-		sphWarning ( "index '%s': %s - NOT SERVING", szIndexName, sError.cstr () );
+		sphWarning ( "table '%s': %s - NOT SERVING", szIndexName, sError.cstr () );
 		return false;
 	}
 
@@ -17409,19 +17480,19 @@ static bool ConfigureRTPercolate ( CSphSchema & tSchema, CSphIndexSettings & tSe
 		if ( pWarnings )
 			pWarnings->Add(sError);
 		else
-			sphWarning ( "index '%s': %s", szIndexName, sError.cstr () );
+			sphWarning ( "table '%s': %s", szIndexName, sError.cstr () );
 	}
 
 	// path
 	if ( !hIndex ( "path" ) )
 	{
-		sphWarning ( "index '%s': path must be specified - NOT SERVING", szIndexName );
+		sphWarning ( "table '%s': path must be specified - NOT SERVING", szIndexName );
 		return false;
 	}
 
 	if ( !CheckStoredFields ( tSchema, tSettings, sError ) )
 	{
-		sphWarning ( "index '%s': %s - NOT SERVING", szIndexName, sError.cstr() );
+		sphWarning ( "table '%s': %s - NOT SERVING", szIndexName, sError.cstr() );
 		return false;
 	}
 
@@ -17433,7 +17504,7 @@ static bool ConfigureRTPercolate ( CSphSchema & tSchema, CSphIndexSettings & tSe
 		// SENTENCE indexing w\o stripper is valid combination
 		if ( !sIndexZones.IsEmpty() )
 		{
-			sphWarning ( "index '%s': has index_sp=%d, index_zones='%s' but disabled html_strip - NOT SERVING", szIndexName, iIndexSP, sIndexZones.cstr() );
+			sphWarning ( "table '%s': has index_sp=%d, index_zones='%s' but disabled html_strip - NOT SERVING", szIndexName, iIndexSP, sIndexZones.cstr() );
 			return false;
 		}
 		else
@@ -17443,7 +17514,7 @@ static bool ConfigureRTPercolate ( CSphSchema & tSchema, CSphIndexSettings & tSe
 			if ( pWarnings )
 				pWarnings->Add(sWarning);
 			else
-				sphWarning ( "index '%s': %s", szIndexName, sWarning.cstr() );
+				sphWarning ( "table '%s': %s", szIndexName, sWarning.cstr() );
 		}
 	}
 
@@ -17451,7 +17522,7 @@ static bool ConfigureRTPercolate ( CSphSchema & tSchema, CSphIndexSettings & tSe
 	if ( tSettings.m_bIndexFieldLens )
 		if ( !AddFieldLens ( tSchema, false, sError ) )
 		{
-			sphWarning ( "index '%s': failed to create field lengths attributes: %s", szIndexName, sError.cstr () );
+			sphWarning ( "table '%s': failed to create field lengths attributes: %s", szIndexName, sError.cstr () );
 			return false;
 		}
 
@@ -17461,7 +17532,7 @@ static bool ConfigureRTPercolate ( CSphSchema & tSchema, CSphIndexSettings & tSe
 		if ( pWarnings )
 			pWarnings->Add(sWarning);
 		else
-			sphWarning ( "index '%s': %s", szIndexName, sWarning.cstr() );
+			sphWarning ( "table '%s': %s", szIndexName, sWarning.cstr() );
 	}
 
 	if ( bWordDict && tSettings.m_iMinInfixLen==1 )
@@ -17470,7 +17541,7 @@ static bool ConfigureRTPercolate ( CSphSchema & tSchema, CSphIndexSettings & tSe
 		if ( pWarnings )
 			pWarnings->Add(sWarning);
 		else
-			sphWarning ( "index '%s': %s", szIndexName, sWarning.cstr() );
+			sphWarning ( "table '%s': %s", szIndexName, sWarning.cstr() );
 
 		tSettings.m_iMinInfixLen = 2;
 	}
@@ -17493,7 +17564,7 @@ static ResultAndIndex_t LoadRTPercolate ( bool bRT, const char* szIndexName, con
 			bWordDict = false;
 		else if ( sIndexType!="keywords" )
 		{
-			sError.SetSprintf ( "index '%s': unknown dict=%s; only 'keywords' or 'crc' values allowed", szIndexName, sIndexType.cstr() );
+			sError.SetSprintf ( "table '%s': unknown dict=%s; only 'keywords' or 'crc' values allowed", szIndexName, sIndexType.cstr() );
 			return { ADD_ERROR, nullptr };
 		}
 	}
@@ -17567,12 +17638,12 @@ static ResultAndIndex_t LoadTemplateIndex ( const char * szIndexName, const CSph
 	CSphString sWarning, sError;
 	if ( !tSettings.Setup ( hIndex, szIndexName, sWarning, sError ) )
 	{
-		sphWarning ( "failed to configure index %s: %s", szIndexName, sError.cstr () );
+		sphWarning ( "failed to configure table %s: %s", szIndexName, sError.cstr () );
 		return { ADD_ERROR, nullptr };
 	}
 
 	if ( !sWarning.IsEmpty() )
-		sphWarning ( "index '%s': %s - NOT SERVING", szIndexName, sWarning.cstr () );
+		sphWarning ( "table '%s': %s - NOT SERVING", szIndexName, sWarning.cstr () );
 
 	auto pIdx = sphCreateIndexTemplate ( szIndexName );
 	pIdx->Setup ( tSettings );
@@ -17590,12 +17661,12 @@ static ResultAndIndex_t LoadTemplateIndex ( const char * szIndexName, const CSph
 	StrVec_t dWarnings;
 	if ( !sphFixupIndexSettings ( pIdx.get(), hIndex, g_bStripPath, pFilenameBuilder.get(), dWarnings, sError ) )
 	{
-		sphWarning ( "index '%s': %s - NOT SERVING", szIndexName, sError.cstr () );
+		sphWarning ( "table '%s': %s - NOT SERVING", szIndexName, sError.cstr () );
 		return { ADD_ERROR, nullptr };
 	}
 
 	for ( const auto & i : dWarnings )
-		sphWarning ( "index '%s': %s", szIndexName, i.cstr() );
+		sphWarning ( "table '%s': %s", szIndexName, i.cstr() );
 
 	// templates we either add, either replace depending on requested action
 	// at this point they are production-ready
@@ -17613,7 +17684,7 @@ ResultAndIndex_t AddIndex ( const char * szIndexName, const CSphConfigSection & 
 	// check name
 	if ( bCheckDupe && IndexIsServed ( szIndexName ) )
 	{
-		sphWarning ( "index '%s': duplicate name - NOT SERVING", szIndexName );
+		sphWarning ( "table '%s': duplicate name - NOT SERVING", szIndexName );
 		return { ADD_ERROR, nullptr };
 	}
 
@@ -17634,7 +17705,7 @@ ResultAndIndex_t AddIndex ( const char * szIndexName, const CSphConfigSection & 
 			break;
 	}
 
-	sphWarning ( "index '%s': unknown type '%s' - NOT SERVING", szIndexName, hIndex["type"].cstr() );
+	sphWarning ( "table '%s': unknown type '%s' - NOT SERVING", szIndexName, hIndex["type"].cstr() );
 	return { ADD_ERROR, nullptr };
 }
 
@@ -17668,7 +17739,7 @@ static void ReloadIndexesFromConfig ( const CSphConfig& hConf, HashOfServed_c& h
 	assert ( !IsConfigless() );
 	if ( !hConf.Exists ("index") )
 	{
-		sphInfo ( "No indexes found in config came to rotation. Abort reloading");
+		sphInfo ( "No tables found in config came to rotation. Abort reloading");
 		return;
 	}
 
@@ -17824,7 +17895,7 @@ static void DoGreedyRotation ( VecOfServed_c&& dDeferredIndexes ) REQUIRES ( Mai
 			if ( PreallocNewIndex ( *pDeferredIndex, &g_hCfg["index"][sDeferredIndex], sDeferredIndex.cstr(), dWarnings, sError ) )
 				g_pLocalIndexes->AddOrReplace ( pDeferredIndex, sDeferredIndex );
 			else
-				sphWarning ( "index '%s': %s - NOT SERVING", sDeferredIndex.cstr(), sError.cstr() );
+				sphWarning ( "table '%s': %s - NOT SERVING", sDeferredIndex.cstr(), sError.cstr() );
 		}
 		else if ( pDeferredIndex->m_eType==IndexType_e::PLAIN )
 		{
@@ -17834,11 +17905,11 @@ static void DoGreedyRotation ( VecOfServed_c&& dDeferredIndexes ) REQUIRES ( Mai
 			WIdx_c WIdx { pDeferredIndex };
 			bool bOk = RotateIndexGreedy ( *pDeferredIndex, sDeferredIndex.cstr(), sError );
 			if ( !bOk )
-				sphWarning ( "index '%s': %s - NOT SERVING", sDeferredIndex.cstr(), sError.cstr() );
+				sphWarning ( "table '%s': %s - NOT SERVING", sDeferredIndex.cstr(), sError.cstr() );
 
 			if ( !bSame && bOk && !sphFixupIndexSettings ( WIdx, g_hCfg["index"][sDeferredIndex], g_bStripPath, nullptr, dWarnings, sError ) )
 			{
-				sphWarning ( "index '%s': %s - NOT SERVING", sDeferredIndex.cstr(), sError.cstr() );
+				sphWarning ( "table '%s': %s - NOT SERVING", sDeferredIndex.cstr(), sError.cstr() );
 				bOk = false;
 			}
 
@@ -17851,7 +17922,7 @@ static void DoGreedyRotation ( VecOfServed_c&& dDeferredIndexes ) REQUIRES ( Mai
 		}
 
 		for ( const auto & i : dWarnings )
-			sphWarning ( "index '%s': %s", sDeferredIndex.cstr(), i.cstr() );
+			sphWarning ( "table '%s': %s", sDeferredIndex.cstr(), i.cstr() );
 
 		g_pDistIndexes->Delete ( sDeferredIndex ); // postponed delete of same-named distributed (if any)
 	}
@@ -18199,7 +18270,7 @@ void ShowHelp ()
 		"--ntservice\t\tinternal option used to invoke a Windows service\n"
 #endif
 		"--strip-path\t\tstrip paths from stopwords, wordforms, exceptions\n"
-		"\t\t\tand other file names stored in the index header\n"
+		"\t\t\tand other file names stored in the table header\n"
 		"--replay-flags=<OPTIONS>\n"
 		"\t\t\textra binary log replay options (current options \n"
 		"\t\t\tare 'accept-desc-timestamp' and 'ignore-open-errors')\n"
@@ -18211,8 +18282,8 @@ void ShowHelp ()
 		"-p, --port <port>\tlisten on given port (overrides config setting)\n"
 		"-l, --listen <spec>\tlisten on given address, port or path (overrides\n"
 		"\t\t\tconfig settings)\n"
-		"-i, --index <index>\tonly serve given index(es)\n"
-		"-t, --table <table>\tonly serve given index(es)\n"
+		"-i, --index <index>\tonly serve given table(s)\n"
+		"-t, --table <table>\tonly serve given table(s)\n"
 #if !_WIN32
 		"--nodetach\t\tdo not detach into background\n"
 #endif
@@ -18648,6 +18719,29 @@ static void ConfigureDaemonLog ( const CSphString & sMode )
 		sphWarning ( "query_log_statements invalid values: %s", sWrongModes.cstr() );
 }
 
+static void SetOptionSI ( const CSphConfigSection & hSearchd, bool bTestMode )
+{
+	SIDefault_e eState = GetSecondaryIndexDefault();
+	if ( bTestMode )
+		eState = SIDefault_e::DISABLED;
+
+	CSphVariant * pOption = hSearchd ( "secondary_indexes" );
+	if ( pOption )
+	{
+		if ( pOption->strval()=="force" )
+			eState = SIDefault_e::FORCE;
+		else if ( pOption->intval()==0 )
+			eState = SIDefault_e::DISABLED;
+		else
+			eState = SIDefault_e::ENABLED;
+	}
+
+	if ( eState!=SIDefault_e::DISABLED && !IsSecondaryLibLoaded() )
+		sphWarning ( "secondary_indexes set but failed to initialize secondary library: %s", g_sSecondaryError.cstr() );
+
+	SetSecondaryIndexDefault ( eState );
+}
+
 void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile, bool bTestMode ) REQUIRES ( MainThread )
 {
 	if ( !hConf.Exists ( "searchd" ) || !hConf["searchd"].Exists ( "searchd" ) )
@@ -18860,15 +18954,13 @@ void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile, bool bTestMo
 	MutableIndexSettings_c::GetDefaults().m_iOptimizeCutoff = hSearchd.GetInt ( "optimize_cutoff", AutoOptimizeCutoff() );
 
 	g_bSplit = hSearchd.GetInt ( "pseudo_sharding", 1 )!=0;
+	SetOptionSI ( hSearchd, bTestMode );
 
-	bool bGotSecondary = ( hSearchd.GetInt ( "secondary_indexes", GetSecondaryIndexDefault() )!=0 );
-	if ( bGotSecondary && !IsSecondaryLibLoaded() )
-		sphFatal ( "secondary_indexes set but failed to initialize secondary library: %s", g_sSecondaryError.cstr() );
-
+	g_bHasBuddyPath = hSearchd.Exists ( "buddy_path" );
 	g_sBuddyPath = hSearchd.GetStr ( "buddy_path" );
 	g_bTelemetry = ( hSearchd.GetInt ( "telemetry", g_bTelemetry ? 1 : 0 )!=0 );
+	g_bAutoSchema = ( hSearchd.GetInt ( "auto_schema", g_bAutoSchema ? 1 : 0 )!=0 );
 
-	SetSecondaryIndexDefault ( bGotSecondary );
 	SetAccurateAggregationDefault ( hSearchd.GetInt ( "accurate_aggregation", GetAccurateAggregationDefault() )!=0 );
 	g_sConfigPath = sphGetCwd();
 }
@@ -18987,7 +19079,7 @@ ESphAddIndex ConfigureAndPreloadIndex ( const CSphConfigSection & hIndex, const 
 	case ADD_NEEDLOAD:
 	{
 		assert ( pJustLoadedLocal );
-		fprintf ( stdout, "precaching index '%s'\n", szIndexName );
+		fprintf ( stdout, "precaching table '%s'\n", szIndexName );
 		fflush ( stdout );
 
 		IndexFiles_c dJustAddedFiles ( pJustLoadedLocal->m_sIndexPath );
@@ -19049,10 +19141,10 @@ static void ConfigureAndPreloadOnStartup ( const CSphConfig & hConf, const StrVe
 			CSphString sError;
 			ESphAddIndex eAdd = ConfigureAndPreloadIndex ( hIndex, szIndexName, dWarnings, sError );
 			for ( const auto & i : dWarnings )
-				sphWarning ( "index '%s': %s", szIndexName, i.cstr() );
+				sphWarning ( "table '%s': %s", szIndexName, i.cstr() );
 
 			if ( eAdd==ADD_ERROR )
-				sphWarning ( "index '%s': %s - NOT SERVING", szIndexName, sError.cstr() );
+				sphWarning ( "table '%s': %s - NOT SERVING", szIndexName, sError.cstr() );
 
 			iValidIndexes += ( eAdd!=ADD_ERROR ? 1 : 0 );
 			iCounter +=  ( eAdd== ADD_NEEDLOAD ? 1 : 0 );
@@ -19073,7 +19165,7 @@ static void ConfigureAndPreloadOnStartup ( const CSphConfig & hConf, const StrVe
 			CSphString sWarning, sError;
 			RIdx_c pIdx { pServed };
 			if ( !ApplyIndexKillList ( pIdx, sWarning, sError, true ) )
-				sphWarning ( "index '%s': error applying killlist: %s", pIdx->GetName(), sError.cstr() );
+				sphWarning ( "table '%s': error applying killlist: %s", pIdx->GetName(), sError.cstr() );
 
 			if ( sWarning.Length() )
 				sphWarning ( "%s", sWarning.cstr() );
@@ -19089,9 +19181,9 @@ static void ConfigureAndPreloadOnStartup ( const CSphConfig & hConf, const StrVe
 
 	tmLoad += sphMicroTimer();
 	if ( !iValidIndexes )
-		sphLogDebug ( "no valid indexes to serve" );
+		sphLogDebug ( "no valid tables to serve" );
 	else
-		fprintf ( stdout, "precached %d indexes in %0.3f sec\n", iCounter, float(tmLoad)/1000000 );
+		fprintf ( stdout, "precached %d tables in %0.3f sec\n", iCounter, float(tmLoad)/1000000 );
 }
 
 
@@ -19423,7 +19515,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	CSphString sError;
 	// initialize it before other code to fetch version string for banner
 	bool bColumnarError = !InitColumnar ( sError );
-	g_bSecondaryError = !InitSecondary ( g_sSecondaryError );
+	bool bSecondaryError = !InitSecondary ( g_sSecondaryError );
 	sphCollationInit ();
 
 	InitBanner();
@@ -19433,7 +19525,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 
 	if ( bColumnarError )
 		sphWarning ( "Error initializing columnar storage: %s", sError.cstr() );
-	if ( g_bSecondaryError )
+	if ( bSecondaryError )
 		sphWarning ( "Error initializing secondary index: %s", g_sSecondaryError.cstr() );
 
 	if ( !sError.IsEmpty() )
@@ -19942,7 +20034,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 			RWIdx_c pIdx { pServed };
 			if ( !pIdx->Lock() )
 			{
-				sphWarning ( "index '%s': lock: %s; INDEX UNUSABLE", tIt.first.cstr(), pIdx->GetLastError().cstr() );
+				sphWarning ( "table '%s': lock: %s; TABLE UNUSABLE", tIt.first.cstr(), pIdx->GetLastError().cstr() );
 				dFailed.Add ( tIt.first );
 			}
 		}
@@ -20067,7 +20159,9 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	searchd::AddShutdownCb ( ReplicateClustersDelete );
 	ReplicationStart ( dListenerDescs, bNewCluster, bNewClusterForce );
 	searchd::AddShutdownCb ( BuddyStop );
-	BuddyStart ( g_sBuddyPath, dListenerDescs, g_bTelemetry );
+	// --test should not guess buddy path
+	// otherwise daemon generates warning message that counts as bad daemon restart by ubertest
+	BuddyStart ( g_sBuddyPath, ( g_bHasBuddyPath || bTestMode ), dListenerDescs, g_bTelemetry );
 
 	g_bJsonConfigLoadedOk = true;
 
