@@ -1977,10 +1977,12 @@ int AgentConn_t::DoTFO ( struct sockaddr * pSs, int iLen )
 
 	if ( iSent )
 	{
-		sphLogDebugv ( "Mac OS TFO: advancing to %zu with %d, error %d", iSent, iRes, sphSockGetErrno () );
+		sphLogDebugv ( "Mac OS TFO: advancing to %zu with %d, error %d (%s)", iSent, iRes, sphSockGetErrno(), strerror (sphSockGetErrno()) );
 		m_dIOVec.StepForward ( iSent );
 		if ( iRes<0 && m_dIOVec.HasUnsent () )
 			iRes = 0;
+		else if ( !m_dIOVec.HasUnsent() )
+			m_iPoolerTimeoutUS += m_iMyQueryTimeoutMs * 1000;
 	}
 #else
 	int iRes = 0;
@@ -2610,7 +2612,7 @@ class NetEvent_c
 	bool				m_bSignaler = true;
 
 public:
-	NetEvent_c ( LPOVERLAPPED_ENTRY pEntry )
+	explicit NetEvent_c ( LPOVERLAPPED_ENTRY pEntry )
 	{
 		if ( !pEntry )
 			return;
@@ -2637,43 +2639,43 @@ public:
 		}
 	}
 
-	inline TaskNet_t * GetTask () const
+	inline TaskNet_t * GetTask () const noexcept
 	{
 		return m_pTask;
 	}
 
-	inline bool IsSignaler () const
+	inline bool IsSignaler () const noexcept
 	{
 		return m_bSignaler;
 	}
 
-	inline int GetEvents() const
+	inline int GetEvents() const noexcept
 	{
 		// return 0 for internal signal, or 1 for write, 1+sizeof(OVERLAPPED) for read.
 		return (!!m_pTask) + 2 * (!!m_bWrite);
 	}
 
-	inline bool IsError() const
+	inline bool IsError() const noexcept
 	{
 		return false;
 	}
 
-	inline bool IsEof() const
+	inline bool IsEof() const noexcept
 	{
 		return !m_bWrite && !m_uNumberOfBytesTransferred;
 	}
 
-	inline bool IsRead() const
+	inline bool IsRead() const noexcept
 	{
 		return !m_bWrite;
 	}
 
-	inline bool IsWrite() const
+	inline bool IsWrite() const noexcept
 	{
 		return m_bWrite;
 	}
 
-	inline DWORD BytesTransferred () const
+	inline DWORD BytesTransferred () const noexcept
 	{
 		return m_uNumberOfBytesTransferred;
 	}
@@ -2692,13 +2694,13 @@ public:
 		, m_pSignalerTask ( pSignaler )
 	{}
 
-	inline TaskNet_t * GetTask ()
+	inline TaskNet_t * GetTask () const noexcept
 	{
 		assert ( m_pEntry );
 		return ( TaskNet_t * ) m_pEntry->data.ptr;
 	}
 
-	inline bool IsSignaler ()
+	inline bool IsSignaler () const noexcept
 	{
 		assert ( m_pEntry );
 		auto pTask = GetTask ();
@@ -2710,37 +2712,37 @@ public:
 		return pTask==m_pSignalerTask;
 	}
 
-	inline int GetEvents ()
+	inline int GetEvents () const noexcept
 	{
 		assert ( m_pEntry );
 		return m_pEntry->events;
 	}
 
-	inline bool IsError ()
+	inline bool IsError () const noexcept
 	{
 		assert ( m_pEntry );
 		return ( m_pEntry->events & EPOLLERR )!=0;
 	}
 
-	inline bool IsEof ()
+	inline bool IsEof () const noexcept
 	{
 		assert ( m_pEntry );
 		return ( m_pEntry->events & EPOLLHUP )!=0;
 	}
 
-	inline bool IsRead ()
+	inline bool IsRead () const noexcept
 	{
 		assert ( m_pEntry );
 		return ( m_pEntry->events & EPOLLIN )!=0;
 	}
 
-	inline bool IsWrite ()
+	inline bool IsWrite () const noexcept
 	{
 		assert ( m_pEntry );
 		return ( m_pEntry->events & EPOLLOUT )!=0;
 	}
 
-	inline DWORD BytesTransferred ()
+	inline DWORD BytesTransferred () const noexcept
 	{
 		assert ( m_pEntry );
 		return 0;
@@ -2752,68 +2754,59 @@ public:
 class NetEvent_c
 {
 	struct kevent * m_pEntry = nullptr;
-	const TaskNet_t * m_pSignalerTask = nullptr;
 
 public:
-	NetEvent_c ( struct kevent * pEntry, const TaskNet_t * pSignaler )
+	explicit NetEvent_c ( struct kevent * pEntry )
 		: m_pEntry ( pEntry )
-		, m_pSignalerTask ( pSignaler )
 	{}
 
-	inline TaskNet_t * GetTask ()
+	inline TaskNet_t * GetTask () const noexcept
 	{
 		assert ( m_pEntry );
 		return ( TaskNet_t * ) m_pEntry->udata;
 	}
 
-	inline bool IsSignaler ()
+	inline bool IsSignaler () const noexcept
 	{
 		assert ( m_pEntry );
-		auto pTask = GetTask();
-		if ( pTask==m_pSignalerTask )
-		{
-			auto pSignaler = ( PollableEvent_t* )m_pSignalerTask->m_pPayload;
-			pSignaler->DisposeEvent ();
-		}
-		return pTask==m_pSignalerTask;
+		return m_pEntry->filter == EVFILT_USER;
 	}
 
-	inline int GetEvents ()
+	inline int GetEvents () const noexcept
 	{
 		assert ( m_pEntry );
 		return m_pEntry->filter;
 	}
 
-	inline bool IsError ()
+	inline bool IsError () const noexcept
 	{
 		assert ( m_pEntry );
 		if ( ( m_pEntry->flags & EV_ERROR )==0 )
 			return false;
 
-		sphLogDebugL ( "L error for %u, errno=%u, %s", m_pEntry->ident, m_pEntry->data, sphSockError (
-			m_pEntry->data ) );
+		sphLogDebugL ( "L error for %u, errno=%u, %s", m_pEntry->ident, m_pEntry->data, strerror ( m_pEntry->data ) );
 		return true;
 	}
 
-	inline bool IsEof ()
+	inline bool IsEof () const noexcept
 	{
 		assert ( m_pEntry );
 		return ( m_pEntry->flags & EV_EOF )!=0;
 	}
 
-	inline bool IsRead ()
+	inline bool IsRead () const noexcept
 	{
 		assert ( m_pEntry );
 		return ( m_pEntry->filter==EVFILT_READ )!=0;
 	}
 
-	inline bool IsWrite ()
+	inline bool IsWrite () const noexcept
 	{
 		assert ( m_pEntry );
 		return ( m_pEntry->filter==EVFILT_WRITE )!=0;
 	}
 
-	inline DWORD BytesTransferred ()
+	inline DWORD BytesTransferred () const noexcept
 	{
 		assert ( m_pEntry );
 		return 0;
@@ -2854,7 +2847,7 @@ protected:
 	CSphVector<DWORD>	m_dIOThreads;
 	CSphVector<OVERLAPPED_ENTRY>	m_dReady;
 
-	inline void events_create ( int iSizeHint )
+	inline void poller_create ( int iSizeHint )
 	{
 		// fixme! m.b. more workers, or just one enough?
 		m_IOCP = CreateIoCompletionPort ( INVALID_HANDLE_VALUE, NULL, 0, 1 );
@@ -2964,14 +2957,23 @@ protected:
 
 #else
 	int m_iEFD = -1;
-	PollableEvent_t m_dSignaler;
-	TaskNet_t			m_dSignalerTask;
 
-	inline void events_create ( int iSizeHint )
+	inline void poller_create ( int iSizeHint )
 	{
 		epoll_or_kqueue_create_impl ( iSizeHint );
 		m_dReady.Reserve ( iSizeHint );
 
+		register_signaller();
+	}
+
+
+#if POLLING_EPOLL
+	PollableEvent_t m_dSignaler;
+	TaskNet_t m_dSignalerTask;
+	CSphVector<epoll_event> m_dReady;
+
+	inline void register_signaller()
+	{
 		// special event to wake up
 		m_dSignalerTask.m_ifd = m_dSignaler.m_iPollablefd;
 		// m_pPayload here used ONLY as store for pointer for comparing with &m_dSignaller,
@@ -2983,17 +2985,12 @@ protected:
 		events_change_io ( &m_dSignalerTask );
 		sphLogDebugv ( "Internal signal action (for epoll/kqueue) added (%d), %p",
 			m_dSignaler.m_iPollablefd, &m_dSignalerTask );
-
 	}
 
-	inline void fire_event ()
+	inline void fire_event()
 	{
-		m_dSignaler.FireEvent ();
+		m_dSignaler.FireEvent();
 	}
-
-
-#if POLLING_EPOLL
-	CSphVector<epoll_event> m_dReady;
 
 private:
 	inline void epoll_or_kqueue_create_impl ( int iSizeHint )
@@ -3006,7 +3003,7 @@ private:
 	}
 
 	// apply changes in case of epoll
-	int events_apply_task_changes ( TaskNet_t * pTask )
+	int events_apply_task_changes ( TaskNet_t * pTask ) const
 	{
 		auto iEvents = 0; // how many events we add/delete
 
@@ -3080,8 +3077,21 @@ protected:
 
 #elif POLLING_KQUEUE
 	CSphVector<struct kevent> m_dReady;
-	CSphVector<struct kevent> m_dScheduled; // prepared group of events
 	struct kevent * m_pEntry = nullptr;
+
+	inline void register_signaller() const
+	{
+		struct kevent tSignaller;
+		EV_SET ( &tSignaller, 0, EVFILT_USER, EV_ADD | EV_ENABLE | EV_CLEAR, 0, 0, 0 );
+		assert ( 0 == kevent ( m_iEFD, &tSignaller, 1, 0, 0, 0 ) );
+	}
+
+	inline void fire_event() const
+	{
+		struct kevent tSignaller;
+		EV_SET ( &tSignaller, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0 );
+		assert ( 0 == kevent ( m_iEFD, &tSignaller, 1, 0, 0, 0 ) );
+	}
 
 private:
 	inline void epoll_or_kqueue_create_impl ( int iSizeHint )
@@ -3091,50 +3101,48 @@ private:
 			sphDie ( "failed to create kqueue main FD, errno=%d, %s", errno, strerrorm ( errno ) );
 
 		sphLogDebugv ( "kqueue %d created", m_iEFD );
-		m_dScheduled.Reserve ( iSizeHint * 2 );
 		m_dReady.Reserve ( iSizeHint * 2 + m_iCReserve );
 	}
 
-	int events_apply_task_changes ( TaskNet_t * pTask )
+	int events_apply_task_changes ( TaskNet_t * pTask ) const
 	{
-		int iEvents = 0;
 		bool bWrite = pTask->m_uIOChanged==TaskNet_t::RW;
 		bool bRead = pTask->m_uIOChanged!=TaskNet_t::NO;
 		bool bWasWrite = pTask->m_uIOActive==TaskNet_t::RW;;
 		bool bWasRead = ( pTask->m_uIOActive!=TaskNet_t::NO);
-		bool bApply = pTask->m_ifd!=-1;
+
+		struct kevent tEv[2];
+		auto pEv = &tEv[0];
 
 		// boring combination matrix below
 		if ( bRead && !bWasRead )
-		{
-			if ( bApply )
-				EV_SET ( &m_dScheduled.Add (), pTask->m_ifd, EVFILT_READ, EV_ADD, 0, 0, pTask );
-			++iEvents;
-			sphLogDebugL ( "L EVFILT_READ, EV_ADD, %d (%d enqueued), %d in call", pTask->m_ifd, m_dScheduled.GetLength (), iEvents );
-		}
+			EV_SET ( pEv++, pTask->m_ifd, EVFILT_READ, EV_ADD, 0, 0, pTask );
 
 		if ( bWrite && !bWasWrite )
-		{
-			if ( bApply )
-				EV_SET ( &m_dScheduled.Add (), pTask->m_ifd, EVFILT_WRITE, EV_ADD, 0, 0, pTask );
-			++iEvents;
-			sphLogDebugL ( "L EVFILT_WRITE, EV_ADD, %d (%d enqueued), %d in call", pTask->m_ifd, m_dScheduled.GetLength (), iEvents );
-		}
+			EV_SET ( pEv++, pTask->m_ifd, EVFILT_WRITE, EV_ADD, 0, 0, pTask );
 
 		if ( !bRead && bWasRead )
-		{
-			if ( bApply )
-				EV_SET ( &m_dScheduled.Add (), pTask->m_ifd, EVFILT_READ, EV_DELETE, 0, 0, pTask );
-			--iEvents;
-			sphLogDebugL ( "L EVFILT_READ, EV_DELETE, %d (%d enqueued), %d in call", pTask->m_ifd, m_dScheduled.GetLength (), iEvents );
-		}
+			EV_SET ( pEv++, pTask->m_ifd, EVFILT_READ, EV_DELETE, 0, 0, pTask );
 
 		if ( !bWrite && bWasWrite )
+			EV_SET ( pEv++, pTask->m_ifd, EVFILT_WRITE, EV_DELETE, 0, 0, pTask );
+
+		const int nEvs = pEv - tEv;
+		assert ( nEvs <= 2 );
+		int iEvents = 0;
+		for ( int i = 0; i < nEvs; ++i )
 		{
-			if ( bApply )
-				EV_SET ( &m_dScheduled.Add (), pTask->m_ifd, EVFILT_WRITE, EV_DELETE, 0, 0, pTask );
-			--iEvents;
-			sphLogDebugL ( "L EVFILT_WRITE, EV_DELETE, %d (%d enqueued), %d in call", pTask->m_ifd, m_dScheduled.GetLength (), iEvents );
+			iEvents += ( tEv[i].flags == EV_ADD ) ? 1 : -1;
+			sphLogDebugL ( "L kqueue setup, ev=%d, fl=%d, sock=%d (%d enqueued), %d in call", tEv[i].filter, tEv[i].flags, pTask->m_ifd, nEvs, iEvents );
+		}
+
+		bool bApply = pTask->m_ifd != -1;
+		if ( pTask->m_ifd == -1 )
+			sphLogDebugL ( "L kqueue not called since sock is closed" );
+		else {
+			auto iRes = kevent ( m_iEFD, tEv, nEvs, nullptr, 0, nullptr );
+			if ( iRes == -1 )
+				sphLogDebugL ( "L failed to perform kevent for sock %d(%p), errno=%d, %s", pTask->m_ifd, pTask, errno, strerrorm ( errno ) );
 		}
 		return iEvents;
 	}
@@ -3148,7 +3156,7 @@ protected:
 
 	inline int events_wait ( int64_t iTimeoutUS )
 	{
-		m_dReady.Resize ( m_iEvents + m_dScheduled.GetLength () + m_iCReserve );
+		m_dReady.Resize ( m_iEvents + m_iCReserve );
 		timespec ts;
 		timespec * pts = nullptr;
 		if ( iTimeoutUS>=0 )
@@ -3158,19 +3166,16 @@ protected:
 			pts = &ts;
 		}
 		// need positive timeout for communicate threads back and shutdown
-		auto iRes = kevent ( m_iEFD, m_dScheduled.begin (), m_dScheduled.GetLength (), m_dReady.begin (), m_dReady.GetLength (), pts );
-		m_dScheduled.Reset();
-		return iRes;
-
+		return kevent ( m_iEFD, nullptr, 0, m_dReady.begin (), m_dReady.GetLength (), pts );
 	};
 
 	// returns task and also selects current event for all the functions below
 	NetEvent_c GetEvent ( int iReady )
 	{
 		if ( iReady>=0 )
-			return NetEvent_c ( &m_dReady[iReady], &m_dSignalerTask );
+			return NetEvent_c ( &m_dReady[iReady] );
 		assert ( false );
-		return NetEvent_c ( nullptr, &m_dSignalerTask );
+		return NetEvent_c ( nullptr );
 	}
 
 #endif
@@ -3217,7 +3222,7 @@ private:
 	{
 		assert ( pTask );
 		sphLogDebugL ( "L DeleteTask for %p, (conn %p, io %d), release=%d", pTask, pTask->m_pPayload, pTask->m_uIOActive, bReleasePayload );
-		pTask->m_uIOChanged = 0;
+		pTask->m_uIOChanged = TaskNet_t::NO;
 		events_change_io ( pTask );
 		auto pConnection = pTask->m_pPayload;
 		pTask->m_pPayload = nullptr;
@@ -3319,7 +3324,7 @@ private:
 
 	/// abandon and release all tiemouted events.
 	/// \return next active timeout (in uS), or -1 for infinite.
-	bool HasTimeoutActions()
+	bool HasTimeoutActions() REQUIRES ( LazyThread )
 	{
 		bool bHasTimeout = false;
 		while ( !m_dTimeouts.IsEmpty () )
@@ -3518,7 +3523,7 @@ private:
 public:
 	explicit LazyNetEvents_c ( int iSizeHint )
 	{
-		events_create ( iSizeHint );
+		poller_create ( iSizeHint );
 		Threads::CreateQ ( &m_dWorkingThread, [this] {
 			ScopedRole_c thLazy ( LazyThread );
 			EventLoop ();
