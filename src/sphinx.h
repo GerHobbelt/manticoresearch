@@ -537,7 +537,6 @@ struct CSphQuery
 	bool			m_bNotOnlyAllowed = false;	///< whether allow single full-text not operator
 	CSphString		m_sStore;					///< don't delete result, just store in given uservar by name
 
-	ISphTableFunc *	m_pTableFunc = nullptr;		///< post-query NOT OWNED, WILL NOT BE FREED in dtor.
 	CSphFilterSettings	m_tHaving;				///< post aggregate filtering (got applied only on master)
 
 	int				m_iSQLSelectStart = -1;	///< SQL parser helper
@@ -905,6 +904,8 @@ struct PostponedUpdate_t
 	RowsToUpdateData_t		m_dRowsToUpdate;
 };
 
+
+using KillWatcherFn = std::function<bool()>;
 // an index or a part of an index that has its own row ids
 class IndexSegment_c
 {
@@ -917,9 +918,10 @@ public:
 	CSphVector<PostponedUpdate_t>	m_dPostponedUpdates;
 
 public:
-	virtual int		Kill ( DocID_t tDocID ) { return 0; }
-	virtual int		KillMulti ( const VecTraits_T<DocID_t> & dKlist ) { return 0; };
-	virtual			~IndexSegment_c() {};
+	virtual int		Kill ( DocID_t  /*tDocID*/ ) { return 0; }
+	virtual int		KillMulti ( const VecTraits_T<DocID_t> &  /*dKlist*/ ) { return 0; };
+	virtual int		CheckThenKillMulti ( const VecTraits_T<DocID_t>& dKlist, KillWatcherFn&& /*fnWatcher*/ ) { return KillMulti ( dKlist ); };
+	virtual			~IndexSegment_c() = default;
 
 	inline void SetKillHook ( IndexSegment_c * pKillHook ) const
 	{
@@ -964,7 +966,7 @@ struct UpdateContext_t
 	AttrUpdateInc_t &						m_tUpd;
 	const ISphSchema &						m_tSchema;
 	const HistogramContainer_c *			m_pHistograms {nullptr};
-	CSphRowitem *							m_pAttrPool {nullptr};
+	const CSphRowitem *						m_pAttrPool {nullptr};
 	BYTE *									m_pBlobPool {nullptr};
 	IndexSegment_c *						m_pSegment {nullptr};
 

@@ -1056,11 +1056,47 @@ CSphVector<int> GetChunkIds ( const VecTraits_T<DiskChunkRefPtr_t> & dChunks )
 	return dIds;
 }
 
-enum class WriteState_e : int
+class SaveState_c
 {
-	ENABLED,	// normal
-	DISCARD,	// disabled, current result will not be necessary (can escape to don't waste resources)
-	DISABLED,	// disabled, current stage must be completed first
+public:
+
+	enum States_e : BYTE {
+		ENABLED,	// normal
+		DISCARD,	// disabled, current result will not be necessary (can escape to don't waste resources)
+		DISABLED,	// disabled, current stage must be completed first
+	};
+
+	explicit SaveState_c ( States_e eValue )
+		: m_tValue { eValue, false } {}
+
+	void SetState ( States_e eState )
+	{
+		m_tValue.ModifyValueAndNotifyAll ( [eState] ( Value_t& t ) { t.m_eValue = eState; } );
+	}
+	void SetShutdownFlag ()
+	{
+		m_tValue.ModifyValueAndNotifyAll ( [] ( Value_t& t ) { t.m_bShutdown = true; } );
+	}
+
+	bool Is (States_e eValue) const { return m_tValue.GetValue().m_eValue==eValue; }
+
+	// sleep and return true when expected state achieved.
+	// sleep and return false if shutdown expected
+	bool WaitStateOrShutdown ( States_e uState ) const
+	{
+		return uState == m_tValue.Wait ( [uState] ( const Value_t& tVal ) { return tVal.m_bShutdown || ( tVal.m_eValue == uState ); } ).m_eValue;
+	}
+private:
+	struct Value_t
+	{
+		States_e m_eValue;
+		bool m_bShutdown;
+		Value_t ( States_e eValue, bool bShutdown )
+			: m_eValue { eValue }
+			, m_bShutdown { bShutdown }
+		{}
+	};
+	Coro::Waitable_T<Value_t> m_tValue;
 };
 
 enum class MergeSeg_e : BYTE
@@ -1082,7 +1118,7 @@ public:
 	bool				DeleteDocument ( const VecTraits_T<DocID_t> & dDocs, CSphString & sError, RtAccum_t * pAccExt ) final;
 	bool				Commit ( int * pDeleted, RtAccum_t * pAccExt, CSphString* pError = nullptr ) final;
 	void				RollBack ( RtAccum_t * pAccExt ) final;
-	int					CommitReplayable ( RtSegment_t * pNewSeg, const CSphVector<DocID_t> & dAccKlist ); // returns total killed documents
+	int					CommitReplayable ( RtSegment_t * pNewSeg, const VecTraits_T<DocID_t> & dAccKlist ); // returns total killed documents
 	void				ForceRamFlush ( const char * szReason ) final;
 	bool				IsFlushNeed() const final;
 	bool				ForceDiskChunk() final;
@@ -1200,7 +1236,7 @@ private:
 	std::atomic<int64_t>		m_iRamChunksAllocatedRAM { 0 };
 
 	std::atomic<bool>			m_bOptimizeStop { false };
-	Threads::Coro::Waitable_T<int>	m_tOptimizeRuns {0};
+	Coro::Waitable_T<int>		m_tOptimizeRuns {0};
 	friend class OptimizeGuard_c;
 
 	int64_t						m_iRtMemLimit;
@@ -1231,7 +1267,7 @@ private:
 	int							m_iMaxCodepointLength = 0;
 	TokenizerRefPtr_c			m_pTokenizerIndexing;
 	bool						m_bPreallocPassedOk = true;
-	std::atomic<WriteState_e>	m_eSaving { WriteState_e::ENABLED };
+	SaveState_c					m_tSaving { SaveState_c::ENABLED };
 	bool						m_bHasFiles = false;
 
 	// fixme! make this *Lens atomic together with disk/ram data, to avoid any kind of race among them
@@ -1289,7 +1325,7 @@ private:
 	bool						ReadNextWord ( SuggestResult_t & tRes, DictWord_t & tWord ) const final;
 
 	ConstRtSegmentRefPtf_t		AdoptSegment ( RtSegment_t * pNewSeg );
-	int							ApplyKillList ( const CSphVector<DocID_t> & dAccKlist ) REQUIRES ( m_tWorkers.SerialChunkAccess() );
+	int							ApplyKillList ( const VecTraits_T<DocID_t> & dAccKlist ) REQUIRES ( m_tWorkers.SerialChunkAccess() );
 
 	bool						AddRemoveColumnarAttr ( RtGuard_t & tGuard, bool bAdd, const CSphString & sAttrName, ESphAttr eAttrType, const CSphSchema & tOldSchema, const CSphSchema & tNewSchema, CSphString & sError );
 	void						AddRemoveRowwiseAttr ( RtGuard_t & tGuard, bool bAdd, const CSphString & sAttrName, ESphAttr eAttrType, const CSphSchema & tOldSchema, const CSphSchema & tNewSchema, CSphString & sError );
@@ -1321,7 +1357,7 @@ private:
 	void						SetMemLimit ( int64_t iMemLimit );
 	void						RecalculateRateLimit ( int64_t iSaved, int64_t iInserted, bool bEmergent );
 	void						AlterSave ( bool bSaveRam );
-	void 						BinlogCommit ( RtSegment_t * pSeg, const CSphVector<DocID_t> & dKlist );
+	void 						BinlogCommit ( RtSegment_t * pSeg, const VecTraits_T<DocID_t> & dKlist );
 	bool						StopOptimize();
 	void						UpdateUnlockedCount();
 	bool						CheckSegmentConsistency ( const RtSegment_t* pNewSeg, bool bSilent=true ) const;
@@ -1382,6 +1418,8 @@ RtIndex_c::~RtIndex_c ()
 		// From serial worker resuming on Wait() will happen after whole merger coroutine finished.
 		ScopedScheduler_c tSerialFiber { m_tWorkers.SerialChunkAccess() };
 		TRACE_SCHED ( "rt", "~RtIndex_c" );
+		m_tSaving.SetShutdownFlag ();
+		Threads::Coro::Reschedule();
 		StopMergeSegmentsWorker();
 		m_tNSavesNow.Wait ( [] ( int iVal ) { return iVal==0; } );
 	}
@@ -1390,10 +1428,10 @@ RtIndex_c::~RtIndex_c ()
 	bool bValid = m_pTokenizer && m_pDict && m_bPreallocPassedOk;
 
 	if ( bValid )
-	{
-		SaveRamChunk();
+		bValid &= SaveRamChunk();
+
+	if ( bValid )
 		SaveMeta();
-	}
 
 	if ( m_iLockFD>=0 )
 		::close ( m_iLockFD );
@@ -1411,15 +1449,14 @@ RtIndex_c::~RtIndex_c ()
 		sFile.SetSprintf ( "%s%s", m_sPath.cstr(), sphGetExt ( SPH_EXT_SETTINGS ) );
 		::unlink ( sFile.cstr() );
 	}
+	if ( !bValid )
+		return;
 
 	tmSave = sphMicroTimer() - tmSave;
-	if ( tmSave>=1000 && bValid )
-	{
-		sphInfo ( "rt: index %s: ramchunk saved in %d.%03d sec",
-			m_sIndexName.cstr(), (int)(tmSave/1000000), (int)((tmSave/1000)%1000) );
-	}
+	if ( tmSave>=1000 )
+		sphInfo ( "rt: index %s: ramchunk saved in %d.%03d sec", m_sIndexName.cstr(), (int)(tmSave/1000000), (int)((tmSave/1000)%1000) );
 
-	if ( !sphInterrupted() && bValid )
+	if ( !sphInterrupted() )
 		sphLogDebug ( "closed index %s, valid %d, deleted %d, time %d.%03d sec", m_sIndexName.cstr(), (int)bValid, (int)m_bIndexDeleted, (int)(tmSave/1000000), (int)((tmSave/1000)%1000) );
 }
 
@@ -1435,8 +1472,10 @@ int RtIndex_c::GetAlterGeneration() const
 
 void RtIndex_c::UpdateUnlockedCount()
 {
-	if ( !m_bDebugCheck )
-		m_tUnLockedSegments.UpdateValueAndNotifyAll ( (int)m_tRtChunks.RamSegs()->count_of ( [] ( auto& dSeg ) { return !dSeg->m_iLocked; } ) );
+	if ( m_bDebugCheck )
+		return;
+
+	m_tUnLockedSegments.UpdateValueAndNotifyAll ( (int)m_tRtChunks.RamSegs()->count_of ( [] ( auto& dSeg ) { return !dSeg->m_iLocked; } ) );
 }
 
 void RtIndex_c::ProcessDiskChunk ( int iChunk, VisitChunk_fn&& fnVisitor ) const
@@ -1479,7 +1518,7 @@ bool RtIndex_c::IsFlushNeed() const
 	if ( Binlog::IsActive() && m_iTID<=m_iSavedTID )
 		return false;
 
-	return m_eSaving.load(std::memory_order_relaxed)==WriteState_e::ENABLED;
+	return m_tSaving.Is ( SaveState_c::ENABLED );
 }
 
 static int64_t SegmentsGetUsedRam ( const ConstRtSegmentSlice_t& dSegments )
@@ -2744,7 +2783,7 @@ ConstRtSegmentRefPtf_t RtIndex_c::AdoptSegment ( RtSegment_t * pNewSeg )
 
 // CommitReplayable -> ApplyKillList
 // AttachDiskIndex -> ApplyKillList
-int RtIndex_c::ApplyKillList ( const CSphVector<DocID_t> & dAccKlist )
+int RtIndex_c::ApplyKillList ( const VecTraits_T<DocID_t> & dAccKlist )
 {
 	if ( dAccKlist.IsEmpty() )
 		return 0;
@@ -2754,8 +2793,27 @@ int RtIndex_c::ApplyKillList ( const CSphVector<DocID_t> & dAccKlist )
 
 	int iKilled = 0;
 	auto pChunks = m_tRtChunks.DiskChunks();
-	for ( auto& pChunk : *pChunks )
-		iKilled += pChunk->CastIdx().KillMulti ( dAccKlist );
+
+	if ( m_tSaving.Is ( SaveState_c::ENABLED ) )
+		for ( auto& pChunk : *pChunks )
+			iKilled += pChunk->CastIdx().KillMulti ( dAccKlist );
+	else
+	{
+		// if saving is disabled, and we NEED to actually mark a doc in disk chunk as deleted,
+		// we'll pause that action, waiting until index is unlocked.
+		bool bNeedWait = true;
+		bool bEnabled = false;
+		for ( auto& pChunk : *pChunks )
+			iKilled += pChunk->CastIdx().CheckThenKillMulti ( dAccKlist, [this,&bNeedWait, &bEnabled]()
+			{
+				if ( bNeedWait )
+				{
+					bNeedWait = false;
+					bEnabled = m_tSaving.WaitStateOrShutdown ( SaveState_c::ENABLED );
+				}
+				return bEnabled;
+			});
+	}
 
 	auto pSegs = m_tRtChunks.RamSegs();
 	for ( auto& pSeg : *pSegs )
@@ -3041,7 +3099,7 @@ int CommitID() {
 }
 } // namespace
 
-int RtIndex_c::CommitReplayable ( RtSegment_t * pNewSeg, const CSphVector<DocID_t> & dAccKlist ) REQUIRES_SHARED ( pNewSeg->m_tLock )
+int RtIndex_c::CommitReplayable ( RtSegment_t * pNewSeg, const VecTraits_T<DocID_t> & dAccKlist ) REQUIRES_SHARED ( pNewSeg->m_tLock )
 {
 	// store statistics, because pNewSeg just might get merged
 	const int iId = CommitID();
@@ -3767,7 +3825,7 @@ bool RtIndex_c::SaveDiskHeader ( SaveDiskDataContext_t & tCtx, const ChunkStats_
 
 void RtIndex_c::SaveMeta ( int64_t iTID, VecTraits_T<int> dChunkNames )
 {
-	if ( m_eSaving.load ( std::memory_order_relaxed ) != WriteState_e::ENABLED )
+	if ( !m_tSaving.Is ( SaveState_c::ENABLED ) )
 		return;
 
 	// sanity check
@@ -3886,7 +3944,7 @@ int64_t RtIndex_c::GetMemCount ( PRED&& fnPred ) const
 // i.e. create new disk chunk from ram segments
 bool RtIndex_c::SaveDiskChunk ( bool bForced, bool bEmergent, bool bBootstrap ) REQUIRES ( m_tWorkers.SerialChunkAccess() )
 {
-	if ( m_eSaving.load(std::memory_order_relaxed) != WriteState_e::ENABLED ) // fixme! review, m.b. refactor
+	if ( !m_tSaving.Is ( SaveState_c::ENABLED ) ) // fixme! review, m.b. refactor
 		return !bBootstrap;
 
 	assert ( Coro::CurrentScheduler() == m_tWorkers.SerialChunkAccess() );
@@ -4635,8 +4693,8 @@ void RtIndex_c::SaveRamFieldLengths ( CSphWriter& wrChunk ) const
 
 bool RtIndex_c::SaveRamChunk ()
 {
-	if ( m_eSaving.load ( std::memory_order_relaxed ) != WriteState_e::ENABLED )
-		return true;
+	if ( !m_tSaving.Is ( SaveState_c::ENABLED ) )
+		return false;
 
 	MEMORY ( MEM_INDEX_RT );
 
@@ -7803,7 +7861,7 @@ int RtIndex_c::UpdateAttributes ( AttrUpdateInc_t & tUpd, bool & bCritical, CSph
 	if ( m_tRtChunks.IsEmpty() )
 		return 0;
 
-	if ( m_eSaving.load ( std::memory_order_relaxed ) == WriteState_e::DISABLED )
+	if ( m_tSaving.Is ( SaveState_c::DISABLED ) ) // fixme! Wait?
 	{
 		sError = "index is locked now, try again later";
 		return -1;
@@ -7869,7 +7927,7 @@ bool RtIndex_c::SaveAttributes ( CSphString & sError ) const
 
 	const auto& pDiskChunks = m_tRtChunks.DiskChunks();
 
-	if ( pDiskChunks->IsEmpty() || ( m_eSaving.load ( std::memory_order_relaxed ) == WriteState_e::DISCARD ) )
+	if ( pDiskChunks->IsEmpty() || m_tSaving.Is ( SaveState_c::DISCARD ) )
 		return true;
 
 	for ( auto& pChunk : *pDiskChunks )
@@ -8175,7 +8233,7 @@ bool RtIndex_c::AttachDiskIndex ( CSphIndex* pIndex, bool bTruncate, bool & bFat
 		return false;
 
 	// safeguards
-	// we do not support some of the disk index features in RT just yet
+	// we do not support some disk index features in RT just yet
 #define LOC_ERROR(_arg) { sError = _arg; return false; }
 	const CSphIndexSettings & tSettings = pIndex->GetSettings();
 	if ( tSettings.m_iStopwordStep!=1 )
@@ -8615,7 +8673,7 @@ static int64_t NumAliveDocs ( const CSphIndex& dChunk )
 	return dChunk.GetStats().m_iTotalDocuments - tStatus.m_iDead;
 }
 
-void RtIndex_c::BinlogCommit ( RtSegment_t * pSeg, const CSphVector<DocID_t> & dKlist ) REQUIRES ( pSeg->m_tLock )
+void RtIndex_c::BinlogCommit ( RtSegment_t * pSeg, const VecTraits_T<DocID_t> & dKlist ) REQUIRES ( pSeg->m_tLock )
 {
 //	Tracer::AsyncOp tTracer ( "rt", "RtIndex_c::BinlogCommit" );
 	Binlog::Commit ( Binlog::COMMIT, &m_iTID, m_sIndexName.cstr(), false, [pSeg,&dKlist,this] (CSphWriter& tWriter) REQUIRES ( pSeg->m_tLock )
@@ -9605,7 +9663,7 @@ int	RtIndex_c::Kill ( DocID_t tDocID )
 }
 
 
-int RtIndex_c::KillMulti ( const VecTraits_T<DocID_t> & dKlist )
+int RtIndex_c::KillMulti ( const VecTraits_T<DocID_t> & /*dKlist*/ )
 {
 	assert ( 0 && "No external kills for RT");
 	return 0;
@@ -9756,13 +9814,13 @@ bool RtIndex_c::CopyExternalFiles ( int /*iPostfix*/, StrVec_t & dCopied )
 void RtIndex_c::ProhibitSave()
 {
 	StopOptimize();
-	m_eSaving.store ( WriteState_e::DISCARD, std::memory_order_relaxed );
+	m_tSaving.SetState ( SaveState_c::DISCARD );
 	std::atomic_thread_fence ( std::memory_order_release );
 }
 
 void RtIndex_c::EnableSave()
 {
-	m_eSaving.store ( WriteState_e::ENABLED, std::memory_order_relaxed );
+	m_tSaving.SetState ( SaveState_c::ENABLED );
 	m_bOptimizeStop.store ( false, std::memory_order_relaxed );
 	std::atomic_thread_fence ( std::memory_order_release );
 }
@@ -9774,7 +9832,9 @@ void RtIndex_c::LockFileState ( CSphVector<CSphString>& dFiles )
 	ForceRamFlush ( "forced" );
 	CSphString sError;
 	SaveAttributes ( sError ); // fixme! report error, better discard whole locking
-	m_eSaving.store ( WriteState_e::DISABLED, std::memory_order_relaxed );
+	// that will ensure, if current txn is applying, it will be finished (especially kill pass) before we continue.
+	ScopedScheduler_c tSerialFiber ( m_tWorkers.SerialChunkAccess() );
+	m_tSaving.SetState ( SaveState_c::DISABLED );
 	std::atomic_thread_fence ( std::memory_order_release );
 	GetIndexFiles ( dFiles, dFiles );
 }
