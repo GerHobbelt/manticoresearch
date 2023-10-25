@@ -88,6 +88,11 @@ docs_deploy:
     arch: x86_64
     boost: boost_nov22
     sysroot: roots_nov22
+  script:
+    - ctest -VV -S misc/ctest/gltest.cmake --no-compress-output
+  after_script:
+    - cd build && mkdir xml
+    - cp -r Testing/2*/*.xml xml
   cache:
     paths:
       - cache
@@ -95,6 +100,18 @@ docs_deploy:
   artifacts:
     when: on_success
     expire_in: 12 hrs
+    paths:
+      - build/xml
+      - build/CMakeFiles/CMake*.log
+      - build/api/libsphinxclient/testcli
+      - build/src/indexer
+      - build/src/indextool
+      - build/src/searchd
+      - build/src/tests
+      - build/src/gtests/gmanticoretest
+      - build/config/*.c
+      - build/config/*.h
+      - build/**/*.gcno
 
 # ==================== .helper testing ======================
 
@@ -109,7 +126,11 @@ docs_deploy:
     CACHEB: "../cache"
   script:
     - bash /root/aot.sh
-    - ctest -V -S misc/ctest/gltest.cmake
+    - ctest -V -S misc/ctest/gltest.cmake --no-compress-output
+  after_script:
+    - cd build
+    - cp -r Testing/2*/Test.xml .
+    - xsltproc -o junit_tests.xml ../misc/junit/ctest2junit.xsl Test.xml
   cache:
     key: bionic_test
     paths:
@@ -117,6 +138,14 @@ docs_deploy:
   artifacts:
     expire_in: 12 hrs
     when: always
+    reports:
+      junit: build/junit_tests.xml
+    paths:
+      - build/junit_tests.xml
+      - build/test/test_*/report.txt
+      - build/test/error*.txt
+      - build/test/searchd.log
+      - $DOCS_EXAMPLES_FILEPATH
   retry: 1
 
 
@@ -131,21 +160,6 @@ simple_build:
     CTEST_CMAKE_GENERATOR: "Unix Makefiles" # as Ninja fails with coverage
     CTEST_CONFIGURATION_TYPE: "Debug"
     WITH_COVERAGE: 1
-  script:
-    - ctest -VV -S misc/ctest/gltest.cmake
-    - cd build && mkdir xml_simple_build
-    - cp -r Testing/2*/*.xml xml_simple_build
-  artifacts:
-    paths:
-      - build/xml_simple_build
-      - build/api/libsphinxclient/testcli
-      - build/src/indexer
-      - build/src/searchd
-      - build/src/tests
-      - build/src/gtests/gmanticoretest
-      - build/**/*.gcno
-      - build/config/*.c
-      - build/config/*.h
 
 simple_tests:
   extends: [ .tests ]
@@ -157,16 +171,6 @@ simple_tests:
     CTEST_CONFIGURATION_TYPE: "Debug"
     WITH_COVERAGE: 1
     NO_BUILD: 1
-  after_script:
-    - cd build && mkdir xml_simple_tests
-    - cp -r Testing/2*/*.xml xml_simple_tests
-  artifacts:
-    paths:
-      - build/xml_simple_tests
-      - build/xml_simple_build
-      - build/test/test_*/report.txt
-      - build/test/error*.txt
-      - build/test/searchd.log
 
 # ==================== Release build, then test ======================
 
@@ -177,18 +181,6 @@ release_build:
     - if: $TEST =~ /release/ && ( $WHAT=='$WHAT' || $WHAT==null )
   variables:
     CMAKE_INTERPROCEDURAL_OPTIMIZATION: 1
-  script:
-    - ctest -VV -S misc/ctest/gltest.cmake
-    - cd build && mkdir xml_release_build
-    - cp -r Testing/2*/*.xml xml_release_build
-  artifacts:
-    paths:
-      - build/xml_release_build
-      - build/api/libsphinxclient/testcli
-      - build/src/indexer
-      - build/src/searchd
-      - build/src/tests
-      - build/src/gtests/gmanticoretest
 
 release_tests:
   extends: [ .tests ]
@@ -199,17 +191,6 @@ release_tests:
   variables:
     CTEST_CONFIGURATION_TYPE: "RelWithDebInfo"
     NO_BUILD: 1
-  after_script:
-    - cd build && mkdir xml_release_tests
-    - cp -r Testing/2*/*.xml xml_release_tests
-  artifacts:
-    paths:
-      - build/xml_release_build
-      - build/xml_release_tests
-      - build/test/test_*/report.txt
-      - build/test/error*.txt
-      - build/test/searchd.log
-      - $DOCS_EXAMPLES_FILEPATH
 
 # ==================== Windows build, then test ======================
 
@@ -223,13 +204,9 @@ win_build:
     arch: x64
     CTEST_CMAKE_GENERATOR: "Ninja Multi-Config"
     CTEST_CONFIGURATION_TYPE: Debug
-  script:
-    - ctest -VV -S misc/ctest/gltest.cmake
-    - cd build && mkdir xml_win_build
-    - cp -r Testing/2*/*.xml xml_win_build
   artifacts:
     paths:
-      - build/xml_win_build
+      - build/xml
       - build/src/$CTEST_CONFIGURATION_TYPE/indexer.exe
       - build/src/$CTEST_CONFIGURATION_TYPE/searchd.exe
       - build/src/$CTEST_CONFIGURATION_TYPE/tests.exe
@@ -258,16 +235,15 @@ win_tests:
     NO_BUILD: 1
   script:
     - 'net use x: \\\\VBOXSRV\\shared'
-    - ctest -V -S misc/ctest/gltest.cmake
+    - ctest -V -S misc/ctest/gltest.cmake --no-compress-output
   after_script:
-    - cd build && mkdir xml_win_tests
-    - cp -r Testing/2*/*.xml xml_win_tests
+    - cd build
+    - cp -r Testing/2*/*.xml xml
   artifacts:
     expire_in: 12 hrs
     when: always
     paths:
-      - build/xml_win_tests
-      - build/xml_win_build
+      - build/xml
       - build/test/test_*/report.txt
       - build/test/error*.txt
       - build/test/searchd.log
@@ -286,13 +262,7 @@ build_bsd:
     boost: none
   script:
     - mkdir build && cd build
-    - ctest -VV -S ../misc/ctest/justbuild.cmake -DCTEST_SOURCE_DIRECTORY=..
-    - mkdir xml_build_$DISTR$arch
-    - cp -r Testing/2*/*.xml xml_build_$DISTR$arch
-  artifacts:
-    paths:
-      - build/xml_build_$DISTR$arch
-      - build/CMakeFiles/CMake*.log
+    - ctest -VV -S ../misc/ctest/justbuild.cmake -DCTEST_SOURCE_DIRECTORY=.. --no-compress-output
   cache:
     key: $DISTR$arch
   retry: 1
@@ -300,7 +270,7 @@ build_bsd:
 # ==================== Publish (push) pipeline results ======================
 
 # build and upload on regular commits
-push_results:
+convert_win_junit:
   stage: publish
   rules:
     - if: ( $WHAT=='$WHAT' || $WHAT==null )
@@ -309,25 +279,17 @@ push_results:
     - docker
   image: registry.gitlab.com/manticoresearch/dev/ubertests_public:320
   needs:
-    - simple_tests
-    - release_tests
     - win_tests
-    - build_bsd
   variables:
     GIT_STRATEGY: fetch
   script:
-    - ctest -S misc/ctest/upload.cmake
+    - xsltproc -o build/junit_tests.xml misc/junit/ctest2junit.xsl build/xml/Test.xml
   artifacts:
     paths:
-      - build/junit_*.xml
+      - build/junit_tests.xml
     reports:
-      junit: build/junit_*.xml
+      junit: build/junit_tests.xml
   cache: {}
-  environment:
-    name: ${CI_COMMIT_REF_NAME}
-    url: http://$CDASH_URL/index.php?project=Manticoresearch&filtercount=1&field1=revision&compare1=63&value1=$CI_COMMIT_SHA
-  retry: 1
-  allow_failure: true
 
 # ==================== Check documentation examples ======================
 
