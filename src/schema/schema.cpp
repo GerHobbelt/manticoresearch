@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2022, Manticore Software LTD (http://manticoresearch.com)
+// Copyright (c) 2017-2023, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -353,9 +353,14 @@ int CSphSchema::GetAttrId_LastFieldLen() const
 
 bool CSphSchema::IsReserved ( const char* szToken )
 {
-	static const char* dReserved[] =
-			{
-					"AND", "AS", "BY", "DISTINCT", "DIV", "EXPLAIN", "FACET", "FALSE", "FORCE", "FROM", "IGNORE", "IN", "INDEXES", "IS", "LIMIT", "MOD", "NOT", "NULL", "OFFSET", "OR", "ORDER", "REGEX", "RELOAD", "SELECT", "SYSFILTERS", "TRUE", "USE", NULL };
+	static const char * dReserved[] =
+	{
+		"AND", "AS", "BY", "COLUMNARSCAN", "DISTINCT", "DIV", "DOCIDINDEX", "EXPLAIN",
+		"FACET", "FALSE", "FORCE", "FROM", "IGNORE", "IN", "INDEXES", "IS", "LIMIT",
+		"MOD", "NOT", "NO_COLUMNARSCAN", "NO_DOCIDINDEX", "NO_SECONDARYINDEX", "NULL",
+		"OFFSET", "OR", "ORDER", "REGEX", "RELOAD", "SECONDARYINDEX", "SELECT",
+		"SYSFILTERS", "TRUE", "USE", NULL
+	}; 
 
 	const char** p = dReserved;
 	while ( *p )

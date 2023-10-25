@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2022, Manticore Software LTD (https://manticoresearch.com)
+// Copyright (c) 2017-2023, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -204,6 +204,7 @@ static CSphString		g_sBuddyPath;
 static bool				g_bTelemetry = val_from_env ( "MANTICORE_TELEMETRY", true );
 static bool				g_bHasBuddyPath = false;
 static bool				g_bAutoSchema = true;
+static bool				g_bNoChangeCwd = val_from_env ( "MANTICORE_NO_CHANGE_CWD", false );
 
 // for CLang thread-safety analysis
 ThreadRole MainThread; // functions which called only from main thread
@@ -1838,8 +1839,9 @@ void SearchRequestBuilder_c::SendQuery ( const char * sIndexes, ISphOutputBuffer
 	tOut.SendInt ( q.m_dIndexHints.GetLength() );
 	for ( const auto & i : q.m_dIndexHints )
 	{
-		tOut.SendDword ( (DWORD)i.m_dHints[int(SecondaryIndexType_e::INDEX)] );
 		tOut.SendString ( i.m_sIndex.cstr() );
+		tOut.SendDword ( (DWORD)i.m_eType );
+		tOut.SendDword ( (DWORD)i.m_bForce );
 	}
 }
 
@@ -2651,13 +2653,15 @@ bool ParseSearchQuery ( InputBuffer_c & tReq, ISphOutputBuffer & tOut, CSphQuery
 	if ( uMasterVer>=16 )
 		tQuery.m_eExpandKeywords = (QueryOption_e)tReq.GetDword();
 
-	if ( uMasterVer>=17 )
+	// pre-v.20 had old-style index hints, but they were not documented anyway
+	if ( uMasterVer>=20 )
 	{
 		tQuery.m_dIndexHints.Resize ( tReq.GetDword() );
 		for ( auto & i : tQuery.m_dIndexHints )
 		{
-			i.m_dHints[int(SecondaryIndexType_e::INDEX)] = (IndexHint_e)tReq.GetDword();
 			i.m_sIndex = tReq.GetString();
+			i.m_eType = (SecondaryIndexType_e)tReq.GetDword();
+			i.m_bForce = !!tReq.GetDword();
 		}
 	}
 
@@ -2977,12 +2981,30 @@ static void FormatOption ( const CSphQuery & tQuery, StringBuilder_c & tBuf )
 }
 
 
-static void AppendHint ( const char * szHint, const StrVec_t & dIndexes, StringBuilder_c & tBuf )
+static CSphString GenerateHintName ( const IndexHint_t & tHint )
 {
-	if ( dIndexes.IsEmpty() )
-		return;
-	tBuf << " " << szHint;
-	ScopedComma_c tComma ( tBuf, ",", " INDEX (", ")" );
+	CSphString sName;
+	switch ( tHint.m_eType )
+	{
+	case SecondaryIndexType_e::FILTER:	sName = "Filter"; break;
+	case SecondaryIndexType_e::LOOKUP:	sName = "DocidIndex"; break;
+	case SecondaryIndexType_e::INDEX:	sName = "SecondaryIndex"; break;
+	case SecondaryIndexType_e::ANALYZER:sName = "ColumnarScan"; break;
+	default:							sName = "None"; break;
+	}
+
+	if ( !tHint.m_bForce )
+		sName.SetSprintf ( "NO_%s", sName.cstr() );
+
+	return sName;
+}
+
+
+static void AppendHint ( const IndexHint_t & tHint, const StrVec_t & dIndexes, StringBuilder_c & tBuf )
+{
+	CSphString sName;
+	sName.SetSprintf ( " %s (", GenerateHintName(tHint).cstr() );
+	ScopedComma_c tComma ( tBuf, ",", sName.cstr(), ")" );
 	for ( const auto & sIndex : dIndexes )
 		tBuf << sIndex;
 }
@@ -2990,35 +3012,41 @@ static void AppendHint ( const char * szHint, const StrVec_t & dIndexes, StringB
 
 static void FormatIndexHints ( const CSphQuery & tQuery, StringBuilder_c & tBuf )
 {
+	if ( !tQuery.m_dIndexHints.GetLength() )
+		return;
+
 	ScopedComma_c sMatch ( tBuf, nullptr );
-	StrVec_t dUse, dForce, dIgnore;
-	for ( const auto & i : tQuery.m_dIndexHints )
+	CSphVector<bool> dUsed { tQuery.m_dIndexHints.GetLength() };
+	dUsed.ZeroVec();
+
+	tBuf << " /*+ ";
+
+	ARRAY_FOREACH ( i, tQuery.m_dIndexHints )
 	{
-		switch ( i.m_dHints[int(SecondaryIndexType_e::INDEX)] )
-		{
-		case IndexHint_e::USE:
-			dUse.Add(i.m_sIndex);
-			break;
-		case IndexHint_e::FORCE:
-			dForce.Add(i.m_sIndex);
-			break;
-		case IndexHint_e::IGNORE_:
-			dIgnore.Add(i.m_sIndex);
-			break;
-		default:
-			break;
-		}
+		if ( dUsed[i] )
+			continue;
+
+		StrVec_t dIndexes;
+		dIndexes.Add ( tQuery.m_dIndexHints[i].m_sIndex );
+		for ( int j = i+1; j<tQuery.m_dIndexHints.GetLength(); j++)
+			if ( !dUsed[j] && tQuery.m_dIndexHints[i].m_eType==tQuery.m_dIndexHints[j].m_eType && tQuery.m_dIndexHints[i].m_bForce==tQuery.m_dIndexHints[j].m_bForce )
+			{
+				dIndexes.Add ( tQuery.m_dIndexHints[j].m_sIndex );
+				dUsed[j] = true;
+			}
+
+		AppendHint ( tQuery.m_dIndexHints[i], dIndexes, tBuf );
 	}
 
-	AppendHint ( "USE", dUse, tBuf );
-	AppendHint ( "FORCE", dForce, tBuf );
-	AppendHint ( "IGNORE", dIgnore, tBuf );
+	tBuf << " */";
 }
+
 
 static void LogQueryJson ( const CSphQuery & q, StringBuilder_c & tBuf )
 {
 	tBuf << " /*" << q.m_sRawQuery << " */";
 }
+
 
 static void LogQuerySphinxql ( const CSphQuery & q, const CSphQueryResultMeta & tMeta, const CSphVector<int64_t> & dAgentTimes )
 {
@@ -18974,7 +19002,43 @@ void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile, bool bTestMo
 	g_bAutoSchema = ( hSearchd.GetInt ( "auto_schema", g_bAutoSchema ? 1 : 0 )!=0 );
 
 	SetAccurateAggregationDefault ( hSearchd.GetInt ( "accurate_aggregation", GetAccurateAggregationDefault() )!=0 );
-	g_sConfigPath = sphGetCwd();
+}
+
+static void DirMustWritable ( const CSphString & sDataDir )
+{
+	CSphString sError;
+	CSphString sTmpName;
+	sTmpName.SetSprintf ( "%s/gmb_%d", sDataDir.cstr(), (int)getpid() );
+
+	CSphWriter tFile;
+	if ( !tFile.OpenFile ( sTmpName, sError ) )
+		sphFatal ( "The directory Manticore starts from must be writable for the daemon, error: %s", sError.cstr() );
+
+	tFile.PutDword( 1 );
+	tFile.Flush();
+
+	if ( tFile.IsError() )
+		sphFatal ( "The directory Manticore starts from must be writable for the daemon, error: %s", sError.cstr() );
+}
+
+static void CheckSetCwd () REQUIRES ( MainThread )
+{
+	if ( g_bNoChangeCwd || !IsConfigless() )
+		return;
+
+	CSphString sDataDir = GetDataDirInt();
+	if ( !IsPathAbsolute ( sDataDir ) )
+	{
+		DirMustWritable ( "." );
+		return;
+	}
+
+	int iRes = chdir ( sDataDir.cstr() );
+	if ( iRes!=0 )
+		sphFatal ( "failed to change current working directory to '%s': %s", sDataDir.cstr(), strerror(errno) );
+
+	sphLogDebug ( "current working directory changed to '%s'", sDataDir.cstr() );
+	DirMustWritable ( sDataDir );
 }
 
 static void PutPath ( const CSphString & sCwd, const CSphString & sVar, RowBuffer_i & tOut )
@@ -19611,6 +19675,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 		OPT1 ( "--coredump" )		g_bCoreDump = true;
 		OPT1 ( "--new-cluster" )	bNewCluster = true;
 		OPT1 ( "--new-cluster-force" )	bNewClusterForce = true;
+		OPT1 ( "--no_change_cwd" )	g_bNoChangeCwd = true;
 
 		// FIXME! add opt=(csv)val handling here
 		OPT1 ( "--replay-flags=accept-desc-timestamp" )		uReplayFlags |= Binlog::REPLAY_ACCEPT_DESC_TIMESTAMP;
@@ -19735,6 +19800,8 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 		sphFatal ( "%s", sError.cstr() );
 
 	ConfigureSearchd ( hConf, bOptPIDFile, bTestMode );
+	CheckSetCwd();
+	g_sConfigPath = sphGetCwd();
 	sphConfigureCommon ( hConf ); // this also inits plugins now
 
 	g_bWatchdog = hSearchdpre.GetInt ( "watchdog", g_bWatchdog )!=0;
@@ -20173,7 +20240,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	searchd::AddShutdownCb ( BuddyStop );
 	// --test should not guess buddy path
 	// otherwise daemon generates warning message that counts as bad daemon restart by ubertest
-	BuddyStart ( g_sBuddyPath, ( g_bHasBuddyPath || bTestMode ), dListenerDescs, g_bTelemetry );
+	BuddyStart ( g_sBuddyPath, ( g_bHasBuddyPath || bTestMode ), dListenerDescs, g_bTelemetry, g_iThreads );
 
 	g_bJsonConfigLoadedOk = true;
 

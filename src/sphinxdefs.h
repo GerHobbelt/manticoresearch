@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2022, Manticore Software LTD (https://manticoresearch.com)
+// Copyright (c) 2017-2023, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -237,13 +237,6 @@ enum QueryOption_e
 	QUERY_OPT_DISABLED,
 	QUERY_OPT_ENABLED,
 	QUERY_OPT_MORPH_NONE
-};
-
-enum class IndexHint_e
-{
-	USE,
-	FORCE,
-	IGNORE_		// dumb windows expands IGNORE as a macro
 };
 
 /// match sorting functions

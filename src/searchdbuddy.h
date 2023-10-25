@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2022, Manticore Software LTD (https://manticoresearch.com)
+// Copyright (c) 2017-2023, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -15,7 +15,7 @@
 #include "sphinxstd.h"
 #include "searchdhttp.h"
 
-void BuddyStart ( const CSphString & sConfigPath, bool bHasBuddyPath, const VecTraits_T<ListenerDesc_t> & dListeners, bool bTelemetry );
+void BuddyStart ( const CSphString & sConfigPath, bool bHasBuddyPath, const VecTraits_T<ListenerDesc_t> & dListeners, bool bTelemetry, int iThreads );
 void BuddyStop ();
 
 bool HasBuddy();

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2022, Manticore Software LTD (https://manticoresearch.com)
+// Copyright (c) 2017-2023, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -6800,11 +6800,9 @@ static int64_t CalcMaxCountDistinct ( const CSphQuery & tQuery, const RtGuard_t 
 
 static bool CalcDiskChunkSplits ( IntVec_t & dSplits, int iJobs, const CSphQuery & tQuery, const CSphMultiQueryArgs & tArgs, const RtGuard_t & tGuard )
 {
+	assert ( dSplits.GetLength()==iJobs );
+
 	int64_t iMaxCountDistinct = CalcMaxCountDistinct ( tQuery, tGuard );
-
-	dSplits.Resize(iJobs);
-	dSplits.Fill(1);
-
 	int iNumSingleThreads = 0;
 	int64_t iTotalMetric = 0;
 	CSphVector<int64_t> dMetrics { iJobs };
@@ -6836,12 +6834,12 @@ static bool CalcDiskChunkSplits ( IntVec_t & dSplits, int iJobs, const CSphQuery
 }
 
 
-static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tResult, const CSphMultiQueryArgs & tArgs, const RtGuard_t & tGuard, VecTraits_T<ISphMatchSorter *> & dSorters, QueryProfile_c * pProfiler, bool bGotLocalDF, const SmallStringHash_T<int64_t> * pLocalDocs, int64_t iTotalDocs, const char * szIndexName, SorterSchemaTransform_c & tSSTransform, int64_t tmMaxTimer )
+static bool QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tResult, const CSphMultiQueryArgs & tArgs, const RtGuard_t & tGuard, VecTraits_T<ISphMatchSorter *> & dSorters, QueryProfile_c * pProfiler, bool bGotLocalDF, const SmallStringHash_T<int64_t> * pLocalDocs, int64_t iTotalDocs, const char * szIndexName, SorterSchemaTransform_c & tSSTransform, int64_t tmMaxTimer )
 {
 	// counter of tasks we will issue now
 	int iJobs = tGuard.m_dDiskChunks.GetLength();
 	if ( !iJobs )
-		return;
+		return true;
 
 	assert ( !dSorters.IsEmpty () );
 
@@ -6854,7 +6852,13 @@ static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tR
 	// because disk chunk search within the loop will switch the profiler state
 	SwitchProfile ( pProfiler, SPH_QSTATE_INIT );
 
+	// uninitilized dSplits (due to tClonableCtx.IsSingle()) could still cause the SplitQuery code path at the CSphIndex_VLN::MultiQuery as
+	// dSplits[iChunk] -> tMultiArgs.m_iThreads
+	// then at the m_dDiskChunks
+	// if ( tArgs.m_iThreads>1 ) return SplitQuery
 	IntVec_t dSplits {iJobs};
+	dSplits.Fill(1); // moved here from CalcDiskChunkSplits to prevent short-cuts
+
 	auto pDispatcher = Dispatcher::Make ( iJobs, tArgs.m_iThreads, tDispatch, tClonableCtx.IsSingle() || !CalcDiskChunkSplits ( dSplits, iJobs, tQuery, tArgs, tGuard ));
 
 	const int iThreads = pDispatcher->GetConcurrency();
@@ -6863,7 +6867,8 @@ static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tR
 	auto iStart = sphMicroTimer();
 	RTQUERYINFO << "Started: " << ( sphMicroTimer()-iStart );
 
-	std::atomic<bool> bInterrupt {false};
+	std::atomic<bool> bInterrupt { false };
+	std::atomic<int> bSucceed { 1 };
 	auto CheckInterrupt = [&bInterrupt]() { return bInterrupt.load ( std::memory_order_relaxed ); };
 
 	Coro::ExecuteN ( tClonableCtx.Concurrency ( iJobs ), [&]
@@ -6915,7 +6920,10 @@ static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tR
 			// that's why we don't want to move to a new schema before we searched ram chunks
 			tMultiArgs.m_bModifySorterSchemas = false;
 
-			bInterrupt.store ( !tGuard.m_dDiskChunks[iChunk]->Cidx().MultiQuery ( tChunkResult, tQuery, dLocalSorters, tMultiArgs ), std::memory_order_relaxed );
+			bool bChunkSucceed = tGuard.m_dDiskChunks[iChunk]->Cidx().MultiQuery ( tChunkResult, tQuery, dLocalSorters, tMultiArgs ) ;
+			bSucceed.fetch_and ( bChunkSucceed );
+			if ( !bChunkSucceed )
+				Interrupt ( "query error" );
 
 			// check terms inconsistency among disk chunks
 			tThMeta.MergeWordStats ( tChunkMeta );
@@ -6953,6 +6961,8 @@ static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tR
 	});
 	RTQUERYINFO "QueryDiskChunks processed in " << tClonableCtx.NumWorked() << " thread(s)";
 	tClonableCtx.Finalize();
+
+	return bSucceed;
 }
 
 
@@ -7454,7 +7464,10 @@ bool RtIndex_c::MultiQuery ( CSphQueryResult & tResult, const CSphQuery & tQuery
 	SorterSchemaTransform_c tSSTransform ( dDiskChunks.GetLength(), tArgs.m_bFinalizeSorters );
 
 	if ( !dDiskChunks.IsEmpty() )
-		QueryDiskChunks ( tQuery, tMeta, tArgs, tGuard, dSorters, pProfiler, bGotLocalDF, pLocalDocs, iTotalDocs, GetName(), tSSTransform, tmMaxTimer );
+	{
+		if ( !QueryDiskChunks ( tQuery, tMeta, tArgs, tGuard, dSorters, pProfiler, bGotLocalDF, pLocalDocs, iTotalDocs, GetName(), tSSTransform, tmMaxTimer ) )
+			return false;
+	}
 
 	////////////////////
 	// search RAM chunk

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2022, Manticore Software LTD (https://manticoresearch.com)
+// Copyright (c) 2017-2023, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -7860,6 +7860,16 @@ RowidIterator_i * CSphIndex_VLN::CreateColumnarAnalyzerOrPrefilter ( CSphVector<
 	std::vector<common::Filter_t> dColumnarFilters;
 	std::vector<int> dFilterMap;
 	ToColumnarFilters ( dFilters, dColumnarFilters, dFilterMap, tSchema, eCollation, sWarning );
+
+	// remove disabled analyzers
+	for ( size_t i = 0; i < dFilterMap.size(); )
+		if ( dSIInfo[i].m_eType!=SecondaryIndexType_e::ANALYZER )
+		{
+			dFilterMap.erase ( dFilterMap.begin()+i );
+			dColumnarFilters.erase ( dColumnarFilters.begin()+i );
+		}
+		else
+			i++;
 
 	if ( dColumnarFilters.empty() || ( dColumnarFilters.size()==1 && dColumnarFilters[0].m_sName=="@rowid" ) )
 		return nullptr;

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2017-2022, Manticore Software LTD (https://manticoresearch.com)
+// Copyright (c) 2017-2023, Manticore Software LTD (https://manticoresearch.com)
 // Copyright (c) 2001-2016, Andrew Aksyonoff
 // Copyright (c) 2008-2016, Sphinx Technologies Inc
 // All rights reserved
@@ -453,8 +453,9 @@ enum class SecondaryIndexType_e
 
 struct IndexHint_t
 {
-	CSphString		m_sIndex;
-	IndexHint_e		m_dHints[DWORD(SecondaryIndexType_e::TOTAL)] = {};
+	CSphString				m_sIndex;
+	SecondaryIndexType_e	m_eType = SecondaryIndexType_e::NONE;
+	bool					m_bForce = true;
 };
 
 const int DEFAULT_MAX_MATCHES = 1000;
