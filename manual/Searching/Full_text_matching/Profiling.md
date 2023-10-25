@@ -773,7 +773,7 @@ class SearchResponse {
 ## Profiling without running a query
 
 <!-- Example Explain_query -->
-The SQL statement `EXPLAIN QUERY` allows displaying the execution tree of a provided full-text query without running an actual search query on the index.
+The SQL statement `EXPLAIN QUERY` allows displaying the execution tree of a provided full-text query without running an actual search query on the table.
 
 
 
@@ -810,12 +810,12 @@ Variable: transformed_tree
 <!-- request SQL -->
 
 ```sql
-EXPLAIN QUERY idx 'i me' option format=dot\G
+EXPLAIN QUERY tbl 'i me' option format=dot\G
 ```
 <!-- response SQL -->
 
 ```sql
-EXPLAIN QUERY idx 'i me' option format=dot\G
+EXPLAIN QUERY tbl 'i me' option format=dot\G
 *************************** 1. row ***************************
 Variable: transformed_tree
    Value: digraph "transformed_tree"

@@ -563,6 +563,7 @@ struct CSphQuery
 	QueryType_e		m_eQueryType {QUERY_API};		///< queries from sphinxql require special handling
 	const QueryParser_i * m_pQueryParser = nullptr;	///< queries do not own this parser
 
+	// JSON output
 	StrVec_t m_dIncludeItems;
 	StrVec_t m_dExcludeItems;
 	const void*		m_pCookie = nullptr;	///< opaque mark, used to manage lifetime of the vec of queries
@@ -887,7 +888,8 @@ struct CSphMultiQueryArgs : public ISphNoncopyable
 	int64_t									m_iTotalDocs = 0;
 	bool									m_bModifySorterSchemas = true;
 	bool									m_bFinalizeSorters = true;
-	int										m_iSplit = 1;
+	int										m_iThreads = 1;
+	int										m_iTotalThreads = 1;
 
 	CSphMultiQueryArgs ( int iIndexWeight );
 };
