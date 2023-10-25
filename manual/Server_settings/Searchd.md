@@ -59,7 +59,7 @@ Integer, in milliseconds (or [special_suffixes](../Server_settings/Special_suffi
 ### attr_flush_period
 
 <!-- example conf attr_flush_period -->
-When calling [Update](../Updating_documents/UPDATE.md) to update document attributes in real-time, the changes are first written to in-memory copy of attributes.  The updates are done in a memory mapped file, which means that the OS decides when to write these changes to disk. Once `searchd` shuts down normally (via `SIGTERM` being sent) it forces writing all the changes to disk.
+When calling [Update](../Data_creation_and_modification/Updating_documents/UPDATE.md) to update document attributes in real-time, the changes are first written to in-memory copy of attributes.  The updates are done in a memory mapped file, which means that the OS decides when to write these changes to disk. Once `searchd` shuts down normally (via `SIGTERM` being sent) it forces writing all the changes to disk.
 
 It is also possible to tell `searchd` to periodically write these changes  back to disk to avoid them being lost. The time between those intervals is set with `attr_flush_period`, in seconds (or [special_suffixes](../Server_settings/Special_suffixes.md)).
 
@@ -1101,8 +1101,8 @@ seamless_rotate = 1
 
 This option enables the use of secondary indexes for search queries. It is optional and the default is 1 (enabled). Note that you don't need to enable it for indexing as it is always enabled. The [Manticore Columnar Library](https://github.com/manticoresoftware/columnar) is required for this feature. There are three modes available:
 
-* 0: disable the use of secondary indexes on search. They can be enabled for individual queries using [analyzer hints](../Searching/Options.md#FORCE-and-IGNORE-INDEX)
-* 1: enable the use of secondary indexes on search. They can be disabled for individual queries using [analyzer hints](../Searching/Options.md#FORCE-and-IGNORE-INDEX)
+* 0: disable the use of secondary indexes on search. They can be enabled for individual queries using [analyzer hints](../Searching/Options.md#Query-optimizer-hints)
+* 1: enable the use of secondary indexes on search. They can be disabled for individual queries using [analyzer hints](../Searching/Options.md#Query-optimizer-hints)
 * `force`: same as enable, but any errors during the loading of secondary indexes will be reported and the whole index will not be loaded into the daemon
 
 

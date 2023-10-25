@@ -13820,9 +13820,13 @@ void HandleMysqlSet ( RowBuffer_i & tOut, SqlStmt_t & tStmt, CSphSessionAccum & 
 		{
 			SetLogHttpFilter ( tStmt.m_sSetValue );
 
-		} else if ( tStmt.m_sSetName=="log_management" )
+		} else if ( tStmt.m_sSetName=="es_compat" )
 		{
-			SetLogManagement ( !!tStmt.m_iSetValue );
+			if ( !SetLogManagement ( tStmt.m_sSetValue, sError ) )
+			{
+				tOut.Error ( tStmt.m_sStmt, sError.cstr() );
+				return;
+			}
 
 		} else if ( tStmt.m_sSetName=="net_wait" )
 		{
@@ -14703,6 +14707,7 @@ void HandleMysqlSelectSysvar ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 				pVars->m_dLastIds.Apply ( [&s] ( int64_t iID ) { s << iID; } );
 				return CSphString(s);
 			}},
+		{ MYSQL_COL_LONG,	"@@autocommit", [&pVars] { return pVars->m_bAutoCommit ? "1" : "0"; }},
 	};
 
 	auto fnVar = [&dSysvars] ( const CSphString & sVar )->const SysVar_t &

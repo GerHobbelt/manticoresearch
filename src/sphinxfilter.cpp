@@ -777,6 +777,7 @@ CSphString FilterType2Str ( ESphFilter eFilterType )
 	case SPH_FILTER_RANGE:			sFilterName = "intrange"; break;
 	case SPH_FILTER_FLOATRANGE:		sFilterName = "floatrange"; break;
 	case SPH_FILTER_STRING:			sFilterName = "string"; break;
+	case SPH_FILTER_STRING_LIST:	sFilterName = "stringlist"; break;
 	case SPH_FILTER_NULL:			sFilterName = "null"; break;
 	default:						sFilterName.SetSprintf ( "(filter-type-%d)", eFilterType ); break;
 	}
@@ -1258,10 +1259,16 @@ static std::unique_ptr<ISphFilter> CreateFilterExpr ( ISphExpr * _pExpr, const C
 }
 
 
-static std::unique_ptr<ISphFilter> TryToCreateExpressionFilter ( CSphRefcountedPtr<ISphExpr> & pExpr, const CSphString & sAttrName, const ISphSchema & tSchema, const CSphFilterSettings & tSettings,
-	const CommonFilterSettings_t & tFixedSettings, ExprParseArgs_t & tExprArgs, CSphString & sError )
+static std::unique_ptr<ISphFilter> TryToCreateExpressionFilter ( CSphRefcountedPtr<ISphExpr> & pExpr, const CSphString & sAttrName, const ISphSchema & tSchema, const CSphFilterSettings & tSettings, const CommonFilterSettings_t & tFixedSettings, ExprParseArgs_t & tExprArgs, CSphString & sError )
 {
 	pExpr = sphExprParse ( sAttrName.cstr(), tSchema, sError, tExprArgs );
+	if ( pExpr->UsesDocstore() )
+	{
+		sError.SetSprintf ( "unsupported filter on field '%s' (filters are supported only on attributes, not stored fields)", sAttrName.cstr() );
+		pExpr = nullptr;
+		return nullptr;
+	}
+
 	if ( pExpr )
 		return CreateFilterExpr ( pExpr, tSettings, tFixedSettings, sError, tExprArgs.m_eCollation, *tExprArgs.m_pAttrType );
 
@@ -1474,6 +1481,13 @@ bool FixupFilterSettings ( const CSphFilterSettings & tSettings, CommonFilterSet
 	if ( bIntFilter && ( tAttr.m_eAttrType==SPH_ATTR_STRING || tAttr.m_eAttrType==SPH_ATTR_STRINGPTR ) )
 	{
 		sError.SetSprintf ( "unsupported filter on a '%s' string column", tAttr.m_sName.cstr() );
+		return false;
+	}
+
+	bool bStrFilter = tSettings.m_eType==SPH_FILTER_STRING || tSettings.m_eType==SPH_FILTER_STRING_LIST;
+	if ( bStrFilter && ( tAttr.m_eAttrType!=SPH_ATTR_STRING && tAttr.m_eAttrType!=SPH_ATTR_STRINGPTR && tAttr.m_eAttrType!=SPH_ATTR_JSON && tAttr.m_eAttrType!=SPH_ATTR_JSON_FIELD ) )
+	{
+		sError.SetSprintf ( "unsupported filter type '%s' on attribute '%s'", FilterType2Str(tSettings.m_eType).cstr(), tAttr.m_sName.cstr() );
 		return false;
 	}
 
