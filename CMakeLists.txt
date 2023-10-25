@@ -56,26 +56,6 @@ if (CXX_COMPILER_ID STREQUAL GNU AND CXX_COMPILER_VERSION VERSION_LESS 4.7.2)
 	message ( FATAL_ERROR "Gcc version error. Minspec is 4.7.2" )
 endif ()
 
-# On Macos with HOMEBREW plugin_dir should be set to /opt/homebrew/lib/manticore (or with another homebrew prefix)
-if(DEFINED HOMEBREW_PREFIX)
-	set(HARDCODED_PLUGIN_DIR "${HOMEBREW_PREFIX}/lib/manticore")
-# on Windows, plugin_dir should be relative usr/local/lib/manticore by default
-elseif (WIN32)
-	set(HARDCODED_PLUGIN_DIR "usr/local/lib/manticore")
-# on Linux - absolute /usr/local/lib/manticore
-elseif (APPLE)
-	if (APPLE_ARM)
-		set(HARDCODED_PLUGIN_DIR "/opt/homebrew/")
-	else()
-		set(HARDCODED_PLUGIN_DIR "/usr/local/")
-	endif()
-else()
-       set(HARDCODED_PLUGIN_DIR "/usr/local/lib/manticore")
-endif()
-
-# Pass the value of HARDCODED_PLUGIN_DIR to the C++ code
-add_definitions(-DHARDCODED_PLUGIN_DIR="${HARDCODED_PLUGIN_DIR}")
-
 # Collect string information which will be included into binaries
 include ( banner )
 bannervar ( DISTR_BUILD )
@@ -94,9 +74,6 @@ include ( CheckIncludeFile )
 if (NOT WIN32)
 	# Checking if mincore has unsigned 3-rd param
 	include ( mincore_test )
-	check_include_file ( "execinfo.h" HAVE_EXECINFO_H )
-	check_include_file ( "sys/eventfd.h" HAVE_SYS_EVENTFD_H )
-	check_include_file ( "sys/prctl.h" HAVE_SYS_PRCTL_H )
 	add_lib_for ( getaddrinfo_a anl lextra )
 	add_lib_for ( setsockopt socket lextra )
 	add_lib_for ( getaddrinfo "nsl;socket;resolv" lextra )
@@ -110,7 +87,6 @@ if (NOT WIN32)
 	check_function_exists ( backtrace HAVE_BACKTRACE )
 	check_function_exists ( backtrace_symbols HAVE_BACKTRACE_SYMBOLS )
 	check_function_exists ( mremap HAVE_MREMAP )
-	check_function_exists ( nanosleep HAVE_NANOSLEEP )
 	check_function_exists ( eventfd HAVE_EVENTFD )
 	check_function_exists ( kqueue HAVE_KQUEUE )
 	check_function_exists ( pthread_getname_np HAVE_PTHREAD_GETNAME_NP )
@@ -138,7 +114,6 @@ if (STATIC_BINARY)
 	# options for clang/gcc c and c++
 	target_compile_options ( lextra INTERFACE $<${ONLYGNUCLANGC_CXX}:-static> )
 	set ( HAVE_DLOPEN 0 CACHE BOOL "" FORCE )
-	set ( HAVE_DLERROR 0 CACHE BOOL "" FORCE )
 	set ( HAVE_GETADDRINFO_A 0 CACHE BOOL "" FORCE )
 	set ( WITH_ODBC 0 CACHE BOOL "" FORCE )
 	set ( WITH_MYSQL 0 CACHE BOOL "" FORCE )
@@ -154,19 +129,12 @@ elseif (NOT WIN32)
 	endif ()
 	set ( CMAKE_REQUIRED_LIBRARIES "${CMAKE_DL_LIBS}" )
 	check_symbol_exists ( dlopen "dlfcn.h" HAVE_DLOPEN )
-	check_symbol_exists ( dlerror "dlfcn.h" HAVE_DLERROR )
 else ()
 	set ( HAVE_DLOPEN 1 CACHE BOOL "Use emulated dlopen" FORCE )
-	set ( HAVE_DLERROR 1 CACHE BOOL "Use emulated dlerror" FORCE )
 endif ()
 
 include ( TestBigEndian ) # fixme! That is deprecated in cmake 3.20 in favor to CMAKE_<LANG>_BYTE_ORDER var
 test_big_endian ( USE_BIG_ENDIAN )
-
-check_include_file ( "sys/types.h" HAVE_SYS_TYPES_H )
-check_include_file ( "stdint.h" HAVE_STDINT_H )
-check_include_file ( "inttypes.h" HAVE_INTTYPES_H )
-check_include_file ( "malloc.h" HAVE_MALLOC_H )
 
 target_compile_options ( lextra INTERFACE $<$<COMPILE_LANG_AND_ID:CXX,MSVC>:-D_CRT_SECURE_NO_WARNINGS -wd4996 -wd4706 -wd4244 -wd4702 -wd4577> )
 
@@ -255,6 +223,9 @@ endif ()
 set ( WITH_STEMMER_FORCE_STATIC 1 CACHE BOOL "force to compile stemmer from sources" )
 with_get ( stemmer "Stemmer" "stemming library (Snowball)" )
 
+get_dep ( nlohmann_json NLJSON "JSON for Modern C++ library" )
+get_dep ( uni-algo UniAlgo "unicode algorithm implementation for C/C++" )
+
 # Check for ICU build
 set ( WITH_ICU_FORCE_STATIC 1 CACHE BOOL "force to compile ICU from sources" )
 if (STATIC_BINARY)
@@ -268,12 +239,6 @@ with_menu_comp ( OpenSSL SSL "OpenSSL" "for encrypted networking" )
 win_install_c ( OpenSSL SSL daemon )
 
 trace ( OpenSSL::Crypto )
-
-# Presence of Jemalloc headers
-check_include_file ( "jemalloc/jemalloc.h" HAVE_JEMALLOC_JEMALLOC_H )
-
-# Presence of Valgrind headers
-check_include_file ( "valgrind/valgrind.h" HAVE_VALGRIND_VALGRIND_H )
 
 # Support for ZLIB
 with_menu ( ZLIB "zlib" "for compressed data and networking" )
@@ -321,9 +286,6 @@ win_install ( Mysql indexer )
 with_menu ( PostgreSQL "pgsql" "for indexing postgresql sources with indexer" )
 dl_package ( PostgreSQL "pgsql" )
 win_install ( PostgreSQL indexer )
-
-include(GetNLJSON)
-include(GetUniAlgo)
 
 # Storing compiler version
 set ( COMPILER "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}" )

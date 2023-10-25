@@ -148,10 +148,10 @@ struct Scheduler_i
 	}
 
 	template<typename HANDLER>
-	void Schedule ( HANDLER handler, bool bVip );
+	void Schedule ( HANDLER handler, bool bVip ) noexcept;
 
 	template<typename HANDLER>
-	void ScheduleContinuation ( HANDLER handler );
+	void ScheduleContinuation ( HANDLER handler ) noexcept;
 };
 
 struct SchedulerWithBackend_i: public Scheduler_i
@@ -159,12 +159,19 @@ struct SchedulerWithBackend_i: public Scheduler_i
 	virtual bool SetBackend ( Scheduler_i* pBackend ) = 0;
 };
 
+struct NTasks_t { // snapshot length of Op queue
+	int iPri;
+	int iSec;
+};
+
 struct Worker_i: public Scheduler_i
 {
 	virtual int Works() const = 0;
+	virtual NTasks_t Tasks() const noexcept = 0;
+	virtual int CurTasks() const noexcept = 0;
 	virtual void StopAll () = 0;
 	virtual void DiscardOnFork() {}
-	virtual void IterateChildren ( ThreadFN & fnHandler ) {}
+	virtual void IterateChildren ( ThreadFN & fnHandler ) noexcept {}
 };
 
 using SchedulerSharedPtr_t = SharedPtr_t<Scheduler_i>;
@@ -257,6 +264,7 @@ namespace CrashLogger
 Threads::Worker_i* GlobalWorkPool ();
 void SetMaxChildrenThreads ( int iThreads );
 void StartGlobalWorkPool ();
+void StopGlobalWorkPool();
 
 /// schedule stop of the global thread pool
 void WipeGlobalSchedulerOnShutdownAndFork ();
