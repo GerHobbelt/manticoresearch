@@ -2213,7 +2213,7 @@ bool MinimizeSchema ( CSphSchema & tDst, const ISphSchema & tSrc )
 	return bEqual;
 }
 
-static void CheckQuery ( const CSphQuery & tQuery, CSphString & sError )
+static void CheckQuery ( const CSphQuery & tQuery, CSphString & sError, bool bCanLimitless=false )
 {
 	#define LOC_ERROR( ... ) do { sError.SetSprintf (__VA_ARGS__); return; } while(0)
 
@@ -2231,7 +2231,7 @@ static void CheckQuery ( const CSphQuery & tQuery, CSphString & sError )
 	if ( tQuery.m_iOffset<0 || tQuery.m_iOffset>=tQuery.m_iMaxMatches )
 		LOC_ERROR ( "offset out of bounds (offset=%d, max_matches=%d)", tQuery.m_iOffset, tQuery.m_iMaxMatches );
 
-	if ( tQuery.m_iLimit<0 )
+	if ( tQuery.m_iLimit < ( bCanLimitless ? -1 : 0 ) ) // -1 is magic for 'limitless select'
 		LOC_ERROR ( "limit out of bounds (limit=%d)", tQuery.m_iLimit );
 
 	if ( tQuery.m_iCutoff<-1 )
@@ -5554,8 +5554,9 @@ SphQueueSettings_t SearchHandler_c::MakeQueueSettings ( const CSphIndex * pIndex
 	tQS.m_pHook = pHook;
 	tQS.m_iMaxMatches = GetMaxMatches ( iMaxMatches, pIndex );
 	tQS.m_bNeedDocids = m_bNeedDocIDs;	// need docids to merge results from indexes
-	tQS.m_fnGetCountDistinct = [pIndex]( const CSphString & sAttr ){ return pIndex->GetCountDistinct(sAttr); };
-	tQS.m_fnGetCount = [pIndex]( const CSphFilterSettings & tFilter ){ return pIndex->GetCount(tFilter); };
+	tQS.m_fnGetCountDistinct	= [pIndex]( const CSphString & sAttr ){ return pIndex->GetCountDistinct(sAttr); };
+	tQS.m_fnGetCountFilter		= [pIndex]( const CSphFilterSettings & tFilter ){ return pIndex->GetCountFilter(tFilter); };
+	tQS.m_fnGetCount			= [pIndex](){ return pIndex->GetCount(); };
 	tQS.m_bEnableFastDistinct = m_dLocal.GetLength()<=1;
 	tQS.m_bForceSingleThread = bForceSingleThread;
 	return tQS;
@@ -9256,7 +9257,7 @@ void HandleCommandFlush ( ISphOutputBuffer & tOut, WORD uVer )
 // GENERAL HANDLER
 /////////////////////////////////////////////////////////////////////////////
 
-void HandleCommandSphinxql ( ISphOutputBuffer & tOut, WORD uVer, InputBuffer_c & tReq ); // definition is below
+void HandleCommandSphinxql ( GenericOutputBuffer_c & tOut, WORD uVer, InputBuffer_c & tReq ); // definition is below
 void HandleCommandJson ( ISphOutputBuffer & tOut, WORD uVer, InputBuffer_c & tReq );
 void StatCountCommand ( SearchdCommand_e eCmd );
 void HandleCommandUserVar ( ISphOutputBuffer & tOut, WORD uVer, InputBuffer_c & tReq );
@@ -9279,7 +9280,7 @@ void HandleCommandPing ( ISphOutputBuffer & tOut, WORD uVer, InputBuffer_c & tRe
 }
 
 
-void ExecuteApiCommand ( SearchdCommand_e eCommand, WORD uCommandVer, int iLength, InputBuffer_c & tBuf, ISphOutputBuffer & tOut )
+void ExecuteApiCommand ( SearchdCommand_e eCommand, WORD uCommandVer, int iLength, InputBuffer_c & tBuf, GenericOutputBuffer_c & tOut )
 {
 	auto & tSess = session::Info();
 	tSess.SetTaskState ( TaskState_e::QUERY );
@@ -12864,26 +12865,22 @@ void sphHandleMysqlUpdate ( StmtErrorReporter_i & tOut, const SqlStmt_t & tStmt,
 bool HandleMysqlSelect ( RowBuffer_i & dRows, SearchHandler_c & tHandler )
 {
 	// lets check all query for errors
-	CSphString sError;
+	StringBuilder_c sError { "; " };
 	CSphVector<int64_t> dAgentTimes; // dummy for error reporting
 	ARRAY_FOREACH ( i, tHandler.m_dQueries )
 	{
-		CheckQuery ( tHandler.m_dQueries[i], tHandler.m_dAggrResults[i].m_sError );
+		CheckQuery ( tHandler.m_dQueries[i], tHandler.m_dAggrResults[i].m_sError, tHandler.m_dQueries.GetLength() == 1 );
 		if ( !tHandler.m_dAggrResults[i].m_sError.IsEmpty() )
 		{
 			LogQuery ( tHandler.m_dQueries[i], tHandler.m_dAggrResults[i], dAgentTimes );
-			if ( sError.IsEmpty() )
-			{
-				if ( tHandler.m_dQueries.GetLength()==1 )
-					sError = tHandler.m_dAggrResults[0].m_sError;
-				else
-					sError.SetSprintf ( "query %d error: %s", i, tHandler.m_dAggrResults[i].m_sError.cstr() );
-			} else
-				sError.SetSprintf ( "%s; query %d error: %s", sError.cstr(), i, tHandler.m_dAggrResults[i].m_sError.cstr() );
+			if ( tHandler.m_dQueries.GetLength()==1 )
+				sError << tHandler.m_dAggrResults[0].m_sError;
+			else
+				sError.Sprintf( "query %d error: %s", i, tHandler.m_dAggrResults[i].m_sError.cstr() );
 		}
 	}
 
-	if ( sError.Length() )
+	if ( !sError.IsEmpty() )
 	{
 		// stmt is intentionally NULL, as we did all the reporting just above
 		dRows.Error ( NULL, sError.cstr() );
@@ -16344,7 +16341,8 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 			if ( m_bFederatedUser )
 				tHandler.SetFederatedUser();
 
-			if ( HandleMysqlSelect ( tOut, tHandler ) )
+			tOut.SomethingWasSent();
+			if ( HandleMysqlSelect ( tOut, tHandler ) && !tOut.SomethingWasSent() )
 			{
 				// query just completed ok; reset out error message
 				m_sError = "";
@@ -16802,7 +16800,7 @@ void session::SaveLastProfile ()
 }
 
 /// sphinxql command over API
-void HandleCommandSphinxql ( ISphOutputBuffer & tOut, WORD uVer, InputBuffer_c & tReq ) REQUIRES (HandlerThread)
+void HandleCommandSphinxql ( GenericOutputBuffer_c & tOut, WORD uVer, InputBuffer_c & tReq ) REQUIRES (HandlerThread)
 {
 	if ( !CheckCommandVersion ( uVer, VER_COMMAND_SPHINXQL, tOut ) )
 		return;
@@ -18526,7 +18524,7 @@ bool SetWatchDog ( int iDevNull ) REQUIRES ( MainThread )
 		if ( eReincarnate!=EFork::Disabled )
 		{
 			sphInfo ( "watchdog: main process %d forked ok", iChild );
-			sprintf ( g_sPid, "%d", iChild);
+			snprintf ( g_sPid, sizeof(g_sPid), "%d", iChild);
 		}
 
 		SetSignalHandlers();
@@ -20262,7 +20260,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	ScheduleFlushAttrs();
 	SetupCompatHttp();
 
-	gStats().m_uStarted = (DWORD)time(NULL);
+	gStats().Init();
 
 	{
 		CSphString sSQLStateDefault;

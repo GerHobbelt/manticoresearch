@@ -532,18 +532,9 @@ void MatchSorter_c::TransformPooled2StandalonePtrs ( GetBlobPoolFromMatch_fn fnB
 	}
 	else
 	{
-		// keep id as the first attribute
-		for ( const CSphString & sName : m_dTransformed )
-			if ( sName==sphGetDocidName() )
-			{
-				tBuilder.AddAttr(sName);
-				break;
-			}
-
-		// add the rest
-		for ( const CSphString & sName : m_dTransformed )
-			if ( sName!=sphGetDocidName() )
-				tBuilder.AddAttr(sName);
+		// keep id as the first attribute, then the rest.
+		m_dTransformed.any_of ( [&tBuilder] ( const auto& sName ) { auto bID = ( sName==sphGetDocidName() ); if ( bID ) tBuilder.AddAttr(sName); return bID; } );
+		m_dTransformed.for_each ( [&tBuilder] ( const auto& sName ) { if ( sName!=sphGetDocidName() ) tBuilder.AddAttr(sName); } );
 	}
 
 	for ( int i = 0; i <pNewSchema->GetAttrsCount(); ++i )
@@ -4456,10 +4447,10 @@ private:
 
 // fast count sorter
 // works by using precalculated count taken from secondary indexes
-class FastCountSorter_c final : public FastBaseSorter_c
+class FastCountFilterSorter_c final : public FastBaseSorter_c
 {
 public:
-	FastCountSorter_c ( int iCount, const CSphGroupSorterSettings & tSettings )
+	FastCountFilterSorter_c ( int iCount, const CSphGroupSorterSettings & tSettings )
 		: FastBaseSorter_c ( tSettings )
 		, m_iCount ( iCount )
 	{}
@@ -4608,6 +4599,7 @@ static inline ESphSortKeyPart Attr2Keypart ( ESphAttr eType )
 struct Precalculated_t
 {
 	int64_t		m_iCountDistinct = -1;
+	int64_t		m_iCountFilter = -1;
 	int64_t		m_iCount = -1;
 };
 
@@ -4634,8 +4626,11 @@ static ISphMatchSorter * sphCreateSorter3rd ( const ISphMatchComparator * pComp,
 	if ( tPrecalc.m_iCountDistinct!=-1 )
 		return new FastCountDistinctSorter_c ( tPrecalc.m_iCountDistinct, tSettings );
 
+	if ( tPrecalc.m_iCountFilter!=-1 )
+		return new FastCountFilterSorter_c ( tPrecalc.m_iCountFilter, tSettings );
+
 	if ( tPrecalc.m_iCount!=-1 )
-		return new FastCountSorter_c ( tPrecalc.m_iCount, tSettings );
+		return new FastCountFilterSorter_c ( tPrecalc.m_iCount, tSettings );
 
 	BYTE uSelector3rd = 8*( tSettings.m_bJson ? 1:0 ) + 4*( pQuery->m_iGroupbyLimit>1 ? 1:0 ) + 2*( tSettings.m_bImplicit ? 1:0 ) + ( ( tSettings.m_pGrouper && tSettings.m_pGrouper->IsMultiValue() ) ? 1:0 );
 	switch ( uSelector3rd )
@@ -4934,6 +4929,7 @@ private:
 	int		GetGroupDistinctAttrIndex() const	{ return GetAliasedAttrIndex ( m_tQuery.m_sGroupDistinct, m_tQuery, *m_pSorterSchema ); }
 
 	bool	CanCalcFastCountDistinct() const;
+	bool	CanCalcFastCountFilter() const;
 	bool	CanCalcFastCount() const;
 	Precalculated_t FetchPrecalculatedValues() const;
 
@@ -6678,10 +6674,17 @@ bool QueueCreator_c::CanCalcFastCountDistinct() const
 }
 
 
-bool QueueCreator_c::CanCalcFastCount() const
+bool QueueCreator_c::CanCalcFastCountFilter() const
 {
 	bool bHasAggregates = PredictAggregates();
 	return !bHasAggregates && m_tGroupSorterSettings.m_bImplicit && !m_tGroupSorterSettings.m_bDistinct && m_tQuery.m_dFilters.GetLength()==1 && m_tQuery.m_sQuery.IsEmpty();
+}
+
+
+bool QueueCreator_c::CanCalcFastCount() const
+{
+	bool bHasAggregates = PredictAggregates();
+	return !bHasAggregates && m_tGroupSorterSettings.m_bImplicit && !m_tGroupSorterSettings.m_bDistinct && m_tQuery.m_dFilters.IsEmpty() && m_tQuery.m_sQuery.IsEmpty();
 }
 
 
@@ -6695,8 +6698,11 @@ Precalculated_t QueueCreator_c::FetchPrecalculatedValues() const
 			tPrecalc.m_iCountDistinct = m_tSettings.m_fnGetCountDistinct ? m_tSettings.m_fnGetCountDistinct ( m_pSorterSchema->GetAttr(iCountDistinctAttr).m_sName ) : -1;
 	}
 
+	if ( CanCalcFastCountFilter() )
+		tPrecalc.m_iCountFilter = m_tSettings.m_fnGetCountFilter ? m_tSettings.m_fnGetCountFilter ( m_tQuery.m_dFilters[0] ) : -1;
+
 	if ( CanCalcFastCount() )
-		tPrecalc.m_iCount = m_tSettings.m_fnGetCount ? m_tSettings.m_fnGetCount ( m_tQuery.m_dFilters[0] ) : -1;
+		tPrecalc.m_iCount = m_tSettings.m_fnGetCount ? m_tSettings.m_fnGetCount() : -1;
 
 	return tPrecalc;
 }
