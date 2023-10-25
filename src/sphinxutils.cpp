@@ -1597,13 +1597,13 @@ bool CSphConfigParser::Parse ()
 void CheckWinInstall()
 {
 	HKEY hKey;
-	LONG iRes = RegOpenKeyExW ( HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Manticore Software LTD\\manticore", 0, KEY_READ, &hKey );
+	LONG iRes = RegOpenKeyExW ( HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Manticore Software LTD", 0, KEY_READ, &hKey );
 	if ( iRes!=ERROR_SUCCESS )
 		return;
 
 	WCHAR szBuffer[512];
 	DWORD uBufferSize = sizeof(szBuffer);
-	iRes = RegQueryValueExW ( hKey, L"", 0, NULL, (LPBYTE)szBuffer, &uBufferSize);
+	iRes = RegQueryValueExW ( hKey, L"manticore", 0, NULL, (LPBYTE)szBuffer, &uBufferSize);
 	if ( iRes!=ERROR_SUCCESS )
 		return;
 
@@ -1627,14 +1627,14 @@ CSphString AppendWinInstallDir ( const CSphString & sDir )
 	sPath1.ToLower();
 	sPath2.ToLower();
 
-	if ( sPath1.Begins ( sPath2.cstr() ) )
+	if ( sPath1.Begins ( sPath2.cstr() ) && sPath1.cstr()[sPath2.Length()]=='/' )
 		return sDir;
 
-	const char * DEFAULT_INSTALL_PATH = "c:/manticore";
+	const char * DEFAULT_INSTALL_PATH = "c:/manticore/";
 	if ( !sPath1.Begins(DEFAULT_INSTALL_PATH) )
 		return sDir;
 
-	CSphString sCut = sPath1.SubString ( strlen(DEFAULT_INSTALL_PATH), sPath1.Length()-strlen(DEFAULT_INSTALL_PATH) );
+	CSphString sCut = sPath1.SubString ( strlen(DEFAULT_INSTALL_PATH)-1, sPath1.Length()-strlen(DEFAULT_INSTALL_PATH)+1 );
 	sCut.SetSprintf ( "%s%s", sPath2.cstr(), sCut.cstr() );
 	return sCut;
 }

@@ -3,14 +3,13 @@
 ### Supported releases:
 
 * Debian
-  * 9.0 (Stretch)
   * 10.0 (Buster)
   * 11.0 (Bullseye)
+  * 12.0 (Bookworm)
 
 * Ubuntu
-  * 16.04 LTS (Xenial)
-  * 18.04 LTS (Bionic)
-  * 20.04 LTS (Focal)
+  * 18.04 (Bionic)
+  * 20.04 (Focal)
   * 21.04 (Hirsute Hippo)
   * 22.04 (Ubuntu Jammy)
 
@@ -34,7 +33,7 @@ Then install Manticore Search:
 sudo apt install manticore manticore-extra
 ```
 
-If you are upgrading to Manticore version 5 or higher it's recommended to remove all the old Manticore packages before you install the new ones since package structure got changed in version 5.0.0:
+If you are upgrading to Manticore 6 from an older version, it is recommended to remove your old packages first to avoid conflicts caused by the updated package structure:
 
 ```bash
 sudo apt remove manticore*
@@ -52,7 +51,7 @@ sudo apt install manticore manticore-extra manticore-server-core-dbgsym manticor
 ```
 
 ### Standalone DEB packages
-You can also download individual .deb files from [our site](https://manticoresearch.com/install/).
+To download standalone DEB files from the Manticore repository, follow the instructions available at https://manticoresearch.com/install/.
 
 ### More packages you may need
 #### For indexer
@@ -79,14 +78,14 @@ Below is a reference table with list of all the client libraries for different D
 | Distr | MySQL | PostgreSQL | XMLpipe | UnixODBC |
 | - | - | - | - | - |
 |  Ubuntu Trusy  |  libmysqlclient.so.18   |  libpq.so.5  | libexpat.so.1 |  libodbc.so.1 |
-|  Ubuntu Xenial  |  libmysqlclient.so.20   |  libpq.so.5  | libexpat.so.1 |  libodbc.so.2 |
 |  Ubuntu Bionic  |  libmysqlclient.so.20   |  libpq.so.5  | libexpat.so.1 |  libodbc.so.2 |
 |  Ubuntu Focal  |  libmysqlclient.so.21   |  libpq.so.5  | libexpat.so.1 |  libodbc.so.2 |
 |  Ubuntu Hirsute  |  libmysqlclient.so.21   |  libpq.so.5  | libexpat.so.1 |  libodbc.so.2 |
 |  Ubuntu Jammy  |  libmysqlclient.so.21   |  libpq.so.5  | libexpat.so.1 |  libodbc.so.2 |
 |  Debian Jessie  | libmysqlclient.so.18    |  libpq.so.5  | libexpat.so.1 |  libodbc.so.2 |
-|  Debian Stretch  | libmariadbclient.so.18 |  libpq.so.5  | libexpat.so.1 |  libodbc.so.2 |
 |  Debian Buster  |  libmariadb.so.3        |  libpq.so.5  | libexpat.so.1 |  libodbc.so.2 |
+|  Debian Bullseye  |  libmariadb.so.3        |  libpq.so.5  | libexpat.so.1 |  libodbc.so.2 |
+|  Debian Bookworm  |  libmariadb.so.3        |  libpq.so.5  | libexpat.so.1 |  libodbc.so.2 |
 
 To find packages that provide the libraries you can use, for example `apt-file`:
 

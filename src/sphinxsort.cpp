@@ -2816,6 +2816,16 @@ public:
 		// we can do it later after all sorters are merged
 		FinalizeMatches ( !bCopyMeta );
 
+		// matches in dRhs are using a new (standalone) schema
+		// however, some supposedly unused matches still have old schema
+		// they were not cleared immediately for performance reasons
+		// we need to do that now
+		for ( int i = dRhs.m_dIData.GetLength(); i < dRhs.m_dData.GetLength(); i++ )
+		{
+			int iId = *(dRhs.m_dIData.Begin()+i);
+			dRhs.m_dData[iId].ResetDynamic();
+		}
+
 		dRhs.m_bUpdateDistinct = !bUniqUpdated;
 		dRhs.SetMerge(true);
 
@@ -2827,6 +2837,12 @@ public:
 
 		dRhs.m_bUpdateDistinct = true;
 		dRhs.SetMerge(false);
+
+		// once we're done copying, cleanup
+		for ( int i = 0; i<m_iMaxUsed; ++i )
+			m_dData[i].ResetDynamic();
+
+		m_iMaxUsed = -1;
 	}
 
 	void Finalize ( MatchProcessor_i & tProcessor, bool, bool bFinalizeMatches ) override
