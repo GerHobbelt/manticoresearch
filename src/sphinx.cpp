@@ -644,7 +644,7 @@ bool CSphTokenizerIndex::GetKeywords ( CSphVector <CSphKeywordInfo> & dKeywords,
 
 	if ( m_tSettings.m_bIndexExactWords )
 	{
-		pTokenizer->AddPlainChars ( "=" );
+		pTokenizer->AddSpecials ( "=" );
 		SetupExactDict ( pDict );
 	}
 
@@ -2627,6 +2627,8 @@ bool CSphIndex_VLN::AddRemoveAttribute ( bool bAddAttr, const AttrAddRemoveCtx_t
 	int64_t iNewMinMaxIndex = m_iDocinfo * iNewStride;
 
 	BuildHeader_t tBuildHeader ( m_tStats );
+	tBuildHeader.m_iDocinfo = m_iDocinfo;
+	tBuildHeader.m_iDocinfoIndex = m_iDocinfoIndex;
 	tBuildHeader.m_iMinMaxIndex = iNewMinMaxIndex;
 
 	*(DictHeader_t*)&tBuildHeader = *(DictHeader_t*)&m_tWordlist;
@@ -3867,6 +3869,7 @@ void operator<< ( JsonEscapedBuilder& tOut, const CSphIndexSettings& tSettings )
 	tOut.NamedValNonDefault ( "skiplist_block_size", tSettings.m_iSkiplistBlockSize, 32 );
 	tOut.NamedStringNonEmpty ( "hitless_files", tSettings.m_sHitlessFiles );
 	tOut.NamedValNonDefault ( "engine", (DWORD)tSettings.m_eEngine, (DWORD)AttrEngine_e::DEFAULT );
+	tOut.NamedValNonDefault ( "engine_default", (DWORD)tSettings.m_eDefaultEngine, (DWORD)AttrEngine_e::ROWWISE );
 }
 
 void IndexWriteHeader ( const BuildHeader_t & tBuildHeader, const WriteHeader_t & tWriteHeader, JsonEscapedBuilder& sJson, bool bForceWordDict, bool SkipEmbeddDict )
@@ -8226,7 +8229,8 @@ bool CSphIndex_VLN::MultiScan ( CSphQueryResult & tResult, const CSphQuery & tQu
 		}
 	}
 
-	tMeta.m_bTotalMatchesApprox = bCutoffHit;
+	bool bAllPrecalc = dSorters.GetLength() && dSorters.all_of ( []( auto pSorter ){ return pSorter->IsPrecalc(); } );
+	tMeta.m_bTotalMatchesApprox = bCutoffHit && !bAllPrecalc;
 
 	SwitchProfile ( tMeta.m_pProfile, SPH_QSTATE_FINALIZE );
 
@@ -8608,6 +8612,7 @@ void LoadIndexSettingsJson ( bson::Bson_c tNode, CSphIndexSettings & tSettings )
 	tSettings.m_iSkiplistBlockSize = (int)Int ( tNode.ChildByName ( "skiplist_block_size" ), 32 );
 	tSettings.m_sHitlessFiles = String ( tNode.ChildByName ( "hitless_files" ) );
 	tSettings.m_eEngine = (AttrEngine_e)Int ( tNode.ChildByName ( "engine" ), (DWORD)AttrEngine_e::DEFAULT );
+	tSettings.m_eDefaultEngine = (AttrEngine_e)Int ( tNode.ChildByName ( "engine_default" ), (DWORD)AttrEngine_e::ROWWISE );
 }
 
 
@@ -9594,7 +9599,7 @@ bool CSphQueryContext::SetupCalc ( CSphQueryResultMeta & tMeta, const ISphSchema
 				tCalc.m_eType = tIn.m_eAttrType;
 				tCalc.m_tLoc = tIn.m_tLocator;
 				tCalc.m_pExpr = std::move(pExpr);
-				tCalc.m_pExpr->Command ( SPH_EXPR_SET_BLOB_POOL, (void*)&pBlobPool );
+				tCalc.m_pExpr->Command ( SPH_EXPR_SET_BLOB_POOL, (void*)pBlobPool );
 				tCalc.m_pExpr->Command ( SPH_EXPR_SET_COLUMNAR, (void*)pColumnar );
 
 				switch ( eStage )
@@ -9776,7 +9781,7 @@ bool CSphIndex_VLN::DoGetKeywords ( CSphVector <CSphKeywordInfo> & dKeywords, co
 
 	bool bWordDict = pDict->GetSettings ().m_bWordDict;
 
-	TokenizerRefPtr_c pTokenizer = m_pTokenizer->Clone ( SPH_CLONE_INDEX );
+	TokenizerRefPtr_c pTokenizer = m_pQueryTokenizer->Clone ( SPH_CLONE );
 	pTokenizer->EnableTokenizedMultiformTracking ();
 
 	// need to support '*' and '=' but not the other specials
@@ -9784,7 +9789,7 @@ bool CSphIndex_VLN::DoGetKeywords ( CSphVector <CSphKeywordInfo> & dKeywords, co
 	if ( IsStarDict ( bWordDict ) )
 		pTokenizer->AddPlainChars ( "*" );
 	if ( m_tSettings.m_bIndexExactWords )
-		pTokenizer->AddPlainChars ( "=" );
+		pTokenizer->AddSpecials ( "=" );
 
 	if ( !m_tSettings.m_sIndexTokenFilter.IsEmpty() )
 	{
@@ -9899,7 +9904,7 @@ static int sphQueryHeightCalc ( const XQNode_t * pNode )
 }
 #if defined( __clang__ )
 #if defined( __x86_64__ )
-#define SPH_EXTNODE_STACK_SIZE ( 0x130 )
+#define SPH_EXTNODE_STACK_SIZE ( 0x140 )
 #elif defined ( __ARM_ARCH_ISA_A64 )
 #define SPH_EXTNODE_STACK_SIZE ( 0x160 )
 #endif
@@ -9948,7 +9953,8 @@ static XQNode_t * ExpandKeyword ( XQNode_t * pNode, const CSphIndexSettings & tS
 
 	if ( tSettings.m_bIndexExactWords && ( iExpandKeywords & KWE_MORPH_NONE )==KWE_MORPH_NONE )
 	{
-		pNode->m_dWords[0].m_sWord.SetSprintf ( "=%s", pNode->m_dWords[0].m_sWord.cstr() );
+		if ( !pNode->m_dWords[0].m_sWord.Begins( "=" ) )
+			pNode->m_dWords[0].m_sWord.SetSprintf ( "=%s", pNode->m_dWords[0].m_sWord.cstr() );
 		return pNode;
 	}
 
@@ -9978,7 +9984,13 @@ static XQNode_t * ExpandKeyword ( XQNode_t * pNode, const CSphIndexSettings & tS
 		assert ( pNode->m_dChildren.GetLength()==0 );
 		assert ( pNode->m_dWords.GetLength()==1 );
 		XQNode_t * pExact = CloneKeyword ( pNode );
-		pExact->m_dWords[0].m_sWord.SetSprintf ( "=%s", pNode->m_dWords[0].m_sWord.cstr() );
+		if ( pNode->m_dWords[0].m_sWord.Begins( "=" ) )
+		{
+			pExact->m_dWords[0].m_sWord = pNode->m_dWords[0].m_sWord;
+		} else
+		{
+			pExact->m_dWords[0].m_sWord.SetSprintf ( "=%s", pNode->m_dWords[0].m_sWord.cstr() );
+		}
 		pExact->m_pParent = pExpand;
 		pExpand->m_dChildren.Add ( pExact );
 	}

@@ -18972,12 +18972,17 @@ void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile, bool bTestMo
 	{
 		g_iTFO &= ~TFO_LISTEN;
 	}
+
+	bool bLocaleSet = false;
 	if ( hSearchd ( "collation_libc_locale" ) )
 	{
 		auto sLocale = hSearchd.GetStr ( "collation_libc_locale" );
-		if ( !setlocale ( LC_COLLATE, sLocale.cstr() ) )
+		bLocaleSet = setlocale ( LC_COLLATE, sLocale.cstr() );
+		if ( !bLocaleSet )
 			sphWarning ( "setlocale failed (locale='%s')", sLocale.cstr() );
 	}
+	CSphString sLoc = setlocale ( LC_COLLATE, nullptr );
+	SetLocale( sLoc, bLocaleSet );
 
 	if ( hSearchd ( "collation_server" ) )
 	{
@@ -19082,6 +19087,13 @@ void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile, bool bTestMo
 
 	g_bSplit = hSearchd.GetInt ( "pseudo_sharding", 1 )!=0;
 	SetOptionSI ( hSearchd, bTestMode );
+
+	CSphString sWarning;
+	AttrEngine_e eEngine = AttrEngine_e::DEFAULT;
+	if ( StrToAttrEngine ( eEngine, AttrEngine_e::ROWWISE, hSearchd.GetStr("engine"), sWarning ) )
+		SetDefaultAttrEngine(eEngine);
+	else
+		sphWarning ( "%s", sWarning.cstr() );
 
 	g_bHasBuddyPath = hSearchd.Exists ( "buddy_path" );
 	g_sBuddyPath = hSearchd.GetStr ( "buddy_path" );
