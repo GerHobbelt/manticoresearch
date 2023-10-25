@@ -11,10 +11,13 @@
 * Query optimizer now works for fulltext queries
 
 ### Minor changes
+* Queries using `count(*)` with a single filter now utilize precalculated data from secondary indexes (if available), resulting in significantly faster query times.
 * Added [UINT64()](../Functions/Type_casting_functions.md#UINT64%28%29) type conversion function.
 * String fields/attributes that are both `indexed` and `attribute` are now treated as a single field on `INSERT`, `DESC` and `ALTER`.
 * Field and attribute order is now consistent between `SHOW CREATE TABLE` and `DESC`.
 * When executing `INSERT` queries and running out of disk space to write binlog entries, new `INSERT` queries will fail until there's enough free disk space available.
+* [Issue #1062](https://github.com/manticoresoftware/manticoresearch/issues/1062) The `/bulk` endpoint reports information regarding the number of processed and non-processed strings (documents) in case of an error.
+* The `/bulk` endpoint processes empty lines as a [commit](../Data_creation_and_modification/Transactions.md#BEGIN,-COMMIT,-and-ROLLBACK) command. 
 
 ### Behaviour changes
 * **⚠️ BREAKING CHANGE** Document IDs are now treated as unsigned 64-bit integers on indexing and INSERT.
@@ -40,6 +43,7 @@ Released: soon
 * [Commit e7f9](https://github.com/manticoresoftware/manticoresearch/commit/e7f9815) Added buddy version to startup log entry
 * [Commit fdd9](https://github.com/manticoresoftware/manticoresearch/commit/fdd9087) Fixed compat mode to pass errors into buddy
 * [Commit 1912](https://github.com/manticoresoftware/manticoresearch/commit/1912b3c) Added compatibility mode to work with Logstash, Beat and Kibana
+* [Commit 3b53](https://github.com/manticoresoftware/manticoresearch/commit/3b5385a) Fixed daemon crash on buddy restart
 
 # Version 6.0.2
 Released: Feb 10 2023
