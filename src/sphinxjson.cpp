@@ -1446,16 +1446,30 @@ bool sphJsonStringToNumber ( const char * s, int iLen, ESphJsonType &eType, int6
 
 //////////////////////////////////////////////////////////////////////////
 
+#if DISABLE_MEMROUTINES
 static void * cJsonMalloc ( size_t uSize )
+{
+	return malloc (uSize);
+}
+
+static void cJsonFree ( void * pPtr )
+{
+	free ( pPtr );
+}
+
+#else
+
+static void* cJsonMalloc ( size_t uSize )
 {
 	return new BYTE[uSize];
 }
 
-
-static void cJsonFree ( void * pPtr )
+static void cJsonFree ( void* pPtr )
 {
-	delete [] (BYTE *)pPtr;
+	delete[] (BYTE*)pPtr;
 }
+
+#endif
 
 
 void sphInitCJson()
@@ -1953,7 +1967,7 @@ CSphString JsonObj_c::AsString ( bool bFormat ) const
 			szResult = cJSON_PrintUnformatted ( m_pRoot );
 
 		CSphString sResult ( szResult );
-		SafeDeleteArray ( szResult );
+		cJsonFree ( szResult );
 		return sResult;
 	}
 
@@ -2840,7 +2854,12 @@ void Bson_c::ForSome ( CondNamedAction_f&& fAction ) const
 	bson::ForSome ( m_dData, std::move ( fAction ) );
 }
 
-bool Bson_c::BsonToJson ( CSphString &sResult ) const
+bool Bson_c::BsonToJson ( CSphString & sResult ) const
+{
+	return BsonToJson ( sResult, true );
+}
+
+bool Bson_c::BsonToJson ( CSphString & sResult, bool bQuot ) const
 {
 	JsonEscapedBuilder sBuilder;
 	if ( !m_dData.first )
@@ -2850,7 +2869,7 @@ bool Bson_c::BsonToJson ( CSphString &sResult ) const
 	if ( m_dData.second==JSON_EOF )
 		sBuilder << "{}";
 	else
-		sphJsonFieldFormat ( sBuilder, m_dData.first, m_dData.second );
+		sphJsonFieldFormat ( sBuilder, m_dData.first, m_dData.second, bQuot );
 
 	sBuilder.MoveTo ( sResult );
 	return true;
