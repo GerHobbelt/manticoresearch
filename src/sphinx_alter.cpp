@@ -450,6 +450,11 @@ bool IndexAlterHelper_c::Alter_AddRemoveFieldFromSchema ( bool bAdd, CSphSchema 
 {
 	if ( bAdd )
 	{
+		if ( tSchema.GetFieldsCount() >= SPH_MAX_FIELDS )
+		{
+			sError.SetSprintf ( "Can not alter: index can't have more than %d full-text fields.", SPH_MAX_FIELDS );
+			return false;
+		}
 		CSphColumnInfo tField;
 		tField.m_sName = sFieldName;
 		tField.m_uFieldFlags = uFieldFlags;
@@ -460,11 +465,6 @@ bool IndexAlterHelper_c::Alter_AddRemoveFieldFromSchema ( bool bAdd, CSphSchema 
 	else
 	{
 		auto iIdx = tSchema.GetFieldIndex ( sFieldName.cstr () );
-		if ( iIdx>=0 && tSchema.GetFieldsCount()==1 )
-		{
-			sError.SetSprintf ("Unable to delete last field from the index");
-			return false;
-		}
 		tSchema.RemoveField ( iIdx );
 		return true;
 	}
