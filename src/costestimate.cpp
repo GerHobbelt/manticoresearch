@@ -16,7 +16,63 @@
 #include "columnarfilter.h"
 #include "secondarylib.h"
 #include <math.h>
+#include "std/sys.h"
 
+
+static float EstimateMTCost ( float fCost, int iThreads, float fKPerf, float fBPerf )
+{
+	if ( iThreads==1 )
+		return fCost;
+
+	int iMaxThreads = GetNumLogicalCPUs();
+	float fMaxPerfCoeff = fKPerf*iMaxThreads + fBPerf;
+	float fMinCost = fCost/fMaxPerfCoeff;
+
+	if ( iThreads==iMaxThreads )
+		return fMinCost;
+
+	const float fX1 = 1.0f;
+	float fX2 = iMaxThreads;
+	float fY1 = fCost;
+	float fY2 = fMinCost;
+
+	// cost = A/sqrt(num_threads) + B
+	float fA = ( fY2-fY1 ) / ( 1.0f/float(sqrt(fX2)) - 1.0f/float(sqrt(fX1)) );
+	float fB = fY1 - fA / float(sqrt(fX1));
+	float fX = iThreads;
+	float fY = fA/float(sqrt(fX)) + fB;
+
+	return fY;
+}
+
+
+float EstimateMTCost ( float fCost, int iThreads )
+{
+	const float fKPerf = 0.16f;
+	const float fBPerf = 1.38f;
+
+	return EstimateMTCost ( fCost, iThreads, fKPerf, fBPerf );
+}
+
+
+float EstimateMTCostSI ( float fCost, int iThreads )
+{
+	const float fKPerf = 0.10f;
+	const float fBPerf = 1.56f;
+
+	return EstimateMTCost ( fCost, iThreads, fKPerf, fBPerf );
+}
+
+
+float EstimateMTCostSIFT ( float fCost, int iThreads )
+{
+	const float fKPerf = 0.235f;
+	const float fBPerf = 1.25f;
+
+	return EstimateMTCost ( fCost, iThreads, fKPerf, fBPerf );
+}
+
+/////////////////////////////////////////////////////////////////////
 
 class CostEstimate_c : public CostEstimate_i
 {
@@ -36,12 +92,11 @@ private:
 	static constexpr float COST_FILTER					= 8.5f;
 	static constexpr float COST_COLUMNAR_FILTER			= 4.0f;
 	static constexpr float COST_INTERSECT				= 5.0f;
-	static constexpr float COST_INDEX_READ_SINGLE		= 1.5f;
-	static constexpr float COST_INDEX_READ_DENSE_BITMAP	= 1.5f;
-	static constexpr float COST_INDEX_READ_SPARSE		= 30.0f;
+	static constexpr float COST_INDEX_READ_SINGLE		= 4.0f;
+	static constexpr float COST_INDEX_READ_BITMAP		= 4.5f;
 	static constexpr float COST_INDEX_UNION_COEFF		= 4.0f;
 	static constexpr float COST_LOOKUP_READ				= 20.0f;
-	static constexpr float COST_INDEX_ITERATOR_INIT		= 150.0f;
+	static constexpr float COST_INDEX_ITERATOR_INIT		= 30.0f;
 
 	const CSphVector<SecondaryIndexInfo_t> &	m_dSIInfo;
 	const SelectIteratorCtx_t &					m_tCtx;
@@ -53,8 +108,7 @@ private:
 	static float	Cost_PushImplicitGroupby ( int64_t iDocs )				{ return COST_PUSH_IG*iDocs*SCALE; }
 	static float	Cost_Intersect ( int64_t iDocs )						{ return COST_INTERSECT*iDocs*SCALE; }
 	static float	Cost_IndexReadSingle ( int64_t iDocs )					{ return COST_INDEX_READ_SINGLE*iDocs*SCALE; }
-	static float	Cost_IndexReadDenseBitmap ( int64_t iDocs )				{ return COST_INDEX_READ_DENSE_BITMAP*iDocs*SCALE; }
-	static float	Cost_IndexReadSparse ( int64_t iDocs )					{ return COST_INDEX_READ_SPARSE*iDocs*SCALE; }
+	static float	Cost_IndexReadBitmap ( int64_t iDocs )					{ return COST_INDEX_READ_BITMAP*iDocs*SCALE; }
 	static float	Cost_IndexUnionQueue ( int64_t iDocs )					{ return COST_INDEX_UNION_COEFF*iDocs*log2f(iDocs)*SCALE; }
 	static float	Cost_LookupRead ( int64_t iDocs )						{ return COST_LOOKUP_READ*iDocs*SCALE; }
 	static float	Cost_IndexIteratorInit ( int64_t iNumIterators )		{ return COST_INDEX_ITERATOR_INIT*iNumIterators*SCALE; }
@@ -65,6 +119,7 @@ private:
 	float	CalcLookupCost() const;
 	float	CalcPushCost ( float fDocsAfterFilters ) const;
 	float	CalcMTCost ( float fCost ) const;
+	float	CalcMTCostSI ( float fCost ) const;
 
 	float	CalcGetFilterComplexity ( const SecondaryIndexInfo_t & tSIInfo, const CSphFilterSettings & tFilter ) const;
 	bool	NeedBitmapUnion ( const CSphFilterSettings & tFilter, int64_t iRsetSize ) const;
@@ -92,13 +147,6 @@ bool CostEstimate_c::NeedBitmapUnion ( const CSphFilterSettings & tFilter, int64
 	}
 
 	return tFilter.m_eType==SPH_FILTER_FLOATRANGE;
-}
-
-
-static bool IsSingleValueFilter ( const CSphFilterSettings & tFilter )
-{
-	return  ( tFilter.m_eType==SPH_FILTER_VALUES && tFilter.m_dValues.GetLength()==1 ) ||
-			( tFilter.m_eType==SPH_FILTER_STRING && tFilter.m_dStrings.GetLength()==1 );
 }
 
 
@@ -139,16 +187,10 @@ float CostEstimate_c::CalcIndexCost() const
 			if ( uNumIterators>1 && !NeedBitmapUnion ( tFilter, iDocs ) )
 				fCost += Cost_IndexUnionQueue(iDocs);
 
-			const int COST_THRESH = 1024;
-			if ( iDocs/uNumIterators < COST_THRESH )
-				fCost += Cost_IndexReadSparse(iDocs);
+			if ( uNumIterators==1 )
+				fCost += Cost_IndexReadSingle(iDocs);
 			else
-			{
-				if ( IsSingleValueFilter(tFilter) )
-					fCost += Cost_IndexReadSingle(iDocs);
-				else
-					fCost += Cost_IndexReadDenseBitmap(iDocs);
-			}
+				fCost += Cost_IndexReadBitmap(iDocs);
 
 			fCost += Cost_IndexIteratorInit(uNumIterators);
 		}
@@ -206,14 +248,12 @@ float CostEstimate_c::CalcFilterCost ( bool bFromIterator, float fDocsAfterIndex
 		}
 		else
 		{
-			int64_t iDocs = ApplyCutoff ( tSIInfo.m_iRsetEstimate );
-
 			if ( tFilter.m_eType==SPH_FILTER_STRING || tFilter.m_eType==SPH_FILTER_STRING_LIST )
 				fCost += Cost_Filter ( m_tCtx.m_iTotalDocs, fFilterComplexity );
 			else
 			{
-				// the idea is that block filter rejects most docs and 50% of the remaining docs are filtered out
-				fCost += Cost_Filter ( Min ( iDocs*2, m_tCtx.m_iTotalDocs ), fFilterComplexity );
+				int64_t iDocsToFilter = int64_t ( (float)ApplyCutoff ( tSIInfo.m_iRsetEstimate ) * m_tCtx.m_iTotalDocs / ( tSIInfo.m_iRsetEstimate + 1 ) );
+				fCost += Cost_Filter ( iDocsToFilter, fFilterComplexity );
 				fCost += Cost_BlockFilter ( m_tCtx.m_iTotalDocs, fFilterComplexity );
 			}
 		}
@@ -239,16 +279,16 @@ float CostEstimate_c::CalcAnalyzerCost() const
 		m_tCtx.m_pColumnar->GetAttrInfo ( tFilter.m_sAttrName.cstr(), tAttrInfo );
 
 		float fFilterComplexity = CalcGetFilterComplexity ( tSIInfo, tFilter );
+		int64_t iDocsBeforeFilter = tSIInfo.m_iPartialColumnarMinMax==-1 ? m_tCtx.m_iTotalDocs : std::min ( tSIInfo.m_iPartialColumnarMinMax, m_tCtx.m_iTotalDocs );
 
 		// filters that process but reject values are 2x faster
-		int64_t iDocsBeforeFilter = tSIInfo.m_iPartialColumnarMinMax==-1 ? m_tCtx.m_iTotalDocs : std::min ( tSIInfo.m_iPartialColumnarMinMax, m_tCtx.m_iTotalDocs );
 		float fAcceptCoeff = std::min ( float(tSIInfo.m_iRsetEstimate)/iDocsBeforeFilter, 1.0f ) / 2.0f + 0.5f;
 		float fTotalCoeff = fFilterComplexity*tAttrInfo.m_fComplexity*fAcceptCoeff;
 
-		int64_t iDocsAfterCutoff = ApplyCutoff ( m_tCtx.m_iTotalDocs );
+		int64_t iDocsToFilter = int64_t ( (float)ApplyCutoff ( tSIInfo.m_iRsetEstimate ) * m_tCtx.m_iTotalDocs / ( tSIInfo.m_iRsetEstimate + 1 ) );
 
 		if ( tSIInfo.m_iPartialColumnarMinMax==-1 ) // no minmax? scan whole index
-			fCost += Cost_ColumnarFilter ( iDocsAfterCutoff, fTotalCoeff );
+			fCost += Cost_ColumnarFilter ( iDocsToFilter, fTotalCoeff );
 		else
 		{
 			// minmax tree eval
@@ -256,7 +296,12 @@ float CostEstimate_c::CalcAnalyzerCost() const
 			int iMatchingNodes = ( tSIInfo.m_iRsetEstimate + MINMAX_NODE_SIZE - 1 ) / MINMAX_NODE_SIZE;
 			int iTreeLevels = sphLog2 ( m_tCtx.m_iTotalDocs );
 			fCost += Cost_Filter ( iMatchingNodes*iTreeLevels, fFilterComplexity );
-			fCost += Cost_ColumnarFilter ( std::min ( tSIInfo.m_iPartialColumnarMinMax, iDocsAfterCutoff ), fTotalCoeff );
+
+			const float MINMAX_RATIO = 0.9f;
+			if ( (float)tSIInfo.m_iPartialColumnarMinMax / m_tCtx.m_iTotalDocs >= MINMAX_RATIO )
+				fCost += Cost_ColumnarFilter ( iDocsToFilter, fTotalCoeff );
+			else
+				fCost += Cost_ColumnarFilter ( std::min ( iDocsBeforeFilter, iDocsToFilter ), fTotalCoeff );
 		}
 	}
 
@@ -289,31 +334,13 @@ float CostEstimate_c::CalcPushCost ( float fDocsAfterFilters ) const
 
 float CostEstimate_c::CalcMTCost ( float fCost ) const
 {
-	if ( m_tCtx.m_iThreads==1 )
-		return fCost;
+	return EstimateMTCost ( fCost, m_tCtx.m_iThreads );
+}
 
-	int iMaxThreads = sphCpuThreadsCount();
 
-	const float fKPerf = 0.16f;
-	const float fBPerf = 1.38f;
-
-	float fMaxPerfCoeff = fKPerf*iMaxThreads + fBPerf;
-	float fMinCost = fCost/fMaxPerfCoeff;
-
-	if ( m_tCtx.m_iThreads==iMaxThreads )
-		return fMinCost;
-
-	const float fX1 = 1.0f;
-	float fX2 = iMaxThreads;
-	float fY1 = fCost;
-	float fY2 = fMinCost;
-
-	float fA = ( fY2-fY1 ) / ( 1.0f/float(sqrt(fX2)) - 1.0f/float(sqrt(fX1)) );
-	float fB = fY1 - fA / float(sqrt(fX1));
-	float fX = m_tCtx.m_iThreads;
-	float fY = fA/float(sqrt(fX)) + fB;
-
-	return fY;
+float CostEstimate_c::CalcMTCostSI ( float fCost ) const
+{
+	return EstimateMTCostSI ( fCost, m_tCtx.m_iThreads );
 }
 
 
@@ -385,8 +412,8 @@ float CostEstimate_c::CalcQueryCost()
 	if ( m_tCtx.m_bCalcPushCost )
 		fCost += CalcPushCost(fDocsAfterFilters);
 
-	if ( !iNumIndexes && !iNumLookups ) // SI and docid lookups always run in a single thread
-		fCost = CalcMTCost(fCost);
+	if ( !iNumLookups ) // docid lookups always run in a single thread
+		fCost = iNumIndexes ? CalcMTCostSI(fCost) : CalcMTCost(fCost);
 
 	return fCost;
 }

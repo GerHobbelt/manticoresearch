@@ -52,6 +52,7 @@
 #include "tracer.h"
 #include "netfetch.h"
 #include "queryfilter.h"
+#include "pseudosharding.h"
 
 // services
 #include "taskping.h"
@@ -66,6 +67,7 @@
 #include "coroutine.h"
 #include "dynamic_idx.h"
 #include "searchdbuddy.h"
+#include "detail/indexlink.h"
 
 extern "C"
 {
@@ -162,8 +164,6 @@ static bool				g_bJsonConfigLoadedOk = false;
 static auto&			g_iAutoOptimizeCutoffMultiplier = AutoOptimizeCutoffMultiplier();
 static constexpr bool	AUTOOPTIMIZE_NEEDS_VIP = false; // whether non-VIP can issue 'SET GLOBAL auto_optimize = X'
 static constexpr bool	THREAD_EX_NEEDS_VIP = false; // whether non-VIP can issue 'SET GLOBAL auto_optimize = X'
-
-static bool				g_bSplit = true;
 
 static CSphVector<Listener_t>	g_dListeners;
 
@@ -5333,7 +5333,7 @@ private:
 	bool							CreateValidSorters ( VecTraits_T<ISphMatchSorter *> & dSrt, SphQueueRes_t * pQueueRes, VecTraits_T<SearchFailuresLog_c> & dFlr, StrVec_t * pExtra, const CSphIndex* pIndex, const CSphString & sLocal, const char * szParent, ISphExprHook * pHook );
 
 	void							PopulateCountDistinct ( CSphVector<CSphVector<int64_t>> & dCountDistinct ) const;
-	void							CalcMaxThreadsPerIndex ( CSphVector<std::pair<int64_t,int>> & dSplitData, int iConcurrency ) const;
+	int								CalcMaxThreadsPerIndex ( int iConcurrency ) const;
 	void							CalcThreadsPerIndex ( int iConcurrency );
 };
 
@@ -5895,11 +5895,8 @@ void SearchHandler_c::PopulateCountDistinct ( CSphVector<CSphVector<int64_t>> & 
 }
 
 
-void SearchHandler_c::CalcMaxThreadsPerIndex ( CSphVector<std::pair<int64_t,int>> & dSplitData, int iConcurrency ) const
+int SearchHandler_c::CalcMaxThreadsPerIndex ( int iConcurrency ) const
 {
-	dSplitData.Resize ( m_dLocal.GetLength() );
-	dSplitData.Fill ( { -1, 0 } );
-
 	int iNumValid = 0;
 	ARRAY_FOREACH ( i, m_dLocal )
 	{
@@ -5910,9 +5907,7 @@ void SearchHandler_c::CalcMaxThreadsPerIndex ( CSphVector<std::pair<int64_t,int>
 		iNumValid++;
 	}
 
-	int iMaxThreadsPerIndex = iNumValid<iConcurrency ? ( iConcurrency-iNumValid ) + 1 : 1;
-	for ( auto & i : dSplitData )
-		i.second = iMaxThreadsPerIndex;
+	return ::CalcMaxThreadsPerIndex ( iConcurrency, iNumValid );
 }
 
 
@@ -5924,14 +5919,12 @@ void SearchHandler_c::CalcThreadsPerIndex ( int iConcurrency )
 	CSphVector<CSphVector<int64_t>> dCountDistinct;
 	PopulateCountDistinct ( dCountDistinct );
 
-	CSphVector<std::pair<int64_t,int>> dSplitData;
-	CalcMaxThreadsPerIndex ( dSplitData, iConcurrency );
+	int iMaxThreadsPerIndex = CalcMaxThreadsPerIndex ( iConcurrency );
+
+	CSphVector<SplitData_t> dSplitData ( m_dLocal.GetLength() );
 
 	// FIXME! what about PQ?
-	int64_t iTotalMetric = 0;
-	int iSingleSplits = 0;
-	int iMTSplits = 0;
-
+	int iEnabledIndexes = 0;
 	ARRAY_FOREACH ( iLocal, m_dLocal )
 	{
 		const LocalIndex_t & tLocal = m_dLocal[iLocal];
@@ -5939,43 +5932,34 @@ void SearchHandler_c::CalcThreadsPerIndex ( int iConcurrency )
 		if ( !pIndex )
 			continue;
 
+		iEnabledIndexes++;
 		auto & tPSInfo = m_dPSInfo[iLocal];
-
-		if ( g_bSplit || RIdx_c(pIndex)->IsRT() )
+		auto & tSplitData = dSplitData[iLocal];
+		if ( GetPseudoSharding() || RIdx_c(pIndex)->IsRT() )
 		{
 			// do metric calcs
-			auto & tSplitData = dSplitData[iLocal];
-			tPSInfo.m_iMaxThreads = tSplitData.second;
-			int64_t iMetric = RIdx_c ( pIndex )->GetPseudoShardingMetric ( m_dNQueries, dCountDistinct[iLocal], tPSInfo.m_iMaxThreads, tPSInfo.m_bForceSingleThread );
-			if ( iMetric==-1 )
-				iSingleSplits++;
-			else
-			{
-				tSplitData.first = iMetric;
-				iTotalMetric += iMetric;
-				iMTSplits++;
-			}
+			tPSInfo.m_iMaxThreads = iMaxThreadsPerIndex;
+			auto tMetric = RIdx_c ( pIndex )->GetPseudoShardingMetric ( m_dNQueries, dCountDistinct[iLocal], tPSInfo.m_iMaxThreads, tPSInfo.m_bForceSingleThread );
+			assert ( tMetric.first>=0 );
+
+			tSplitData.m_iMetric = tMetric.first;
+			tSplitData.m_iThreadCap = tMetric.second;
 		}
 		else
 		{
 			// don't do metric calcs; we are guaranteed to have one thread
 			// set the 'force single thread' flag to make sure max_matches won't be increased when it is not necessary
 			tPSInfo = { 1, 1, true };
-			iSingleSplits++;
+			tSplitData.m_iThreadCap = 1;
 		}
 	}
 
-	if ( iConcurrency>iSingleSplits+iMTSplits )
+	if ( iConcurrency>iEnabledIndexes )
 	{
-		int iLeft = iConcurrency-iSingleSplits;
-		ARRAY_FOREACH ( i, dSplitData )
-		{
-			const auto & tSplitData = dSplitData[i];
-			if ( tSplitData.first==-1 )
-				continue;
-
-			m_dPSInfo[i].m_iThreads = Max ( (int)round ( double(tSplitData.first) / iTotalMetric * iLeft ), 1 );
-		}
+		IntVec_t dThreads;
+		DistributeThreadsOverIndexes ( dThreads, dSplitData, iConcurrency );
+		ARRAY_FOREACH ( i, dThreads )
+			m_dPSInfo[i].m_iThreads = dThreads[i];
 	}
 }
 
@@ -6579,7 +6563,7 @@ bool SearchHandler_c::ParseSysVar ()
 	{
 		if ( !dSubkeys.IsEmpty () )
 		{
-			bool bSchema = ( dSubkeys.Last ()==".table" );
+			bool bSchema = ( dSubkeys.Last ()==".@table" );
 			bool bValid = true;
 			TableFeeder_fn fnFeed;
 			if ( dSubkeys[0]==".threads" ) // select .. from @@system.threads
@@ -6612,7 +6596,7 @@ bool SearchHandler_c::ParseSysVar ()
 				cServedIndexRefPtr_c pIndex;
 				if ( bSchema )
 				{
-					m_dLocal.First ().m_sName.SetSprintf( "@@system.%s.table", dSubkeys[0].cstr() );
+					m_dLocal.First ().m_sName.SetSprintf( "@@system.%s.@table", dSubkeys[0].cstr() );
 					pIndex = MakeDynamicIndexSchema ( std::move ( fnFeed ) );
 
 				} else {
@@ -6637,13 +6621,13 @@ bool SearchHandler_c::ParseIdxSubkeys ()
 
 	assert ( !dSubkeys.IsEmpty () );
 
-	bool bSchema = ( dSubkeys.GetLength()>1 && dSubkeys.Last ()==".table" );
+	bool bSchema = ( dSubkeys.GetLength()>1 && dSubkeys.Last ()==".@table" );
 	TableFeeder_fn fnFeed;
-	if ( dSubkeys[0]==".table" ) // select .. idx.table
+	if ( dSubkeys[0]==".@table" ) // select .. idx.table
 		fnFeed = [this] ( RowBuffer_i * pBuf ) { HandleMysqlDescribe ( *pBuf, m_pStmt ); };
-	else if ( dSubkeys[0]==".status" ) // select .. idx.status
+	else if ( dSubkeys[0]==".@status" ) // select .. idx.status
 		fnFeed = [this] ( RowBuffer_i * pBuf ) { HandleSelectIndexStatus ( *pBuf, m_pStmt ); };
-	else if ( dSubkeys[0]==".files" ) // select .. from idx.files
+	else if ( dSubkeys[0]==".@files" ) // select .. from idx.files
 		fnFeed = [this] ( RowBuffer_i * pBuf ) { HandleSelectFiles ( *pBuf, m_pStmt ); };
 	else
 	{
@@ -6655,7 +6639,7 @@ bool SearchHandler_c::ParseIdxSubkeys ()
 	cServedIndexRefPtr_c pIndex;
 	if ( bSchema )
 	{
-		m_dLocal.First ().m_sName.SetSprintf ( "%s%s.table", sVar.cstr (), dSubkeys[0].cstr () );
+		m_dLocal.First ().m_sName.SetSprintf ( "%s%s.@table", sVar.cstr (), dSubkeys[0].cstr () );
 		pIndex = MakeDynamicIndexSchema ( std::move ( fnFeed ) );
 	} else
 	{
@@ -14139,7 +14123,7 @@ static bool HandleSetGlobal ( CSphString& sError, const CSphString& sName, int64
 
 	if ( sName == "pseudo_sharding" )
 	{
-		g_bSplit = !!iSetValue;
+		SetPseudoSharding ( !!iSetValue );
 		return true;
 	}
 
@@ -15290,7 +15274,7 @@ void HandleMysqlShowVariables ( RowBuffer_i & dRows, const SqlStmt_t & tStmt )
 			return tBuf;
 		});
 	}
-	dTable.MatchTuplet ( "pseudo_sharding", g_bSplit ? "1" : "0" );
+	dTable.MatchTuplet ( "pseudo_sharding", GetPseudoSharding() ? "1" : "0" );
 
 	switch ( GetSecondaryIndexDefault() )
 	{
@@ -16289,30 +16273,74 @@ ServedIndexRefPtr_c MakeCloneForRotation ( const cServedIndexRefPtr_c& pSource, 
 	return pRes;
 }
 
+bool LockIndex ( const ServedIndex_c& tIdx, CSphIndex* pIdx, CSphString& sError )
+{
+	if ( !g_bOptNoLock && !pIdx->Lock() )
+	{
+		sError.SetSprintf ( "lock: %s", pIdx->GetLastError().cstr() );
+		return false;
+	}
+
+	tIdx.UpdateMass();
+	return true;
+}
+
 static bool LimitedRotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString& sIndex, StrVec_t& dWarnings, CSphString& sError ) EXCLUDES ( MainThread );
 static bool RotateIndexGreedy ( const ServedIndex_c& tServed, const char* szIndex, CSphString& sError ) REQUIRES ( tServed.m_pIndex->Locker() );
 
+static bool SwitchoverIndexSeamless ( const cServedIndexRefPtr_c& pServed, const char* szIndex, const CSphString& sBase, const CSphString& sNewPath, StrVec_t& dWarnings, CSphString& sError ) EXCLUDES ( MainThread );
+static bool SwitchoverIndexGreedy ( CSphIndex* pIdx, const char* szIndex, const CSphString& sBase, const CSphString& sNewPath, StrVec_t& dWarnings, CSphString& sError ) EXCLUDES ( MainThread );
+
 static void HandleMysqlReloadIndex ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, CSphString & sWarning )
 {
-	CSphString sError;
+	// preflight check
 	cServedIndexRefPtr_c pServed = GetServed ( tStmt.m_sIndex );
 	if ( !pServed )
-	{
-		tOut.ErrorEx ( tStmt.m_sStmt, "unknown local table '%s'", tStmt.m_sIndex.cstr() );
-		return;
-	}
+		return tOut.ErrorEx ( tStmt.m_sStmt, "unknown local table '%s'", tStmt.m_sIndex.cstr() );
 
 	if ( ServedDesc_t::IsMutable ( pServed ) )
-	{
-		tOut.ErrorEx ( tStmt.m_sStmt, "can not reload real-time or percolate table" );
-		return;
-	}
+		return tOut.Error ( tStmt.m_sStmt, "can not reload real-time or percolate table" );
 
-	if ( tStmt.m_sStringParam == pServed->m_sIndexPath )
+	assert ( pServed->m_eType == IndexType_e::PLAIN );
+
+	CSphString sError;
+	StrVec_t dWarnings;
+	AT_SCOPE_EXIT ( [&sWarning, &dWarnings]() {
+		if ( dWarnings.IsEmpty() )
+			return;
+		StringBuilder_c sWarn ( "; " );
+		dWarnings.for_each ( [&sWarn] ( const auto& i ) { sWarn << i; } );
+		sWarn.MoveTo ( sWarning );
+	});
+
+	if ( tStmt.m_iIntParam == 1 )
 	{
-		tOut.ErrorEx ( tStmt.m_sStmt, "reload path should be different from current path" );
-		return;
+		if ( tStmt.m_sStringParam.IsEmpty() )
+			return tOut.Error ( tStmt.m_sStmt, "reload with switchover requires explicit new path to the index" );
+
+		// here switchover=1 logic goes...
+		if ( g_bSeamlessRotate )
+		{
+			if ( !SwitchoverIndexSeamless ( pServed, tStmt.m_sIndex.cstr(), pServed->m_sIndexPath, tStmt.m_sStringParam, dWarnings, sError ) )
+				g_pLocalIndexes->Delete ( tStmt.m_sIndex ); // since it unusable - no sense just to disable it.
+		} else
+		{
+			WIdx_c WLock { pServed };
+			CSphIndex* pIdx = UnlockedHazardIdxFromServed ( *pServed );
+
+			if ( !SwitchoverIndexGreedy ( pIdx, tStmt.m_sIndex.cstr(), pServed->m_sIndexPath, tStmt.m_sStringParam, dWarnings, sError ) )
+				g_pLocalIndexes->Delete ( tStmt.m_sIndex ); // since it unusable - no sense just to disable it.
+				// fixme! SwitchoverIndexGreedy does prealloc. Do we need to perform/signal preload also?
+			else
+				LockIndex ( *pServed, pIdx, sError );
+		}
+		if ( sError.IsEmpty() )
+			return tOut.Ok();
+
+		sphWarning ( "%s", sError.cstr() );
+		return tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 	}
+	assert ( tStmt.m_iIntParam!=1 );
 
 	if ( !tStmt.m_sStringParam.IsEmpty () )
 	{
@@ -16321,21 +16349,16 @@ static void HandleMysqlReloadIndex ( RowBuffer_i & tOut, const SqlStmt_t & tStmt
 		// or if we have unapplied rotates from indexer - seems that it will garbage .new files?
 		IndexFiles_c sIndexFiles ( pServed->m_sIndexPath );
 		if ( !sIndexFiles.RelocateToNew ( tStmt.m_sStringParam ) )
-		{
-			tOut.Error ( tStmt.m_sStmt, sIndexFiles.ErrorMsg () );
-			return;
-		}
+			return tOut.Error ( tStmt.m_sStmt, sIndexFiles.ErrorMsg () );
 	}
 
-	StrVec_t dWarnings;
 	if ( g_bSeamlessRotate )
 	{
 		ServedIndexRefPtr_c pNewServed = MakeCloneForRotation ( pServed, tStmt.m_sIndex );
 		if ( !LimitedRotateIndexMT ( pNewServed, tStmt.m_sIndex, dWarnings, sError ) )
 		{
 			sphWarning ( "%s", sError.cstr() );
-			tOut.Error ( tStmt.m_sStmt, sError.cstr() );
-			return;
+			return tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		}
 	} else {
 		WIdx_c WLock { pServed };
@@ -16347,14 +16370,6 @@ static void HandleMysqlReloadIndex ( RowBuffer_i & tOut, const SqlStmt_t & tStmt
 			// fixme! RotateIndexGreedy does prealloc. Do we need to perform/signal preload also?
 			return;
 		}
-	}
-
-	if ( dWarnings.GetLength() )
-	{
-		StringBuilder_c sWarn ( "; " );
-		for ( const auto & i : dWarnings )
-			sWarn << i;
-		sWarn.MoveTo ( sWarning );
 	}
 
 	tOut.Ok();
@@ -17373,15 +17388,16 @@ bool ApplyKillListsTo ( CSphIndex* pKillListTarget, CSphString & sError )
 	return true;
 }
 
-bool PreloadKlistTarget ( const ServedDesc_t & tServed, RotateFrom_e eFrom, StrVec_t & dKlistTarget )
+bool PreloadKlistTarget ( const CSphString& sBase, RotateFrom_e eFrom, StrVec_t & dKlistTarget )
 {
 	switch ( eFrom )
 	{
 	case RotateFrom_e::NEW:
-		return IndexFiles_c ( tServed.m_sIndexPath ).ReadKlistTargets ( dKlistTarget, ".new" );
+	case RotateFrom_e::NEW_AND_OLD:
+		return IndexFiles_c ( sBase ).ReadKlistTargets ( dKlistTarget, ".new" );
 
 	case RotateFrom_e::REENABLE:
-		return IndexFiles_c ( tServed.m_sIndexPath ).ReadKlistTargets ( dKlistTarget );
+		return IndexFiles_c ( sBase ).ReadKlistTargets ( dKlistTarget );
 
 	default:
 		return false;
@@ -17441,19 +17457,19 @@ bool RotateIndexGreedy ( const ServedIndex_c& tServed, const char* szIndex, CSph
 	/// bool RotateIndexFilesGreedy ( const ServedDesc_t& tServed, const char* szIndex, CSphString& sError )
 	//////////////////
 
-	CheckIndexRotate_c tCheck ( tServed );
+	CSphIndex* pIdx = UnlockedHazardIdxFromServed ( tServed ); // it should be locked, if necessary, before
+	auto sIndexPath = tServed.m_sIndexPath;
+	if ( pIdx )
+		sIndexPath = pIdx->GetFilebase();
+
+	CheckIndexRotate_c tCheck ( sIndexPath );
 	if ( tCheck.NothingToRotate() )
 		return false;
 
-	IndexFiles_c dServedFiles ( tServed.m_sIndexPath, szIndex );
+	IndexFiles_c dServedFiles ( sIndexPath, szIndex );
 	IndexFiles_c dFreshFiles ( dServedFiles.MakePath ( tCheck.RotateFromNew() ? ".new" : "" ), szIndex );
 
-	if ( !dFreshFiles.CheckHeader() )
-	{
-		// no files or wrong files - no rotation
-		sError = dFreshFiles.ErrorMsg();
-		return false;
-	}
+//	if ( !dFreshFiles.CheckHeader() )... // no need to check, since CheckIndexRotate_c already did it.
 
 	if ( !dFreshFiles.HasAllFiles() )
 	{
@@ -17484,8 +17500,6 @@ bool RotateIndexGreedy ( const ServedIndex_c& tServed, const char* szIndex, CSph
 	}
 
 	// try to use new index
-	auto pIdx = UnlockedHazardIdxFromServed ( tServed ); // it should be locked, if necessary, before
-
 	StrVec_t dWarnings;
 	if ( !pIdx->Prealloc ( g_bStripPath, nullptr, dWarnings ) )
 	{
@@ -17574,18 +17588,6 @@ void CheckLeaks () REQUIRES ( MainThread )
 #endif
 }
 
-bool LockIndex ( ServedIndex_c& tIdx, CSphIndex* pIdx, CSphString& sError )
-{
-	if ( !g_bOptNoLock && !pIdx->Lock() )
-	{
-		sError.SetSprintf ( "lock: %s", pIdx->GetLastError().cstr() );
-		return false;
-	}
-
-	tIdx.UpdateMass();
-	return true;
-}
-
 // tricky bit
 // fixup was initially intended for (very old) index formats that did not store dict/tokenizer settings
 // however currently it also ends up configuring dict/tokenizer for fresh RT indexes!
@@ -17636,13 +17638,245 @@ static bool PreallocNewIndex ( ServedIndex_c & tIdx, const char * szIndexName, S
 	return PreallocNewIndex ( tIdx, pIndexConfig, szIndexName, dWarnings, sError );
 }
 
+// helper to switch index to another path
+// (used both, greedy and seamless)
+class SwitchOver_c : public ISphNoncopyable
+{
+	const char *		m_szIndex;
+	const CSphString &	m_sBase;
+	const CSphString &	m_sNewPath;
+	StrVec_t &			m_dWarnings;
+	CSphString &		m_sError;
+	bool 				m_bHaveOldFiles = false;
+	CSphIndex*			m_pIdx = nullptr;
+	CSphString			m_sOldPath;
+	std::optional<ActionSequence_c> m_tActions;
+	std::optional<IndexFiles_c> m_tFreshCurFiles;
+
+public:
+	SwitchOver_c ( const char* szIndex, const CSphString& sBase, const CSphString& sNewPath, StrVec_t& dWarnings, CSphString& sError )
+	: m_szIndex { szIndex }
+	, m_sBase { sBase }
+	, m_sNewPath { sNewPath }
+	, m_dWarnings { dWarnings }
+	, m_sError { sError }
+	{
+		m_sError = "";
+	}
+
+	~SwitchOver_c()
+	{
+		for ( const auto& i : m_dWarnings )
+			sphWarning ( "switchover table '%s': %s", m_szIndex, i.cstr() );
+
+		if ( m_pIdx && !m_pIdx->GetLastWarning().IsEmpty() )
+			sphWarning ( "switchover table '%s': %s", m_szIndex, m_pIdx->GetLastWarning().cstr() );
+	}
+
+	void SetIdx( CSphIndex* pIdx ) noexcept
+	{
+		assert ( pIdx );
+		m_pIdx = pIdx;
+		m_sOldPath = pIdx->GetFilebase();
+	}
+
+	bool CheckSameBase () const noexcept
+	{
+		assert ( m_pIdx );
+		if ( m_sNewPath != m_sOldPath )
+			return true;
+
+		m_sError.SetSprintf ( "reload path should be different from current path" );
+		return false;
+	}
+
+	bool RotateFiles()
+	{
+		CheckIndexRotate_c tCheckNew ( m_sNewPath );
+		if ( tCheckNew.NothingToRotate() )
+		{
+			m_sError.SetSprintf ( "No index found by given %s path, do nothing.", m_sNewPath.cstr() );
+			return false;
+		}
+
+		bool bHaveAllFreshNewFiles = tCheckNew.RotateFromNew() && IndexFiles_c { IndexFiles_c::MakePath ( ".new", m_sNewPath ), m_szIndex }.HasAllFiles();
+		if ( tCheckNew.RotateReenable() )
+		{
+			IndexFiles_c tCur { IndexFiles_c::MakePath ( "", m_sNewPath ), m_szIndex };
+			if ( tCur.HasAllFiles() )
+				m_tFreshCurFiles.emplace ( std::move ( tCur ) );
+		}
+		auto bHaveAllFreshCurFiles = (bool)m_tFreshCurFiles;
+
+		if ( !bHaveAllFreshNewFiles && !bHaveAllFreshCurFiles )
+		{
+			m_sError.SetSprintf ( "rotating table '%s': unreadable: %s; abort rotation", m_szIndex, strerrorm ( errno ) );
+			return false;
+		}
+
+		if ( bHaveAllFreshNewFiles )
+		{
+			m_tActions.emplace();
+			if ( bHaveAllFreshCurFiles )
+			{
+				m_tActions->Defer ( RenameFiles ( *m_tFreshCurFiles, "", ".old" ) );
+				m_bHaveOldFiles = true;
+			}
+			m_tActions->Defer ( RenameFiles ( *m_tFreshCurFiles, ".new", "" ) );
+
+			// do files rotation
+			if ( !m_tActions->RunDefers() )
+			{
+				bool bFatal;
+				std::tie ( m_sError, bFatal ) = m_tActions->GetError();
+				m_sError.SetSprintf ( "SwitchoverIndexGreedy error: %s", m_sError.cstr() );
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool UnRotateFiles()
+	{
+		if ( m_tActions && !m_tActions->UnRunDefers() )
+		{
+			auto [sError, bFatal] = m_tActions->GetError();
+			m_sError.SetSprintf ( "UnRotateFiles error: %s", sError.cstr() );
+			return false;
+		}
+		m_bHaveOldFiles = false;
+		return true;
+	}
+
+	bool Finalize()
+	{
+		if ( !WriteLinkFile ( m_sBase, m_sNewPath, m_sError ) )
+			m_sError.SetSprintf ( "switchover wasn't able to populate %s.link; new persistent path to the index is NOT saved: %s", m_sBase.cstr(), m_sError.cstr() );
+
+		// finalize
+		assert ( m_pIdx->GetTokenizer() && m_pIdx->GetDictionary() );
+
+		if ( !ApplyKilllistsMyAndToMe ( m_pIdx, m_szIndex, m_sError ) )
+			sphWarning ( "switchover error when applying kill-lists: %s", m_sError.cstr() );
+
+		// unlink .old from new location (it is temporary anyway!)
+		if ( m_bHaveOldFiles && m_tFreshCurFiles )
+			m_tFreshCurFiles->Unlink ( ".old" );
+
+		// uff. all done
+		sphInfo ( "switchover table '%s': success", m_szIndex );
+		return true;
+	}
+
+	bool SwitchGreedy ( CSphIndex* pIdx )
+	{
+		SetIdx ( pIdx );
+		sphLogDebug ( "SwitchGreedy for '%s' invoked. Base %s, path %s", m_szIndex, m_sBase.cstr(), m_sNewPath.cstr() );
+
+		if ( !CheckSameBase() )
+			return true;
+
+		if ( !RotateFiles() )
+			return true;
+
+		// try to use new index
+		pIdx->Unlock();
+		pIdx->SetFilebase ( m_sNewPath );
+		if ( pIdx->Prealloc ( g_bStripPath, nullptr, m_dWarnings ) )
+			return Finalize();
+
+		// load previous version of index
+		pIdx->SetFilebase ( m_sOldPath );
+		bool bPreallocOld = pIdx->Prealloc ( g_bStripPath, nullptr, m_dWarnings );
+
+		// roll-back rotated files
+		UnRotateFiles();
+
+		// collect all errors
+		StringBuilder_c sError { "; " };
+		if ( !m_sError.IsEmpty() )
+			sError << m_sError;
+		if ( !bPreallocOld )
+			sError.Sprintf ( "SwitchGreedy table '%s': preload of new index failed, rollback also failed; TABLE UNUSABLE", m_szIndex );
+		sError.MoveTo ( m_sError );
+
+		return bPreallocOld;
+	}
+
+	// this function always returns true; which means - existing index can't be damaged by this call.
+	bool SwitchSeamless ( const cServedIndexRefPtr_c& pServed )
+	{
+		assert ( pServed && pServed->m_eType == IndexType_e::PLAIN );
+		CSphIndex* pIdx = UnlockedHazardIdxFromServed ( *pServed );
+
+		SetIdx ( pIdx );
+		sphLogDebug ( "SwitchSeamless for '%s' invoked. Base %s, path %s", m_szIndex, m_sBase.cstr(), m_sNewPath.cstr() );
+
+		if ( !CheckSameBase() )
+			return true;
+
+		if ( !RotateFiles() )
+		{
+			UnRotateFiles();
+			return true;
+		}
+
+		//////////////////
+		/// load new index
+		//////////////////
+		ServedIndexRefPtr_c pNewServed = MakeCloneForRotation ( pServed, m_szIndex );
+		pIdx = UnlockedHazardIdxFromServed ( *pNewServed );
+		pIdx->SetFilebase ( m_sNewPath );
+
+		// prealloc enough RAM and lock new index
+		sphLogDebug ( "prealloc enough RAM and lock new table" );
+
+		if ( !PreallocNewIndex ( *pNewServed, m_szIndex, m_dWarnings, m_sError ) )
+			return true;
+
+		pIdx->Preread();
+		pNewServed->UpdateMass(); // that is second update, first was at the end of Prealloc, this one is to correct after preread
+
+		RIdx_c pOldIdx { pServed };
+		pIdx->m_iTID = pOldIdx->m_iTID;
+//		pServed->SetUnlink ( pOldIdx->GetFilebase() );
+		SetIdx ( pIdx );
+		Finalize();
+
+		// all went fine; swap them
+		sphLogDebug ( "all went fine; swap them" );
+		Binlog::NotifyIndexFlush ( m_szIndex, pIdx->m_iTID, false );
+		g_pLocalIndexes->AddOrReplace ( pNewServed, m_szIndex );
+		sphInfo ( "rotating table '%s': success", m_szIndex );
+
+		// actually we always return true, because rotating from new place is always safe.
+		return true;
+	}
+};
+
+// return false, if index should not be served.
+// return sError
+bool SwitchoverIndexGreedy ( CSphIndex* pIdx, const char* szIndex, const CSphString& sBase, const CSphString& sNewPath, StrVec_t& dWarnings, CSphString& sError )
+{
+	SwitchOver_c tSwitcher ( szIndex, sBase, sNewPath, dWarnings, sError );
+	return tSwitcher.SwitchGreedy ( pIdx );
+}
+
+bool DoSwitchoverIndexSeamless ( const cServedIndexRefPtr_c& pServed, const char* szIndex, const CSphString& sBase, const CSphString& sNewPath, StrVec_t& dWarnings, CSphString& sError ) EXCLUDES ( MainThread )
+{
+	SwitchOver_c tSwitcher ( szIndex, sBase, sNewPath, dWarnings, sError );
+	return tSwitcher.SwitchSeamless ( pServed );
+}
+
 // called either from MysqlReloadIndex, either from Rotation task (never from main thread).
 bool RotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString & sIndex, StrVec_t & dWarnings, CSphString & sError ) EXCLUDES ( MainThread )
 {
 	assert ( pNewServed && pNewServed->m_eType == IndexType_e::PLAIN );
 
 	sphInfo ( "rotating table '%s': started", sIndex.cstr() );
-	CheckIndexRotate_c tCheck ( *pNewServed );
+
+	auto sRealPath = RedirectToRealPath ( pNewServed->m_sIndexPath );
+	CheckIndexRotate_c tCheck ( sRealPath );
 	if ( tCheck.NothingToRotate() )
 	{
 		sError.SetSprintf ( "nothing to rotate for table '%s'", sIndex.cstr() );
@@ -17654,7 +17888,7 @@ bool RotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString & sIndex,
 	//////////////////
 	CSphIndex* pNewIndex = UnlockedHazardIdxFromServed ( *pNewServed );
 	if ( tCheck.RotateFromNew() )
-		pNewIndex->SetFilebase ( IndexFiles_c::MakePath ( ".new", pNewServed->m_sIndexPath ) );
+		pNewIndex->SetFilebase ( IndexFiles_c::MakePath ( ".new", sRealPath ) );
 
 	// prealloc enough RAM and lock new index
 	sphLogDebug ( "prealloc enough RAM and lock new table" );
@@ -17675,9 +17909,9 @@ bool RotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString & sIndex,
 		ActionSequence_c tActions;
 
 		auto pServed = GetServed ( sIndex );
-		if ( pServed && pServed->m_sIndexPath == pNewServed->m_sIndexPath )
+		if ( pServed && RedirectToRealPath ( pServed->m_sIndexPath ) == sRealPath )
 			tActions.Defer ( RenameIdxSuffix ( pServed, ".old" ) );
-		tActions.Defer ( RenameIdx ( pNewIndex, pNewServed->m_sIndexPath ) ); // rename 'new' to 'current'
+		tActions.Defer ( RenameIdx ( pNewIndex, sRealPath ) ); // rename 'new' to 'current'
 
 		if ( !tActions.RunDefers() )
 		{
@@ -17753,23 +17987,32 @@ static void InvokeRotation ( VecOfServed_c&& dDeferredIndexes ) REQUIRES ( MainT
 	});
 }
 
-bool LimitedRotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString& sIndex, StrVec_t& dWarnings, CSphString& sError ) EXCLUDES ( MainThread )
+template<typename FN_ACTION>
+bool LimitedParallelRotationMT ( FN_ACTION&& fnAction ) EXCLUDES ( MainThread )
 {
 	assert ( Threads::IsInsideCoroutine() );
 
 	// allow to run several rotations a time (in parallel)
 	// vip conns has no limit
 	if ( session::GetVip() )
-		return RotateIndexMT ( pNewServed, sIndex, dWarnings, sError );
+		return fnAction();
 
 	// limit is arbitrary set to N/2 of threadpool
 	static Coro::Waitable_T<int> iParallelRotations { 0 };
 	iParallelRotations.Wait ( [] ( int i ) { return i < Max ( 1, NThreads() / 2 ); } );
 	iParallelRotations.ModifyValue ( [] ( int& i ) { ++i; } );
-	auto _ = AtScopeExit ( [] {
-		iParallelRotations.ModifyValueAndNotifyOne ( [] ( int& i ) { --i; } );
-	});
-	return RotateIndexMT ( pNewServed, sIndex, dWarnings, sError );
+	AT_SCOPE_EXIT ( [] { iParallelRotations.ModifyValueAndNotifyOne ( [] ( int& i ) { --i; } ); } );
+	return fnAction();
+}
+
+bool LimitedRotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString& sIndex, StrVec_t& dWarnings, CSphString& sError ) EXCLUDES ( MainThread )
+{
+	return LimitedParallelRotationMT ( [&]() { return RotateIndexMT ( pNewServed, sIndex, dWarnings, sError ); } );
+}
+
+bool SwitchoverIndexSeamless ( const cServedIndexRefPtr_c& pServed, const char* szIndex, const CSphString& sBase, const CSphString& sNewPath, StrVec_t& dWarnings, CSphString& sError ) EXCLUDES ( MainThread )
+{
+	return LimitedParallelRotationMT ( [&]() { return DoSwitchoverIndexSeamless ( pServed, szIndex, sBase, sNewPath, dWarnings, sError ); } );
 }
 
 void ConfigureLocalIndex ( ServedDesc_t * pIdx, const CSphConfigSection & hIndex, bool bMutableOpt, StrVec_t * pWarnings )
@@ -18082,7 +18325,7 @@ static ResultAndIndex_t LoadPlainIndex ( const char * szIndexName, const CSphCon
 
 	// try to create index
 	pServed->m_sIndexPath = hIndex["path"].strval ();
-	auto pIdx = sphCreateIndexPhrase ( szIndexName, pServed->m_sIndexPath );
+	auto pIdx = sphCreateIndexPhrase ( szIndexName, RedirectToRealPath ( pServed->m_sIndexPath ) );
 	pIdx->m_iExpansionLimit = g_iExpansionLimit;
 	pIdx->SetMutableSettings ( pServed->m_tSettings );
 	pIdx->SetGlobalIDFPath ( pServed->m_sGlobalIDFPath );
@@ -18312,7 +18555,7 @@ static void CheckIndexesForSeamlessAndStartRotation ( VecOfServed_c dDeferredInd
 		auto* pIndex = dDeferredIndexes[i].second.Ptr();
 		assert ( pIndex );
 
-		if ( !ServedDesc_t::IsMutable ( pIndex ) && CheckIndexRotate_c ( *pIndex ).NothingToRotate() )
+		if ( !ServedDesc_t::IsMutable ( pIndex ) && CheckIndexRotate_c ( *pIndex, CheckIndexRotate_c::CheckLink ).NothingToRotate() )
 		{
 			++iNotCapableForSeamlessRotation;
 			sphLogDebug ( "queue[] = %s", sIdx.cstr() );
@@ -19228,7 +19471,7 @@ void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile, bool bTestMo
 	g_iClientTimeoutS = hSearchd.GetSTimeS ( "client_timeout", 300 );
 
 	g_iMaxConnection = hSearchd.GetInt ( "max_connections", g_iMaxConnection );
-	g_iThreads = hSearchd.GetInt ( "threads", sphCpuThreadsCount() );
+	g_iThreads = hSearchd.GetInt ( "threads", GetNumLogicalCPUs() );
 	SetMaxChildrenThreads ( g_iThreads );
 	g_iThdQueueMax = hSearchd.GetInt ( "jobs_queue_size", g_iThdQueueMax );
 
@@ -19422,7 +19665,7 @@ void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile, bool bTestMo
 	g_iAutoOptimizeCutoffMultiplier = hSearchd.GetInt ( "auto_optimize", 1 );
 	MutableIndexSettings_c::GetDefaults().m_iOptimizeCutoff = hSearchd.GetInt ( "optimize_cutoff", AutoOptimizeCutoff() );
 
-	g_bSplit = hSearchd.GetInt ( "pseudo_sharding", 1 )!=0;
+	SetPseudoSharding ( hSearchd.GetInt ( "pseudo_sharding", 1 )!=0 );
 	SetOptionSI ( hSearchd, bTestMode );
 
 	CSphString sWarning;

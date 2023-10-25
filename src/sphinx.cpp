@@ -46,6 +46,7 @@
 #include "client_task_info.h"
 #include "chunksearchctx.h"
 #include "std/lrucache.h"
+#include "std/sys.h"
 #include "indexfiles.h"
 #include "task_dispatcher.h"
 #include "secondarylib.h"
@@ -67,9 +68,7 @@
 #include <re2/re2.h>
 #endif
 
-#if _WIN32
-	#define snprintf	_snprintf
-#else
+#if !_WIN32
 	#include <unistd.h>
 	#include <sys/time.h>
 #endif
@@ -126,7 +125,8 @@ static const int	MIN_READ_UNHINTED		= 1024;
 
 static int 			g_iReadUnhinted 		= DEFAULT_READ_UNHINTED;
 
-static int			g_iSplitThresh			= 8192;
+static bool			g_bPseudoSharding		= true;
+static int			g_iPseudoShardingThresh	= 8192;
 
 static bool LOG_LEVEL_SPLIT_QUERY = val_from_env ( "MANTICORE_LOG_SPLIT_QUERY", false ); // verbose logging split query events, ruled by this env variable
 #define LOG_COMPONENT_QUERYINFO __LINE__ << " "
@@ -1274,7 +1274,7 @@ public:
 	SI::Index_i *		Debug_GetSI() const override { return m_pSIdx.get(); }
 
 	bool				CheckEarlyReject ( const CSphVector<CSphFilterSettings> & dFilters, const ISphFilter * pFilter, ESphCollation eCollation, const ISphSchema & tSchema ) const;
-	int64_t				GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, int iThreads, bool & bForceSingleThread ) const override;
+	std::pair<int64_t,int> GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, int iThreads, bool & bForceSingleThread ) const override;
 	int64_t				GetCountDistinct ( const CSphString & sAttr ) const override;
 	int64_t				GetCountFilter ( const CSphFilterSettings & tFilter ) const override;
 	int64_t				GetCount() const override;
@@ -1390,8 +1390,8 @@ private:
 	RowidIterator_i *			SpawnIterators ( const CSphQuery & tQuery, CSphQueryContext & tCtx, CreateFilterContext_t & tFlx, const ISphSchema & tMaxSorterSchema, CSphQueryResultMeta & tMeta, int iCutoff, int iThreads, CSphVector<CSphFilterSettings> & dModifiedFilters, ISphRanker * pRanker ) const;
 	bool						SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * pRanker, CSphVector<SecondaryIndexInfo_t> & dSIInfo, int iCutoff, int iThreads, StrVec_t & dWarnings ) const;
 
-	bool						IsQueryFast ( const CSphQuery & tQuery ) const;
-	bool						CheckEnabledIndexes ( const CSphQuery & tQuery, int iThreads, bool & bFastQuery ) const;
+	bool						IsQueryFast ( const CSphQuery & tQuery, const CSphVector<SecondaryIndexInfo_t> & dEnabledIndexes, float fCost ) const;
+	CSphVector<SecondaryIndexInfo_t> GetEnabledIndexes ( const CSphQuery & tQuery, float & fCost, int iThreads ) const;
 
 	Docstore_i *				GetDocstore() const override { return m_pDocstore.get(); }
 	columnar::Columnar_i *		GetColumnar() const override { return m_pColumnar.get(); }
@@ -2145,17 +2145,7 @@ bool CSphIndex::MustRunInSingleThread ( const VecTraits_T<const CSphQuery> & dQu
 		}
 	}
 
-	return GetStats().m_iTotalDocuments<=g_iSplitThresh;
-}
-
-
-int64_t CSphIndex::GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, int iThreads, bool & bForceSingleThread ) const
-{
-	if ( MustRunInSingleThread ( dQueries, false, dMaxCountDistinct, bForceSingleThread ) )
-		return -1;
-
-	int64_t iTotalDocs = GetStats().m_iTotalDocuments;
-	return iTotalDocs > g_iSplitThresh ? iTotalDocs : -1;
+	return GetStats().m_iTotalDocuments<=g_iPseudoShardingThresh;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -3007,8 +2997,12 @@ int CSphIndex_VLN::CheckThenKillMulti ( const VecTraits_T<DocID_t>& dKlist, Bloc
 };
 
 
-bool CSphIndex_VLN::IsQueryFast ( const CSphQuery & tQuery ) const
+bool CSphIndex_VLN::IsQueryFast ( const CSphQuery & tQuery, const CSphVector<SecondaryIndexInfo_t> & dEnabledIndexes, float fCost ) const
 {
+	const float COST_THRESH = 0.5f;
+	if ( tQuery.m_sQuery.IsEmpty() )
+		return dEnabledIndexes.GetLength() && fCost<=COST_THRESH;
+
 	if ( m_pFieldFilter )
 		return false;
 
@@ -3059,66 +3053,65 @@ static bool CheckQueryFilters ( const CSphQuery & tQuery, const CSphSchema & tSc
 }
 
 
-bool CSphIndex_VLN::CheckEnabledIndexes ( const CSphQuery & tQuery, int iThreads, bool & bFastQuery ) const
+CSphVector<SecondaryIndexInfo_t> CSphIndex_VLN::GetEnabledIndexes ( const CSphQuery & tQuery, float & fCost, int iThreads ) const
 {
 	// if there's a filter tree, we don't have any indexes and there's no point in wasting time to eval them
 	if ( tQuery.m_dFilterTree.GetLength() )
-		return true;
+		return {};
 
-	const float COST_THRESH = 0.5f;
-
-	float fCost = FLT_MAX;
 	int iCutoff = ApplyImplicitCutoff ( tQuery, {} );
 
 	StrVec_t dWarnings;
 	SelectIteratorCtx_t tCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), iCutoff, m_iDocinfo, iThreads );
-	CSphVector<SecondaryIndexInfo_t> dEnabledIndexes = SelectIterators ( tCtx, fCost, dWarnings );
-
-	// disable pseudo sharding if any of the queries use secondary indexes/docid lookups
-	if ( dEnabledIndexes.any_of ( []( const SecondaryIndexInfo_t & tSI ){ return tSI.m_eType==SecondaryIndexType_e::INDEX || tSI.m_eType==SecondaryIndexType_e::LOOKUP; } ) )
-		return false;
-
-	if ( tQuery.m_sQuery.IsEmpty() )
-		bFastQuery = dEnabledIndexes.GetLength() && fCost<=COST_THRESH;
-	else
-		bFastQuery = IsQueryFast(tQuery);
-
-	return true;
+	return SelectIterators ( tCtx, fCost, dWarnings );
 }
 
 
-int64_t CSphIndex_VLN::GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, int iThreads, bool & bForceSingleThread ) const
+std::pair<int64_t,int> CSphIndex_VLN::GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, int iThreads, bool & bForceSingleThread ) const
 {
 	if ( MustRunInSingleThread ( dQueries, !!m_pSIdx, dMaxCountDistinct, bForceSingleThread ) )
-		return -1;
+		return { 0, 1 };
 
 	bool bAllFast = true;
+	int iThreadCap = 0;
+	int iNumProc = GetNumPhysicalCPUs();
+	if ( iNumProc==-1 )
+		iNumProc = GetNumLogicalCPUs()/2;
 
 	ARRAY_FOREACH ( i, dQueries )
 	{
 		auto & tQuery = dQueries[i];
-
-		// only process fullscan queries
 		if ( !tQuery.m_sQuery.IsEmpty() )
 		{
+			// check for fulltext+SI case; limit the number of threads
+			SelectIteratorCtx_t tCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), -1, m_iDocinfo, 1 );
+			if ( !iThreadCap && tQuery.m_dFilters.GetLength() && HaveAvailableSI(tCtx) )
+				iThreadCap = iThreadCap ? Min ( iThreadCap, iNumProc ) : iNumProc;
+
 			bAllFast = false;
 			continue;
 		}
 
 		if ( !CheckQueryFilters ( tQuery, m_tSchema ) )
 			continue;
-		
-		bool bFastQuery = false;
-		if ( !CheckEnabledIndexes ( tQuery, iThreads, bFastQuery ) )
-			return -1; 
 
-		bAllFast &= bFastQuery;
+		float fCost = FLT_MAX;
+		CSphVector<SecondaryIndexInfo_t> dEnabledIndexes = GetEnabledIndexes ( tQuery, fCost, iThreads );
+		bAllFast &= IsQueryFast ( tQuery, dEnabledIndexes, fCost );
+
+		// disable pseudo sharding if any of the queries use docid lookups
+		if ( dEnabledIndexes.any_of ( []( const SecondaryIndexInfo_t & tSI ){ return tSI.m_eType==SecondaryIndexType_e::LOOKUP; } ) )
+			return { 0, 1 };
+
+		// enable pseudo sharding but limit number of threads when we use SI in fullscan
+		if ( dEnabledIndexes.any_of ( []( const SecondaryIndexInfo_t & tSI ){ return tSI.m_eType==SecondaryIndexType_e::INDEX; } ) )
+			iThreadCap = iThreadCap ? Min ( iThreadCap, iNumProc ) : iNumProc;
 	}
 
 	if ( bAllFast )
-		return -1;
+		return { 0, 1 };
 
-	return CSphIndex::GetPseudoShardingMetric ( dQueries, dMaxCountDistinct, iThreads, bForceSingleThread );
+	return  { GetStats().m_iTotalDocuments, iThreadCap };
 }
 
 
@@ -3242,7 +3235,7 @@ void GetSettingsFiles ( const TokenizerRefPtr_c& pTok, const DictRefPtr_c& pDict
 class CSphHitBuilder
 {
 public:
-	CSphHitBuilder ( const CSphIndexSettings & tSettings, const CSphVector<SphWordID_t> & dHitless, bool bMerging, int iBufSize, DictRefPtr_c pDict, CSphString * sError );
+	CSphHitBuilder ( const CSphIndexSettings & tSettings, const CSphVector<SphWordID_t> & dHitless, bool bMerging, int iBufSize, DictRefPtr_c pDict, CSphString * sError, StrVec_t * pCreatedFiles );
 
 	bool	CreateIndexFiles ( const CSphString& sDocName, const CSphString& sHitName, const CSphString& sSkipName, bool bInplace, int iWriteBuffer, CSphAutofile & tHit, SphOffset_t * pSharedOffset=nullptr );
 	void	HitReset ();
@@ -3288,15 +3281,14 @@ private:
 	ESphHitless					m_eHitless;
 
 	CSphVector<SkiplistEntry_t>	m_dSkiplist;
+	StrVec_t *					m_pCreatedFiles { nullptr };
 #ifndef NDEBUG
 	bool m_bMerging;
 #endif
 };
 
 
-CSphHitBuilder::CSphHitBuilder ( const CSphIndexSettings & tSettings,
-	const CSphVector<SphWordID_t> & dHitless, bool bMerging, int iBufSize,
-	DictRefPtr_c pDict, CSphString * sError )
+CSphHitBuilder::CSphHitBuilder ( const CSphIndexSettings & tSettings, const CSphVector<SphWordID_t> & dHitless, bool bMerging, int iBufSize, DictRefPtr_c pDict, CSphString * sError, StrVec_t * pCreatedFiles )
 	: m_dWriteBuffer ( iBufSize )
 	, m_dHitlessWords ( dHitless )
 	, m_pDict ( std::move ( pDict ) )
@@ -3304,6 +3296,7 @@ CSphHitBuilder::CSphHitBuilder ( const CSphIndexSettings & tSettings,
 	, m_iSkiplistBlockSize ( tSettings.m_iSkiplistBlockSize )
 	, m_eHitFormat ( tSettings.m_eHitFormat )
 	, m_eHitless ( tSettings.m_eHitless )
+	, m_pCreatedFiles ( pCreatedFiles )
 #ifndef NDEBUG
 	, m_bMerging ( bMerging )
 #endif
@@ -3330,6 +3323,8 @@ bool CSphHitBuilder::CreateIndexFiles ( const CSphString& sDocName, const CSphSt
 
 	if ( !m_wrDoclist.OpenFile ( sDocName, *m_pLastError ) )
 		return false;
+	if ( m_pCreatedFiles )
+		m_pCreatedFiles->Add ( m_wrDoclist.GetFilename() );
 
 	if ( bInplace )
 	{
@@ -3339,10 +3334,14 @@ bool CSphHitBuilder::CreateIndexFiles ( const CSphString& sDocName, const CSphSt
 	{
 		if ( !m_wrHitlist.OpenFile ( sHitName, *m_pLastError ) )
 			return false;
+		if ( m_pCreatedFiles )
+			m_pCreatedFiles->Add ( m_wrHitlist.GetFilename() );
 	}
 
 	if ( !m_wrSkiplist.OpenFile ( sSkipName, *m_pLastError ) )
 		return false;
+	if ( m_pCreatedFiles )
+		m_pCreatedFiles->Add ( m_wrSkiplist.GetFilename() );
 
 	// put dummy byte (otherwise offset would start from 0, first delta would be 0
 	// and VLB encoding of offsets would fuckup)
@@ -5454,7 +5453,7 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 		? Max ( iWriteBuffer, MIN_WRITE_BUFFER )
 		: DEFAULT_WRITE_BUFFER;
 
-	CSphHitBuilder tHitBuilder ( m_tSettings, dHitlessWords, false, iHitBuilderBufferSize, m_pDict, &m_sLastError );
+	CSphHitBuilder tHitBuilder ( m_tSettings, dHitlessWords, false, iHitBuilderBufferSize, m_pDict, &m_sLastError, nullptr );
 
 	////////////////////////////////////////////////
 	// collect and partially sort hits
@@ -6506,7 +6505,7 @@ bool CSphIndex_VLN::MergeWords ( const CSphIndex_VLN * pDstIndex, const CSphInde
 			iWords = 0;
 		}
 
-		if ( tMonitor.NeedStop () )
+		if ( tMonitor.NeedStop () || !sError.IsEmpty () )
 			return false;
 
 		const int iCmp = bCompress ? -1 : tDstReader.CmpWord ( tSrcReader );
@@ -6550,7 +6549,7 @@ bool CSphIndex_VLN::MergeWords ( const CSphIndex_VLN * pDstIndex, const CSphInde
 			// transfer hits from destination
 			while ( QwordIteration::NextDocument ( tDstQword, pDstIndex, dDstRows ) )
 			{
-				if ( tMonitor.NeedStop () )
+				if ( tMonitor.NeedStop () || !sError.IsEmpty () )
 					return false;
 
 				if ( bHitless )
@@ -6568,7 +6567,7 @@ bool CSphIndex_VLN::MergeWords ( const CSphIndex_VLN * pDstIndex, const CSphInde
 			// transfer hits from source
 			while ( QwordIteration::NextDocument ( tSrcQword, pSrcIndex, dSrcRows ) )
 			{
-				if ( tMonitor.NeedStop () )
+				if ( tMonitor.NeedStop () || !sError.IsEmpty () )
 					return false;
 
 				if ( bHitless )
@@ -6735,6 +6734,15 @@ bool CSphIndex_VLN::DoMerge ( const CSphIndex_VLN * pDstIndex, const CSphIndex_V
 	// however, if interrupt is requested after that stage - we need list of the files
 	// to gracefully unlink them.
 	StrVec_t dDeleteOnInterrupt;
+	// unlink prepared attribute files on exit, if any
+	AT_SCOPE_EXIT ( [&dDeleteOnInterrupt]
+	{
+		dDeleteOnInterrupt.for_each ( [] ( const auto & sFile )
+		{
+			if ( !sFile.IsEmpty() && sphFileExists ( sFile.cstr() ) )
+				::unlink ( sFile.cstr() );
+		} ); 
+	});
 
 	// merging attributes
 	{
@@ -6752,9 +6760,6 @@ bool CSphIndex_VLN::DoMerge ( const CSphIndex_VLN * pDstIndex, const CSphIndex_V
 			return false;
 	}
 
-	// unlink prepared attribute files on exit, if any
-	AT_SCOPE_EXIT ( [&dDeleteOnInterrupt] { dDeleteOnInterrupt.for_each ( [] ( const auto& sFile ) { ::unlink ( sFile.cstr() ); } ); } );
-
 	const CSphIndex_VLN* pSettings = ( bSrcSettings ? pSrcIndex : pDstIndex );
 	CSphAutofile tTmpDict ( pDstIndex->GetFilename("spi.tmp"), SPH_O_NEW, sError, true ); // that is huge file with bins
 	CSphAutofile tDict ( pDstIndex->GetTmpFilename ( SPH_EXT_SPI ), SPH_O_NEW, sError, true );
@@ -6766,7 +6771,7 @@ bool CSphIndex_VLN::DoMerge ( const CSphIndex_VLN * pDstIndex, const CSphIndex_V
 
 	int iHitBufferSize = 8 * 1024 * 1024;
 	CSphVector<SphWordID_t> dDummy;
-	CSphHitBuilder tHitBuilder ( pSettings->m_tSettings, dDummy, true, iHitBufferSize, pDict, &sError );
+	CSphHitBuilder tHitBuilder ( pSettings->m_tSettings, dDummy, true, iHitBufferSize, pDict, &sError, &dDeleteOnInterrupt );
 
 	// FIXME? is this magic dict block constant any good?..
 	pDict->DictBegin ( tTmpDict, tDict, iHitBufferSize );
@@ -6788,7 +6793,7 @@ bool CSphIndex_VLN::DoMerge ( const CSphIndex_VLN * pDstIndex, const CSphIndex_V
 		));
 	}
 
-	if ( tMonitor.NeedStop () )
+	if ( tMonitor.NeedStop () || !sError.IsEmpty() )
 		return false;
 
 	// finalize
@@ -6933,7 +6938,7 @@ bool CSphIndex_VLN::DeleteFieldFromDict ( int iFieldId, BuildHeader_t & tBuildHe
 
 	int iHitBufferSize = 8 * 1024 * 1024;
 	CSphVector<SphWordID_t> dDummy;
-	CSphHitBuilder tHitBuilder ( m_tSettings, dDummy, true, iHitBufferSize, pDict, &sError );
+	CSphHitBuilder tHitBuilder ( m_tSettings, dDummy, true, iHitBufferSize, pDict, &sError, nullptr );
 
 	// FIXME? is this magic dict block constant any good?..
 	pDict->DictBegin ( tTmpDict, tNewDict, iHitBufferSize );
@@ -8004,7 +8009,8 @@ bool CSphIndex_VLN::SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * p
 	// 4. estimate the cost of intersecting FT and iterator results
 	NodeEstimate_t tEstimate = pRanker->Estimate ( m_iDocinfo );
 
-	SelectIteratorCtx_t tSelectIteratorCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), iCutoff, m_iDocinfo, iThreads );
+	// always do single-thread estimates here
+	SelectIteratorCtx_t tSelectIteratorCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), iCutoff, m_iDocinfo, 1 );
 	tSelectIteratorCtx.IgnorePushCost();
 	float fBestCost = FLT_MAX;
 	dSIInfo = SelectIterators ( tSelectIteratorCtx, fBestCost, dWarnings );
@@ -8021,11 +8027,12 @@ bool CSphIndex_VLN::SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * p
 	CSphVector<SecondaryIndexInfo_t> dSIInfoFilters { dSIInfo.GetLength() };
 	float fValuesAfterFilters = 1.0f;
 	ARRAY_FOREACH ( i, dSIInfo )
-	{
-		dSIInfoFilters[i] = dSIInfo[i];
-		fValuesAfterFilters *= float(dSIInfo[i].m_iRsetEstimate) / m_iDocinfo;
-		dSIInfoFilters[i].m_eType = SecondaryIndexType_e::FILTER;
-	}
+		if ( tQuery.m_dFilters[i].m_sAttrName != "@rowid" )
+		{
+			dSIInfoFilters[i] = dSIInfo[i];
+			fValuesAfterFilters *= float(dSIInfo[i].m_iRsetEstimate) / m_iDocinfo;
+			dSIInfoFilters[i].m_eType = SecondaryIndexType_e::FILTER;
+		}
 
 	// correct rset estimates (we are estimating filters after FT)
 	float fCostOfFilters = 0.0f;
@@ -8047,6 +8054,9 @@ bool CSphIndex_VLN::SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * p
 	tEstimate.m_iDocs = Max ( tEstimate.m_iDocs, 1 );
 	float fIteratorWithFT = CalcFTIntersectCost ( tIteratorEst, tEstimate, m_iDocinfo, ITERATOR_BLOCK_SIZE, MAX_BLOCK_DOCS );
 	float fFTWithFilters = tEstimate.m_fCost + fCostOfFilters;
+
+	fIteratorWithFT = EstimateMTCostSIFT ( fIteratorWithFT, iThreads );
+	fFTWithFilters = EstimateMTCost ( fFTWithFilters, iThreads );
 
 	return fIteratorWithFT<fFTWithFilters;
 }
@@ -12525,7 +12535,6 @@ int64_t InfixBuilder_c<SIZE>::SaveEntryBlocks ( CSphWriter & wrDict )
 std::unique_ptr<ISphInfixBuilder> sphCreateInfixBuilder ( int iCodepointBytes, CSphString * pError )
 {
 	assert ( pError );
-	*pError = CSphString();
 	switch ( iCodepointBytes )
 	{
 	case 0:		return nullptr;
@@ -12927,9 +12936,21 @@ void sphSetJsonOptions ( bool bStrict, bool bAutoconvNumbers, bool bKeynamesToLo
 }
 
 
+void SetPseudoSharding ( bool bSet )
+{
+	g_bPseudoSharding = bSet;
+}
+
+
+bool GetPseudoSharding()
+{
+	return g_bPseudoSharding;
+}
+
+
 void SetPseudoShardingThresh ( int iThresh )
 {
-	g_iSplitThresh = iThresh;
+	g_iPseudoShardingThresh = iThresh;
 }
 
 //////////////////////////////////////////////////////////////////////////
