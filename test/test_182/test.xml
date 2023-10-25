@@ -5,7 +5,6 @@
 
 <requires>
 <non-rt/>
-<non-windows/>
 </requires>
 
 <config>
@@ -66,8 +65,7 @@ $restartD = function ( $client )
 			$line .= $value . "; ";
 		$results[] = $line;
 	}
-	@mysql_close($sock);
-	
+
 	return $results;
 };
 

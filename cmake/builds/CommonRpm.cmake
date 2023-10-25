@@ -1,6 +1,10 @@
 # only cmake since 3.17 supports packaging of debuginfo
 cmake_minimum_required ( VERSION 3.17 )
 
+set ( CMAKE_INSTALL_FULL_RUNSTATEDIR "/run")
+set ( CMAKE_INSTALL_RUNSTATEDIR "run")
+
+
 if (NOT installed)
 	# start with short route - set all paths
 	set ( CPACK_PACKAGING_INSTALL_PREFIX "/" )
@@ -114,8 +118,6 @@ set ( dircore "${MANTICORE_BINARY_DIR}/config/core" )
 # server (service)
 set ( CPACK_RPM_SERVER_BUILDREQUIRES "systemd-units" )
 set ( CPACK_RPM_SERVER_POST_INSTALL_SCRIPT_FILE "${dirserver}/manticore.post" )
-set ( CPACK_RPM_SERVER_POST_UNINSTALL_SCRIPT_FILE "${SCR}/manticore.postun" )
-set ( CPACK_RPM_SERVER_PRE_UNINSTALL_SCRIPT_FILE "${SCR}/manticore.preun" )
 
 # server (core)
 set ( CPACK_RPM_SEARCHD_POST_INSTALL_SCRIPT_FILE "${dircore}/manticore.post" )

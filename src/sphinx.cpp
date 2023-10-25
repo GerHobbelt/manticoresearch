@@ -3071,7 +3071,7 @@ bool CSphIndex_VLN::CheckEnabledIndexes ( const CSphQuery & tQuery, int iThreads
 	int iCutoff = ApplyImplicitCutoff ( tQuery, {} );
 
 	CSphString sWarning;
-	SelectIteratorCtx_t tCtx ( tQuery.m_dFilters, tQuery.m_dFilterTree, tQuery.m_dIndexHints, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), tQuery.m_eCollation, iCutoff, m_iDocinfo, iThreads );
+	SelectIteratorCtx_t tCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), iCutoff, m_iDocinfo, iThreads );
 	CSphVector<SecondaryIndexInfo_t> dEnabledIndexes = SelectIterators ( tCtx, fCost, sWarning );
 
 	// disable pseudo sharding if any of the queries use secondary indexes/docid lookups
@@ -3137,7 +3137,8 @@ int64_t CSphIndex_VLN::GetCountFilter ( const CSphFilterSettings & tFilter ) con
 	if ( !m_pSIdx.get() || m_tDeadRowMap.HasDead() )
 		return -1;
 
-	SelectIteratorCtx_t tCtx ( {}, {}, {}, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), SPH_COLLATION_DEFAULT, 0, m_iDocinfo, 1 );
+	CSphQuery tQuery;
+	SelectIteratorCtx_t tCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), 0, m_iDocinfo, 1 );
 	if ( !tCtx.IsEnabled_SI(tFilter) )
 		return -1;
 
@@ -5227,10 +5228,11 @@ bool CSphIndex_VLN::Build_SetupColumnar ( std::unique_ptr<columnar::Builder_i> &
 
 static bool BuildSetupHistograms ( const ISphSchema & tSchema, std::unique_ptr<HistogramContainer_c> & pContainer, CSphVector<HistogramSource_t> & dHistograms )
 {
+	const int MAX_HISTOGRAM_SIZE = 8192;
 	for ( int i = 0; i < tSchema.GetAttrsCount(); i++ )
 	{
 		const CSphColumnInfo & tAttr = tSchema.GetAttr(i);
-		Histogram_i * pHistogram = CreateHistogram ( tAttr.m_sName, tAttr.m_eAttrType ).release();
+		Histogram_i * pHistogram = CreateHistogram ( tAttr.m_sName, tAttr.m_eAttrType, MAX_HISTOGRAM_SIZE ).release();
 		if ( pHistogram )
 			dHistograms.Add ( { pHistogram, i, tAttr.m_eAttrType } );
 	}
@@ -8012,7 +8014,7 @@ bool CSphIndex_VLN::SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * p
 	// 4. estimate the cost of intersecting FT and iterator results
 	NodeEstimate_t tEstimate = pRanker->Estimate ( m_iDocinfo );
 
-	SelectIteratorCtx_t tSelectIteratorCtx ( tQuery.m_dFilters, tQuery.m_dFilterTree, tQuery.m_dIndexHints, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), tQuery.m_eCollation, iCutoff, m_iDocinfo, iThreads );
+	SelectIteratorCtx_t tSelectIteratorCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), iCutoff, m_iDocinfo, iThreads );
 	tSelectIteratorCtx.IgnorePushCost();
 	float fBestCost = FLT_MAX;
 	dSIInfo = SelectIterators ( tSelectIteratorCtx, fBestCost, sWarning );
@@ -8073,7 +8075,7 @@ RowidIterator_i * CSphIndex_VLN::SpawnIterators ( const CSphQuery & tQuery, CSph
 		// b. Run this with the same number of docs and number of threads as in GetPseudoShardingMetric()
 		// For now we use approach b) as it is simpler
 		float fBestCost = FLT_MAX;
-		SelectIteratorCtx_t tSelectIteratorCtx ( tQuery.m_dFilters, tQuery.m_dFilterTree, tQuery.m_dIndexHints, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), tQuery.m_eCollation, iCutoff, m_iDocinfo, iThreads );
+		SelectIteratorCtx_t tSelectIteratorCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), iCutoff, m_iDocinfo, iThreads );
 		dSIInfo = SelectIterators ( tSelectIteratorCtx, fBestCost, tMeta.m_sWarning );
 	}
 	else
@@ -8223,6 +8225,10 @@ bool CSphIndex_VLN::MultiScan ( CSphQueryResult & tResult, const CSphQuery & tQu
 	// using -1 might be also interpreted as 0xFFFFFFFF in such context!
 	// Does it intended?
 	tMatch.m_iTag = tCtx.m_dCalcFinal.GetLength() ? -1 : tArgs.m_iTag;
+
+	auto& tSess = session::Info();
+	auto tDocstores = std::make_pair ( (const DocstoreReader_i*)this, m_pDocstore.get() );
+	tSess.m_pSessionOpaque = (void*)&tDocstores;
 
 	SwitchProfile ( tMeta.m_pProfile, SPH_QSTATE_SETUP_ITER );
 
@@ -9585,7 +9591,7 @@ static ESphEvalStage GetEarliestStage ( ESphEvalStage eStage, const CSphColumnIn
 }
 
 
-bool CSphQueryContext::SetupCalc ( CSphQueryResultMeta & tMeta, const ISphSchema & tInSchema, const CSphSchema & tSchema, const BYTE * pBlobPool, const columnar::Columnar_i * pColumnar, const CSphVector<const ISphSchema *> & dInSchemas )
+bool CSphQueryContext::SetupCalc ( CSphQueryResultMeta & tMeta, const ISphSchema & tInSchema, const ISphSchema & tSchema, const BYTE * pBlobPool, const columnar::Columnar_i * pColumnar, const CSphVector<const ISphSchema *> & dInSchemas )
 {
 	m_dCalcFilter.Resize(0);
 	m_dCalcSort.Resize(0);
@@ -9919,7 +9925,7 @@ bool CSphQueryContext::CreateFilters ( CreateFilterContext_t & tCtx, CSphString 
 
 static int sphQueryHeightCalc ( const XQNode_t * pNode )
 {
-	if ( !pNode->m_dChildren.GetLength() )
+	if ( pNode->m_dChildren.IsEmpty() )
 	{
 		// exception, pre-cached OR of tiny (rare) keywords is just one node
 		if ( pNode->GetOp()==SPH_QUERY_OR )
@@ -9969,21 +9975,42 @@ static int sphQueryHeightCalc ( const XQNode_t * pNode )
 #define SPH_EXTNODE_STACK_SIZE ( 160 )
 #endif
 
+// extra stack which need despite EXTNODE_STACK_SIZE
+constexpr DWORD SPH_EXTRA_BUDGET = 0x2000;
+
+/*
+Why EXTRA_BUDGET?
+
+CREATE TABLE if not exists t ( id bigint, f text );
+replace into t (id,f) values (1, 'a b');
+flush rtindex t;
+
+crash:
+SELECT * FROM t WHERE MATCH('(a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b b "a b") | ( a -b )');
+WARNING: Stack used 42409, need 88000, sum 130409, have 131072
+(data got on debug build with clang 14 on linux)
+
+Strictly speaking, we need to mock it - create rt, then query - without any disk footprint.
+ You see, that having 131072 is not enough to process query which needs 130409. Tree size is right, but extra space is need - first, to move inside query evaluation,
+ and also on query leaves - reading docs/hits from disk with extra functions for caching, working with fs, profiling, etc. That is oneshot extra budget over calculated expression stuff.
+*/
+
 int ConsiderStack ( const struct XQNode_t * pRoot, CSphString & sError )
 {
 	int iHeight = 0;
 	if ( pRoot )
 		iHeight = sphQueryHeightCalc ( pRoot );
 
-	auto iStackNeed = iHeight * SPH_EXTNODE_STACK_SIZE;
-	int64_t iQueryStack = Threads::GetStackUsed ()+iStackNeed;
+	auto iStackNeed = iHeight * SPH_EXTNODE_STACK_SIZE + SPH_EXTRA_BUDGET;
+	int64_t iQueryStack = Threads::GetStackUsed() + iStackNeed;
+//	sphWarning ( "Stack used %d, need %d, sum %d, have %d", (int)Threads::GetStackUsed(), iStackNeed, (int)iQueryStack, Threads::MyStackSize() );
 	auto iMyStackSize = Threads::MyStackSize ();
 	if ( iMyStackSize>=iQueryStack )
 		return -1;
 
-	// align as stack of tree + 32K
-	// (being run in new coro, most probably you'll start near the top of stack, so 32k should be enouth)
-	iQueryStack = iStackNeed + 32*1024;
+	// align as stack of tree + 8K
+	// (being run in new coro, most probably you'll start near the top of stack, so 32k should be enough)
+	iQueryStack = iStackNeed + 8*1024;
 	if ( Threads::GetMaxCoroStackSize()>=iQueryStack )
 		return (int)iQueryStack;
 

@@ -3881,6 +3881,55 @@ bool GetItemsLeftInSchema ( const ISphSchema & tSchema, bool bOnlyPlain, const C
 }
 
 
+struct AttrSort_fn
+{
+	const ISphSchema & m_tSchema;
+
+	AttrSort_fn ( const ISphSchema & tSchema )
+		: m_tSchema ( tSchema )
+	{}
+
+	bool IsLess ( int iA, int iB ) const
+	{
+		const auto & sNameA = m_tSchema.GetAttr(iA).m_sName;
+		const auto & sNameB = m_tSchema.GetAttr(iB).m_sName;
+		bool bDocIdA = sNameA==sphGetDocidName();
+		bool bDocIdB = sNameB==sphGetDocidName();
+		if ( bDocIdA || bDocIdB )
+			return bDocIdA || !bDocIdB;
+
+		bool bBlobLocA = sNameA==sphGetBlobLocatorName();
+		bool bBlobLocB = sNameB==sphGetBlobLocatorName();
+		if ( bBlobLocA ||bBlobLocB )
+			return bBlobLocA || !bBlobLocB;
+
+		bool bFieldA = !!m_tSchema.GetField ( sNameA.cstr() );
+		bool bFieldB = !!m_tSchema.GetField ( sNameB.cstr() );
+		if ( bFieldA || bFieldB )
+		{
+			if ( bFieldA && bFieldB )
+			{
+				int iFieldIdA = m_tSchema.GetFieldIndex ( sNameA.cstr() );
+				int iFieldIdB = m_tSchema.GetFieldIndex ( sNameB.cstr() );
+				return iFieldIdA < iFieldIdB;
+			}
+
+			return bFieldA || !bFieldB;
+		}
+
+		int iIndexA = m_tSchema.GetAttr(iA).m_iIndex;
+		int iIndexB = m_tSchema.GetAttr(iB).m_iIndex;
+		if ( iIndexA==-1 )
+			iIndexA = iA;
+
+		if ( iIndexB==-1 )
+			iIndexB = iB;
+
+		return iIndexA < iIndexB;
+	}
+};
+
+
 void DoExpansion ( const ISphSchema & tSchema, const CSphVector<int> & dAttrsInSchema, const CSphVector<CSphQueryItem> & dItems, CSphVector<CSphQueryItem> & dExpanded )
 {
 	bool bExpandedAsterisk = false;
@@ -3893,7 +3942,10 @@ void DoExpansion ( const ISphSchema & tSchema, const CSphVector<int> & dAttrsInS
 
 			bExpandedAsterisk = true;
 
-			for ( auto iAttr : dAttrsInSchema )
+			IntVec_t dSortedAttrsInSchema = dAttrsInSchema;
+			dSortedAttrsInSchema.Sort ( AttrSort_fn(tSchema) );
+
+			for ( auto iAttr : dSortedAttrsInSchema )
 			{
 				const CSphColumnInfo & tCol = tSchema.GetAttr(iAttr);
 				CSphQueryItem & tExpanded = dExpanded.Add();
@@ -4533,6 +4585,10 @@ bool MinimizeSchemas ( AggrResult_t & tRes )
 			bAllEqual = false;
 	}
 
+	// still want to set base schema from one of the result set
+	if ( !bSchemaBaseSet && bAllEqual && tRes.m_dResults.GetLength() )
+		tRes.m_tSchema = tRes.m_dResults[0].m_tSchema;
+
 	return bAllEqual;
 }
 
@@ -4737,7 +4793,9 @@ void FrontendSchemaBuilder_c::Finalize()
 		tFrontend.m_tLocator = s.m_tLocator;
 		tFrontend.m_eAttrType = s.m_eAttrType;
 		tFrontend.m_eAggrFunc = s.m_eAggrFunc; // for a sort loop just below
-		tFrontend.m_iIndex = i; // to make the aggr sort loop just below stable
+		if ( !m_bAgent )
+			tFrontend.m_iIndex = i; // to make the aggr sort loop just below stable
+
 		tFrontend.m_uFieldFlags = s.m_uFieldFlags;
 	}
 
@@ -5546,9 +5604,41 @@ void SearchHandler_c::OnRunFinished()
 		tResult.m_iMatches = tResult.GetLength();
 }
 
+// return sequence of columns as 'show create table', or 'describe' reveal
+static StrVec_t GetDefaultSchema ( const CSphIndex* pIndex )
+{
+	StrVec_t dRes;
+	auto& tSchema = pIndex->GetMatchSchema();
+	if ( tSchema.GetAttrsCount()==0 )
+		return dRes;
+	assert ( tSchema.GetAttr ( 0 ).m_sName == sphGetDocidName() );
+	const auto& tId = tSchema.GetAttr ( 0 );
+	dRes.Add ( tId.m_sName );
+
+	for ( int i = 0; i < tSchema.GetFieldsCount(); ++i )
+	{
+		const auto& tField = tSchema.GetField ( i );
+		dRes.Add ( tField.m_sName );
+	}
+
+	for ( int i = 1; i < tSchema.GetAttrsCount(); ++i ) // from 1, as 0 is docID and already emerged
+	{
+		const auto& tAttr = tSchema.GetAttr ( i );
+		if ( sphIsInternalAttr ( tAttr ) )
+			continue;
+
+		if ( tSchema.GetField ( tAttr.m_sName.cstr() ) )
+			continue; // already described it as a field property
+
+		dRes.Add ( tAttr.m_sName );
+	}
+	return dRes;
+}
+
 SphQueueSettings_t SearchHandler_c::MakeQueueSettings ( const CSphIndex * pIndex, int iMaxMatches, bool bForceSingleThread, ISphExprHook * pHook ) const
 {
-	SphQueueSettings_t tQS ( pIndex->GetMatchSchema (), m_pProfile );
+	auto& tSess = session::Info();
+	SphQueueSettings_t tQS ( pIndex->GetMatchSchema (), m_pProfile, tSess.m_pSqlRowBuffer, &tSess.m_pSessionOpaque );
 	tQS.m_bComputeItems = true;
 	tQS.m_pCollection = m_pCollectedDocs;
 	tQS.m_pHook = pHook;
@@ -5559,6 +5649,7 @@ SphQueueSettings_t SearchHandler_c::MakeQueueSettings ( const CSphIndex * pIndex
 	tQS.m_fnGetCount			= [pIndex](){ return pIndex->GetCount(); };
 	tQS.m_bEnableFastDistinct = m_dLocal.GetLength()<=1;
 	tQS.m_bForceSingleThread = bForceSingleThread;
+	tQS.m_dCreateSchema = GetDefaultSchema ( pIndex );
 	return tQS;
 }
 
@@ -7376,6 +7467,15 @@ bool sphCheckWeCanModify ( StmtErrorReporter_i& tOut )
 		return true;
 
 	tOut.Error ( "connection is read-only");
+	return false;
+}
+
+bool sphCheckWeCanModify ( CSphString& sError )
+{
+	if ( sphCheckWeCanModify() )
+		return true;
+
+	sError = "connection is read-only";
 	return false;
 }
 
@@ -11798,8 +11898,52 @@ static void AddAttributeDesc ( VectorLike & dOut, const CSphColumnInfo & tAttr, 
 }
 
 
-void DescribeLocalSchema ( VectorLike & dOut, const CSphSchema & tSchema, bool bIsTemplate )
+void ShowFields ( VectorLike& dOut, const CSphSchema& tSchema )
 {
+	// result set header packet
+	dOut.SetColNames ( { "Field", "Type", "Null", "Key", "Default", "Extra" } );
+
+	auto Tail = [&dOut](const auto& tCol) { dOut.Add (tCol); dOut.Add ( "NO" ); dOut.Add ( "" ); dOut.Add ( "" ); dOut.Add ( "" ); };
+
+	assert ( tSchema.GetAttr ( 0 ).m_sName == sphGetDocidName() );
+	const auto& tId = tSchema.GetAttr ( 0 );
+	if ( dOut.MatchAdd ( tId.m_sName.cstr() ) )
+		Tail ( sphTypeName ( tId.m_eAttrType ) );
+
+	for ( int i = 0; i < tSchema.GetFieldsCount(); ++i )
+	{
+		const auto& tField = tSchema.GetField ( i );
+		if ( !dOut.MatchAdd ( tField.m_sName.cstr() ) )
+			continue;
+
+		const CSphColumnInfo* pAttr = tSchema.GetAttr ( tField.m_sName.cstr() );
+		Tail ( pAttr ? "string" : "text" );
+	}
+
+	for ( int i = 1; i < tSchema.GetAttrsCount(); ++i ) // from 1, as 0 is docID and already emerged
+	{
+		const auto& tAttr = tSchema.GetAttr ( i );
+		if ( sphIsInternalAttr ( tAttr ) )
+			continue;
+
+		if ( tSchema.GetField ( tAttr.m_sName.cstr() ) )
+			continue; // already described it as a field property
+
+		if ( !dOut.MatchAdd ( tAttr.m_sName.cstr() ) )
+			continue;
+
+		if ( tAttr.m_eAttrType == SPH_ATTR_INTEGER && tAttr.m_tLocator.m_iBitCount != ROWITEM_BITS && tAttr.m_tLocator.m_iBitCount > 0 )
+			Tail ( SphSprintf ( "%s:%d", sphTypeName ( tAttr.m_eAttrType ), tAttr.m_tLocator.m_iBitCount ) );
+		else
+			Tail ( sphTypeName ( tAttr.m_eAttrType ) );
+	}
+}
+
+void DescribeLocalSchema ( VectorLike & dOut, const CSphSchema & tSchema, bool bIsTemplate, bool bShowFields )
+{
+	if ( bShowFields )
+		return ShowFields ( dOut, tSchema );
+
 	// result set header packet
 	dOut.SetColNames ( { "Field", "Type", "Properties" } );
 
@@ -11870,7 +12014,9 @@ void HandleMysqlDescribe ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 		if ( tStmt.m_dStringSubkeys.GetLength()==1 && tStmt.m_dStringSubkeys[0].EqN(".table") )
 			bNeedInternal = true;
 
-		if ( bNeedInternal && ServedDesc_t::IsMutable ( pServed ) )
+		bool bShowFields = tStmt.m_iIntParam == -2; // -2 emitted in parser
+
+		if ( bNeedInternal && ServedDesc_t::IsMutable ( pServed ) && !bShowFields )
 		{
 			RIdx_T<const RtIndex_i*> pRtIndex { pServed };
 			pSchema = &pRtIndex->GetInternalSchema();
@@ -11878,7 +12024,7 @@ void HandleMysqlDescribe ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 
 		const CSphSchema &tSchema = *pSchema;
 		assert ( pServed->m_eType==IndexType_e::TEMPLATE || tSchema.GetAttr(0).m_sName==sphGetDocidName() );
-		DescribeLocalSchema ( dOut, tSchema, pServed->m_eType==IndexType_e::TEMPLATE );
+		DescribeLocalSchema ( dOut, tSchema, pServed->m_eType==IndexType_e::TEMPLATE, bShowFields );
 	} else
 	{
 		auto pDistr = GetDistr ( tStmt.m_sIndex );
@@ -12130,7 +12276,7 @@ static void HandleMysqlCreateTableLike ( RowBuffer_i & tOut, const SqlStmt_t & t
 	};
 
 	CSphVector<SqlStmt_t> dCreateTableStmts;
-	if ( !ParseDdl ( sCreateTable.cstr(), sCreateTable.Length(), dCreateTableStmts, sError ) )
+	if ( !ParseDdl ( FromStr ( sCreateTable ), dCreateTableStmts, sError ) )
 	{
 		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		return;
@@ -13690,6 +13836,338 @@ void HandleMysqlMultiStmt ( const CSphVector<SqlStmt_t> & dStmt, CSphQueryResult
 	}
 }
 
+static bool HandleSetLocal ( CSphString& sError, const CSphString& sName, int64_t iSetValue, CSphString sSetValue, CSphSessionAccum& tAcc )
+{
+	auto& tSess = session::Info();
+	if ( sName == "wait_timeout" || sName == "net_read_timeout" )
+	{
+		tSess.SetTimeoutS ( iSetValue );
+		return true;
+	}
+
+	if ( sName == "throttling_period" )
+	{
+		tSess.SetThrottlingPeriodMS ( iSetValue );
+		return true;
+	}
+
+
+	if ( sName == "net_write_timeout" )
+	{
+		tSess.SetWTimeoutS ( iSetValue );
+		return true;
+	}
+
+	if ( sName == "optimize_by_id" )
+	{
+		session::SetOptimizeById ( !!iSetValue );
+		return true;
+	}
+
+	if ( sName == "max_threads_per_query" )
+	{
+		tSess.SetDistThreads ( iSetValue );
+		return true;
+	}
+
+	if ( sName == "ro" )
+	{
+		if ( !tSess.GetVip() )
+		{
+			if ( !sphCheckWeCanModify (sError) )
+				return true;
+		}
+		tSess.SetReadOnly ( !!iSetValue );
+		return true;
+	}
+
+	if ( sName == "threads_ex" )
+	{
+		auto dDispatchers = Dispatcher::ParseTemplates ( sSetValue.cstr() );
+		tSess.SetBaseDispatcherTemplate ( dDispatchers.first );
+		tSess.SetPseudoShardingDispatcherTemplate ( dDispatchers.second );
+		return true;
+	}
+
+	// move check here from bison parser. Only boolean allowed below.
+	if ( iSetValue != 0 && iSetValue != 1 )
+	{
+		sError = SphSprintf ( "sphinxql: only 0 and 1 could be used as boolean values near '%d'", iSetValue );
+		return true;
+	}
+
+	if ( sName == "autocommit" )
+	{
+		// per-session AUTOCOMMIT
+		bool bAutoCommit = ( iSetValue != 0 );
+		auto pSession = session::Info().GetClientSession();
+		pSession->m_bAutoCommit = bAutoCommit;
+		pSession->m_bInTransaction = false;
+
+		// commit all pending changes
+		if ( bAutoCommit && tAcc.GetIndex() && !HandleCmdReplicate ( *tAcc.GetAcc(), sError ) )
+			return false;
+		return true;
+	}
+
+	if ( sName == "collation_connection" )
+	{
+		// per-session COLLATION_CONNECTION
+		CSphString& sVal = sSetValue;
+		sVal.ToLower();
+
+		tSess.SetCollation ( sphCollationFromName ( sVal, &sError ) );
+		return true;
+	}
+
+	if ( sName == "sql_quote_show_create" )
+	{
+		// per-session sql_quote_show_create
+		tSess.SetSqlQuoteShowCreate ( iSetValue!=0 );
+		return true;
+	}
+
+	if ( sName == "character_set_results"
+				|| sName == "sql_auto_is_null"
+				|| sName == "sql_safe_updates"
+				|| sName == "sql_mode"
+				|| sName == "time_zone" )
+	{
+		// per-session CHARACTER_SET_RESULTS at all; just ignore for now
+		return true;
+	}
+
+	return false;
+}
+
+static bool HandleSetGlobal ( CSphString& sError, const CSphString& sName, int64_t iSetValue, CSphString sSetValue )
+{
+	auto& tSess = session::Info();
+	if ( !tSess.GetVip() && !sphCheckWeCanModify ( sError ) )
+		return true;
+
+	// global server variable
+	if ( sName == "query_log_format" )
+	{
+		if ( sSetValue == "plain" )
+			g_eLogFormat = LOG_FORMAT_PLAIN;
+		else if ( sSetValue == "sphinxql" )
+			g_eLogFormat = LOG_FORMAT_SPHINXQL;
+		else
+			sError = "Unknown query_log_format value (must be plain or sphinxql)";
+		return true;
+	}
+
+	if ( sName == "log_level" )
+	{
+		if ( sSetValue == "info" )
+			g_eLogLevel = SPH_LOG_INFO;
+		else if ( sSetValue == "debug" )
+			g_eLogLevel = SPH_LOG_DEBUG;
+		else if ( sSetValue == "debugv" )
+			g_eLogLevel = SPH_LOG_VERBOSE_DEBUG;
+		else if ( sSetValue == "debugvv" )
+			g_eLogLevel = SPH_LOG_VERY_VERBOSE_DEBUG;
+		else if ( sSetValue == "replication" )
+			g_eLogLevel = SPH_LOG_RPL_DEBUG;
+		else if ( sSetValue.Begins ( "http" ) )
+		{
+			if ( !HttpSetLogVerbosity ( sSetValue ) )
+				sError = "Unknown log_level value (http_on, http_off, http_bad_req_on, http_bad_req_off)";
+		} else
+			sError = "Unknown log_level value (must be one of info, debug, debugv, debugvv, replication)";
+		return true;
+	}
+
+	if ( sName == "query_log_min_msec" )
+	{
+		g_iQueryLogMinMs = (int)iSetValue;
+		return true;
+	}
+
+	if ( sName == "qcache_max_bytes" )
+	{
+		const QcacheStatus_t& s = QcacheGetStatus();
+		QcacheSetup ( iSetValue, s.m_iThreshMs, s.m_iTtlS );
+		return true;
+	}
+
+	if ( sName == "qcache_thresh_msec" )
+	{
+		const QcacheStatus_t& s = QcacheGetStatus();
+		QcacheSetup ( s.m_iMaxBytes, (int)iSetValue, s.m_iTtlS );
+		return true;
+	}
+
+	if ( sName == "qcache_ttl_sec" )
+	{
+		const QcacheStatus_t& s = QcacheGetStatus();
+		QcacheSetup ( s.m_iMaxBytes, s.m_iThreshMs, (int)iSetValue );
+		return true;
+	}
+
+	if ( sName == "log_debug_filter" )
+	{
+		int iLen = sName.Length();
+		iLen = Min ( iLen, SPH_MAX_FILENAME_LEN );
+		memcpy ( g_sLogFilter, sSetValue.cstr(), iLen );
+		g_sLogFilter[iLen] = '\0';
+		g_iLogFilterLen = iLen;
+		return true;
+	}
+
+	if ( sName == "log_http_filter" )
+	{
+		SetLogHttpFilter ( sSetValue );
+		return true;
+	}
+	if ( sName == "es_compat" )
+	{
+		return !SetLogManagement ( sSetValue, sError );
+	}
+
+	if ( sName == "net_wait" )
+	{
+		g_tmWaitUS = iSetValue * 1000LL;
+		return true;
+	}
+
+	if ( sName == "grouping_in_utc" )
+	{
+		g_bGroupingInUtc = !!iSetValue;
+		SetGroupingInUtcExpr ( g_bGroupingInUtc );
+		SetGroupingInUtcSort ( g_bGroupingInUtc );
+		return true;
+	}
+
+	if ( sName == "cpustats" )
+	{
+		g_bCpuStats = !!iSetValue;
+		return true;
+	}
+
+	if ( sName == "iostats" )
+	{
+		g_bIOStats = !!iSetValue;
+		return true;
+	}
+
+	if ( sName == "coredump" )
+	{
+		g_bCoreDump = !!iSetValue;
+		return true;
+	}
+
+	if ( sName == "maintenance" )
+	{
+		if ( tSess.GetVip() )
+			g_bMaintenance = !!iSetValue;
+		else
+			sError = "Only VIP connections can set maintenance mode";
+		return true;
+	}
+
+	if ( sName == "wait_timeout" )
+	{
+		if ( tSess.GetVip() )
+			g_iClientQlTimeoutS = iSetValue;
+		else
+			sError = "Only VIP connections can change global wait_timeout value";
+		return true;
+	}
+
+	if ( sName == "net_read_timeout" || sName == "read_timeout")
+	{
+		if ( tSess.GetVip() )
+			g_iReadTimeoutS = iSetValue;
+		else
+			sError = "Only VIP connections can change global net_read_timeout value";
+		return true;
+	}
+
+	if ( sName == "net_write_timeout" )
+	{
+		if ( tSess.GetVip() )
+			g_iWriteTimeoutS = iSetValue;
+		else
+			sError = "Only VIP connections can change global net_write_timeout value";
+		return true;
+	}
+
+	if ( sName == "network_timeout" )
+	{
+		if ( tSess.GetVip() )
+		{
+			g_iWriteTimeoutS = iSetValue;
+			g_iReadTimeoutS = iSetValue;
+		}
+		else
+			sError = "Only VIP connections can change global network_timeout value";
+		return true;
+	}
+
+	if ( sName == "throttling_period" )
+	{
+		if ( tSess.GetVip() )
+			Threads::Coro::SetDefaultThrottlingPeriodMS ( iSetValue );
+		else
+			sError = "Only VIP connections can change global throttling_period value";
+		return true;
+	}
+
+	if ( sName == "max_threads_per_query" )
+	{
+		g_iDistThreads = iSetValue; // that is not dangerous to allow everybody change the value
+		return true;
+	}
+
+	if ( sName == "auto_optimize" )
+	{
+		if ( !AUTOOPTIMIZE_NEEDS_VIP || tSess.GetVip() )
+			g_iAutoOptimizeCutoffMultiplier = iSetValue;
+		else
+			sError = "Only VIP connections can change global auto_optimize value";
+		return true;
+	}
+
+	if ( sName == "optimize_cutoff" )
+	{
+		if ( iSetValue < 1 )
+			sError = SphSprintf( "optimize_cutoff should be greater than 0, got %d", iSetValue );
+		else
+			MutableIndexSettings_c::GetDefaults().m_iOptimizeCutoff = iSetValue;
+		return true;
+	}
+
+	if ( sName == "pseudo_sharding" )
+	{
+		g_bSplit = !!iSetValue;
+		return true;
+	}
+
+	if ( sName == "secondary_indexes" )
+	{
+		SetSecondaryIndexDefault ( iSetValue != 0 ? SIDefault_e::ENABLED : SIDefault_e::DISABLED );
+		return true;
+	}
+
+	if ( sName == "accurate_aggregation" )
+	{
+		SetAccurateAggregationDefault ( !!iSetValue );
+		return true;
+	}
+
+	if ( sName == "threads_ex" )
+	{
+		if ( !THREAD_EX_NEEDS_VIP || tSess.GetVip() )
+			Dispatcher::SetGlobalDispatchers ( sSetValue.cstr() );
+		else
+			sError = "Only VIP connections can change global threads_ex value";
+		return true;
+	}
+	return false;
+}
+
 void HandleMysqlSet ( RowBuffer_i & tOut, SqlStmt_t & tStmt, CSphSessionAccum & tAcc )
 {
 	auto& tSess = session::Info();
@@ -13701,93 +14179,25 @@ void HandleMysqlSet ( RowBuffer_i & tOut, SqlStmt_t & tStmt, CSphSessionAccum & 
 	{
 	case SET_LOCAL: // SET foo = value|'svalue'|null
 
-		if ( tStmt.m_sSetName=="wait_timeout" )
+		if ( !HandleSetLocal ( sError, tStmt.m_sSetName, tStmt.m_iSetValue, tStmt.m_sSetValue, tAcc) )
 		{
-			tSess.SetTimeoutS ( tStmt.m_iSetValue );
-			break;
-		}
-
-		if ( tStmt.m_sSetName=="throttling_period" )
-		{
-			tSess.SetThrottlingPeriodMS( tStmt.m_iSetValue );
-			break;
-		}
-
-		if ( tStmt.m_sSetName == "optimize_by_id" )
-		{
-			session::SetOptimizeById ( !!tStmt.m_iSetValue );
-			break;
-		}
-
-		if ( tStmt.m_sSetName=="max_threads_per_query" )
-		{
-			tSess.SetDistThreads ( tStmt.m_iSetValue );
-			break;
-		}
-
-		if ( tStmt.m_sSetName == "ro" )
-		{
-			if ( !tSess.GetVip() )
+			if ( tStmt.m_sSetName == "profiling" )
 			{
-				if (!sphCheckWeCanModify ( tStmt.m_sStmt, tOut ) )
-					return;
+				// per-session PROFILING
+				tSess.SetProfile ( ParseProfileFormat ( tStmt ) );
+
+			} else
+			{
+				// unknown variable, return error
+				tOut.ErrorEx ( tStmt.m_sStmt, "Unknown session variable '%s' in SET statement", tStmt.m_sSetName.cstr() );
+				return;
 			}
-			tSess.SetReadOnly ( !!tStmt.m_iSetValue );
+		}
+
+		if ( sError.IsEmpty() )
 			break;
-		}
-
-		if ( tStmt.m_sSetName == "threads_ex" )
-		{
-			auto dDispatchers = Dispatcher::ParseTemplates ( tStmt.m_sSetValue.cstr() );
-			tSess.SetBaseDispatcherTemplate ( dDispatchers.first );
-			tSess.SetPseudoShardingDispatcherTemplate ( dDispatchers.second );
-			break;
-		}
-
-		// move check here from bison parser. Only boolean allowed below.
-		if ( tStmt.m_iSetValue!=0 && tStmt.m_iSetValue!=1 )
-		{
-			tOut.ErrorEx ( tStmt.m_sStmt, "sphinxql: only 0 and 1 could be used as boolean values near '%d'", tStmt.m_iSetValue );
-			return;
-		}
-
-		if ( tStmt.m_sSetName=="autocommit" )
-		{
-			// per-session AUTOCOMMIT
-			bool bAutoCommit = ( tStmt.m_iSetValue != 0 );
-			auto pSession = session::Info().GetClientSession();
-			pSession->m_bAutoCommit = ( tStmt.m_iSetValue!=0 );
-			pSession->m_bInTransaction = false;
-
-			// commit all pending changes
-			if ( bAutoCommit && tAcc.GetIndex() && !HandleCmdReplicate ( *tAcc.GetAcc(), sError ) )
-				return tOut.Error ( tStmt.m_sStmt, sError.cstr() );
-		} else if ( tStmt.m_sSetName=="collation_connection" )
-		{
-			// per-session COLLATION_CONNECTION
-			CSphString & sVal = tStmt.m_sSetValue;
-			sVal.ToLower();
-
-			tSess.SetCollation ( sphCollationFromName ( sVal, &sError ) );
-			if ( !sError.IsEmpty() )
-				return tOut.Error ( tStmt.m_sStmt, sError.cstr() );
-		} else if ( tStmt.m_sSetName=="character_set_results"
-			|| tStmt.m_sSetName=="sql_auto_is_null"
-			|| tStmt.m_sSetName=="sql_safe_updates"
-			|| tStmt.m_sSetName=="sql_mode"
-			|| tStmt.m_sSetName=="time_zone" )
-		{
-			// per-session CHARACTER_SET_RESULTS at all; just ignore for now
-
-		} else if ( tStmt.m_sSetName=="profiling" )
-		{
-			// per-session PROFILING
-			tSess.SetProfile ( ParseProfileFormat ( tStmt ) );
-
-		} else
-		{
-			// unknown variable, return error
-			tOut.ErrorEx ( tStmt.m_sStmt, "Unknown session variable '%s' in SET statement", tStmt.m_sSetName.cstr () );
+		else {
+			tOut.ErrorEx ( tStmt.m_sStmt, "%s", sError.cstr() );
 			return;
 		}
 		break;
@@ -13803,167 +14213,16 @@ void HandleMysqlSet ( RowBuffer_i & tOut, SqlStmt_t & tStmt, CSphSessionAccum & 
 
 	case SET_GLOBAL_SVAR: // SET GLOBAL foo = iValue|'string'
 
-		if ( !tSess.GetVip() && !sphCheckWeCanModify ( tStmt.m_sStmt, tOut ) )
+		if ( !HandleSetGlobal ( sError, tStmt.m_sSetName, tStmt.m_iSetValue, tStmt.m_sSetValue ) )
+		{
+			tOut.ErrorEx ( tStmt.m_sStmt, "Unknown system variable '%s'", tStmt.m_sSetName.cstr() );
 			return;
-		// global server variable
-		if ( tStmt.m_sSetName=="query_log_format" )
-		{
-			if ( tStmt.m_sSetValue=="plain" )
-				g_eLogFormat = LOG_FORMAT_PLAIN;
-			else if ( tStmt.m_sSetValue=="sphinxql" )
-				g_eLogFormat = LOG_FORMAT_SPHINXQL;
-			else
-			{
-				tOut.Error ( tStmt.m_sStmt, "Unknown query_log_format value (must be plain or sphinxql)" );
-				return;
-			}
-		} else if ( tStmt.m_sSetName=="log_level" )
-		{
-			if ( tStmt.m_sSetValue=="info" )
-				g_eLogLevel = SPH_LOG_INFO;
-			else if ( tStmt.m_sSetValue=="debug" )
-				g_eLogLevel = SPH_LOG_DEBUG;
-			else if ( tStmt.m_sSetValue=="debugv" )
-				g_eLogLevel = SPH_LOG_VERBOSE_DEBUG;
-			else if ( tStmt.m_sSetValue=="debugvv" )
-				g_eLogLevel = SPH_LOG_VERY_VERBOSE_DEBUG;
-			else if ( tStmt.m_sSetValue=="replication" )
-				g_eLogLevel = SPH_LOG_RPL_DEBUG;
-			else if ( tStmt.m_sSetValue.Begins ( "http" ) )
-			{
-				if ( !HttpSetLogVerbosity ( tStmt.m_sSetValue ) )
-				{
-					tOut.Error ( tStmt.m_sStmt, "Unknown log_level value (http_on, http_off, http_bad_req_on, http_bad_req_off)" );
-					return;
-				}
-			} else
-			{
-				tOut.Error ( tStmt.m_sStmt, "Unknown log_level value (must be one of info, debug, debugv, debugvv, replication)" );
-				return;
-			}
-		} else if ( tStmt.m_sSetName=="query_log_min_msec" )
-		{
-			g_iQueryLogMinMs = (int)tStmt.m_iSetValue;
-		} else if ( tStmt.m_sSetName=="qcache_max_bytes" )
-		{
-			const QcacheStatus_t & s = QcacheGetStatus();
-			QcacheSetup ( tStmt.m_iSetValue, s.m_iThreshMs, s.m_iTtlS );
-		} else if ( tStmt.m_sSetName=="qcache_thresh_msec" )
-		{
-			const QcacheStatus_t & s = QcacheGetStatus();
-			QcacheSetup ( s.m_iMaxBytes, (int)tStmt.m_iSetValue, s.m_iTtlS );
-		} else if ( tStmt.m_sSetName=="qcache_ttl_sec" )
-		{
-			const QcacheStatus_t & s = QcacheGetStatus();
-			QcacheSetup ( s.m_iMaxBytes, s.m_iThreshMs, (int)tStmt.m_iSetValue );
-		} else if ( tStmt.m_sSetName=="log_debug_filter" )
-		{
-			int iLen = tStmt.m_sSetValue.Length();
-			iLen = Min ( iLen, SPH_MAX_FILENAME_LEN );
-			memcpy ( g_sLogFilter, tStmt.m_sSetValue.cstr(), iLen );
-			g_sLogFilter[iLen] = '\0';
-			g_iLogFilterLen = iLen;
-		} else if ( tStmt.m_sSetName=="log_http_filter" )
-		{
-			SetLogHttpFilter ( tStmt.m_sSetValue );
+		}
 
-		} else if ( tStmt.m_sSetName=="es_compat" )
-		{
-			if ( !SetLogManagement ( tStmt.m_sSetValue, sError ) )
-			{
-				tOut.Error ( tStmt.m_sStmt, sError.cstr() );
-				return;
-			}
-
-		} else if ( tStmt.m_sSetName=="net_wait" )
-		{
-			g_tmWaitUS = tStmt.m_iSetValue * 1000LL;
-		} else if ( tStmt.m_sSetName=="grouping_in_utc")
-		{
-			g_bGroupingInUtc = !!tStmt.m_iSetValue;
-			SetGroupingInUtcExpr ( g_bGroupingInUtc );
-			SetGroupingInUtcSort ( g_bGroupingInUtc );
-		} else if ( tStmt.m_sSetName=="cpustats")
-		{
-			g_bCpuStats = !!tStmt.m_iSetValue;
-		} else if ( tStmt.m_sSetName=="iostats")
-		{
-			g_bIOStats = !!tStmt.m_iSetValue;
-		} else if ( tStmt.m_sSetName=="coredump")
-		{
-			g_bCoreDump = !!tStmt.m_iSetValue;
-		} else if ( tStmt.m_sSetName=="maintenance")
-		{
-			if ( tSess.GetVip() )
-				g_bMaintenance = !!tStmt.m_iSetValue;
-			else
-			{
-				tOut.Error ( tStmt.m_sStmt, "Only VIP connections can set maintenance mode" );
-				return;
-			}
-		} else if ( tStmt.m_sSetName=="wait_timeout" )
-		{
-			if ( tSess.GetVip() )
-				g_iClientQlTimeoutS = tStmt.m_iSetValue;
-			else
-			{
-				tOut.Error ( tStmt.m_sStmt, "Only VIP connections can change global wait_timeout value" );
-				return;
-			}
-		} else if ( tStmt.m_sSetName=="throttling_period" )
-		{
-			if ( tSess.GetVip() )
-				Threads::Coro::SetDefaultThrottlingPeriodMS ( tStmt.m_iSetValue );
-			else
-			{
-				tOut.Error ( tStmt.m_sStmt, "Only VIP connections can change global throttling_period value" );
-				return;
-			}
-		} else if ( tStmt.m_sSetName=="max_threads_per_query" )
-		{
-			g_iDistThreads = tStmt.m_iSetValue; // that is not dangerous to allow everybody change the value
-		} else if ( tStmt.m_sSetName=="auto_optimize")
-		{
-			if ( !AUTOOPTIMIZE_NEEDS_VIP || tSess.GetVip() )
-				g_iAutoOptimizeCutoffMultiplier = tStmt.m_iSetValue;
-			else
-			{
-				tOut.Error ( tStmt.m_sStmt, "Only VIP connections can change global auto_optimize value" );
-				return;
-			}
-		} else if ( tStmt.m_sSetName=="optimize_cutoff")
-		{
-			if ( tStmt.m_iSetValue<1 )
-			{
-				tOut.ErrorEx ( tStmt.m_sStmt, "optimize_cutoff should be greater than 0, got %d", tStmt.m_iSetValue );
-				return;
-			}
-
-			MutableIndexSettings_c::GetDefaults().m_iOptimizeCutoff = tStmt.m_iSetValue;
-
-		} else if ( tStmt.m_sSetName=="pseudo_sharding")
-		{
-			g_bSplit = !!tStmt.m_iSetValue;
-		} else if ( tStmt.m_sSetName=="secondary_indexes" )
-		{
-			SetSecondaryIndexDefault ( tStmt.m_iSetValue!=0 ? SIDefault_e::ENABLED : SIDefault_e::DISABLED );
-
-		} else if ( tStmt.m_sSetName=="accurate_aggregation" )
-		{
-			SetAccurateAggregationDefault ( !!tStmt.m_iSetValue );
-
-		} else if ( tStmt.m_sSetName == "threads_ex" )
-		{
-			if ( !THREAD_EX_NEEDS_VIP || tSess.GetVip() )
-				Dispatcher::SetGlobalDispatchers ( tStmt.m_sSetValue.cstr() );
-			else
-			{
-				tOut.Error ( tStmt.m_sStmt, "Only VIP connections can change global threads_ex value" );
-				return;
-			}
-
-		} else {
-			tOut.ErrorEx ( tStmt.m_sStmt, "Unknown system variable '%s'", tStmt.m_sSetName.cstr () );
+		if ( sError.IsEmpty() )
+			break;
+		else {
+			tOut.ErrorEx ( tStmt.m_sStmt, "%s", sError.cstr() );
 			return;
 		}
 		break;
@@ -13977,14 +14236,43 @@ void HandleMysqlSet ( RowBuffer_i & tOut, SqlStmt_t & tStmt, CSphSessionAccum & 
 		break;
 
 	case SET_CLUSTER_UVAR: // SET CLUSTER ident GLOBAL 'variable' = string|int
-	{
-		if ( !ReplicateSetOption ( tStmt.m_sIndex, tStmt.m_sSetName, tStmt.m_sSetValue, sError ) )
 		{
-			tOut.Error ( tStmt.m_sStmt, sError.cstr() );
+			if ( !ReplicateSetOption ( tStmt.m_sIndex, tStmt.m_sSetName, tStmt.m_sSetValue, sError ) )
+			{
+				tOut.Error ( tStmt.m_sStmt, sError.cstr() );
+				return;
+			}
+		}
+		break;
+	case SET_EXTRA: // relaxed SET SESSION foo=1, GLOBAL fee='bar', SESSION a='b', etc.
+		ARRAY_FOREACH (i, tStmt.m_dInsertSchema)
+		{
+			auto sName = tStmt.m_dInsertSchema[i];
+			sName.ToLower();
+			if ( tStmt.m_dInsertValues[i].m_iType & 1) // lowest bit 1 means 'session', 0 means 'global'
+			{
+				if ( !HandleSetLocal ( sError, sName, tStmt.m_dInsertValues[i].GetValueInt(), tStmt.m_dInsertValues[i].m_sVal, tAcc ) )
+				{
+					// unknown variable, return error
+					tOut.ErrorEx ( tStmt.m_sStmt, "Unknown session variable '%s' in SET statement", sName.cstr() );
+					return;
+				}
+			} else {
+				if ( !HandleSetGlobal ( sError, sName, tStmt.m_dInsertValues[i].GetValueInt(), tStmt.m_dInsertValues[i].m_sVal ) )
+				{
+					// unknown variable, return error
+					tOut.ErrorEx ( tStmt.m_sStmt, "Unknown system variable '%s'", sName.cstr() );
+					return;
+				}
+			}
+		}
+
+		if ( !sError.IsEmpty() )
+		{
+			tOut.ErrorEx ( tStmt.m_sStmt, "%s", sError.cstr() );
 			return;
 		}
-	}
-	break;
+		break;
 
 	default:
 		tOut.ErrorEx ( tStmt.m_sStmt, "internal error: unhandled SET mode %d", (int) tStmt.m_eSet );
@@ -14572,12 +14860,13 @@ void HandleSched ( RowBuffer_i & tOut )
 	tOut.Eof ();
 }
 
-void HandleMysqlDebug ( RowBuffer_i &tOut, Str_t sCommand, const QueryProfile_c & tProfile )
+void HandleMysqlDebug ( RowBuffer_i &tOut, const DebugCmd::DebugCommand_t* pCommand, const QueryProfile_c & tProfile )
 {
 	using namespace DebugCmd;
-	CSphString sError;
 	bool bVipConn = session::GetVip ();
-	auto tCmd = ParseDebugCmd ( sCommand, sError );
+	assert ( pCommand->Valid() );
+
+	const auto& tCmd = *pCommand;
 
 	if ( bVipConn )
 	{
@@ -15155,10 +15444,11 @@ static void AddDiskIndexStatus ( VectorLike & dStatus, const CSphIndex * pIndex,
 	dStatus.MatchTupletf ( "killed_documents", "%l", tStatus.m_iDead );
 	dStatus.MatchTupletFn ( "killed_rate", [&tStatus, iDocs] {
 		StringBuilder_c sPercent;
-		if ( iDocs )
-			sPercent.Sprintf ( "%0.2F%%", tStatus.m_iDead * 10000 / iDocs );
+		auto iTotalDocs = iDocs + tStatus.m_iDead;
+		if ( iTotalDocs )
+			sPercent.Sprintf ( "%0.2F%%", tStatus.m_iDead * 10000 / iTotalDocs );
 		else
-			sPercent << "100%";
+			sPercent << "0.00%";
 		return CSphString ( sPercent.cstr () );
 	} );
 	if ( bMutable )
@@ -15818,7 +16108,7 @@ static void HandleMysqlAlterIndexSettings ( RowBuffer_i & tOut, const SqlStmt_t 
 	CSphString sCreateTable = BuildCreateTable ( pRtIndex->GetName(), pRtIndex, pRtIndex->GetInternalSchema() );
 
 	CSphVector<SqlStmt_t> dCreateTableStmts;
-	if ( !ParseDdl ( sCreateTable.cstr(), sCreateTable.Length(), dCreateTableStmts, sError ) )
+	if ( !ParseDdl ( FromStr ( sCreateTable ), dCreateTableStmts, sError ) )
 	{
 		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
 		return;
@@ -16261,7 +16551,7 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 	m_sError = "";
 
 	CSphVector<SqlStmt_t> dStmt;
-	bool bParsedOK = sphParseSqlQuery ( sQuery.first, sQuery.second, dStmt, m_sError, tSess.GetCollation () );
+	bool bParsedOK = sphParseSqlQuery ( sQuery, dStmt, m_sError, tSess.GetCollation () );
 
 	if ( tSess.IsProfile() )
 		m_tProfile.Switch ( SPH_QSTATE_UNKNOWN );
@@ -16467,6 +16757,13 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 		}
 
 	case STMT_DUMMY:
+		if ( !pStmt->m_dInsertSchema.IsEmpty() )
+		{
+			// empty with schema (something like 'show triggers' expects schema even if there are no results)
+			tOut.HeadOfStrings ( pStmt->m_dInsertSchema );
+			tOut.Eof();
+			return true;
+		}
 		tOut.Ok();
 		return true;
 
@@ -16639,7 +16936,7 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 		return true;
 
 	case STMT_DEBUG:
-		HandleMysqlDebug ( tOut, sQuery, m_tLastProfile );
+		HandleMysqlDebug ( tOut, pStmt->m_pDebugCmd.get(), m_tLastProfile );
 		return false; // do not profile this call, keep last query profile
 
 	case STMT_JOIN_CLUSTER:
@@ -16883,7 +17180,7 @@ bool FixupFederatedQuery ( ESphCollation eCollation, CSphVector<SqlStmt_t> & dSt
 
 	// parse real query
 	CSphVector<SqlStmt_t> dRealStmt;
-	bool bParsedOK = sphParseSqlQuery ( sRealQuery.cstr(), sRealQuery.Length(), dRealStmt, sError, eCollation );
+	bool bParsedOK = sphParseSqlQuery ( FromStr ( sRealQuery ), dRealStmt, sError, eCollation );
 	if ( !bParsedOK )
 		return false;
 

@@ -25,6 +25,7 @@
 #include "docstore.h"
 #include "schema/rset.h"
 #include "aggregate.h"
+#include "netreceive_ql.h"
 
 #include <time.h>
 #include <math.h>
@@ -133,6 +134,9 @@ void TransformedSchemaBuilder_c::AddAttr ( const CSphString & sName )
 
 	CSphColumnInfo tAttr = *pAttr;
 	tAttr.m_tLocator.Reset();
+
+	if ( tAttr.m_iIndex==-1 )
+		tAttr.m_iIndex = m_tOldSchema.GetAttrIndexOriginal ( tAttr.m_sName.cstr() );
 
 	// check if new columnar attributes were added (that were not in the select list originally)
 	if ( tAttr.IsColumnar() )
@@ -1233,6 +1237,318 @@ void CollectQueue_c::SetSchema ( ISphSchema * pSchema, bool bRemapCmp )
 	m_bDocIdDynamic = pDocId->m_tLocator.m_bDynamic;
 }
 
+
+//////////////////////////////////////////////////////////////////////////
+
+void SendSqlSchema ( const ISphSchema& tSchema, RowBuffer_i* pRows, const VecTraits_T<int>& dOrder )
+{
+	int iCount = 0;
+	for ( int i = 0; i < tSchema.GetAttrsCount(); ++i )
+		if ( !sphIsInternalAttr ( tSchema.GetAttr ( i ) ) )
+			++iCount;
+
+	assert ( iCount == dOrder.GetLength() );
+	pRows->HeadBegin ( iCount );
+	for ( int i : dOrder )
+	{
+		const CSphColumnInfo& tCol = tSchema.GetAttr ( i );
+		if ( sphIsInternalAttr ( tCol ) )
+			continue;
+		MysqlColumnType_e eType = MYSQL_COL_STRING;
+		switch ( tCol.m_eAttrType )
+		{
+		case SPH_ATTR_INTEGER:
+		case SPH_ATTR_TIMESTAMP:
+		case SPH_ATTR_BOOL: eType = MYSQL_COL_LONG; break;
+		case SPH_ATTR_FLOAT: eType = MYSQL_COL_FLOAT; break;
+		case SPH_ATTR_DOUBLE: eType = MYSQL_COL_DOUBLE; break;
+		case SPH_ATTR_BIGINT: eType = MYSQL_COL_LONGLONG; break;
+		case SPH_ATTR_UINT64: eType = MYSQL_COL_UINT64; break;
+		default: break;
+		}
+		pRows->HeadColumn ( tCol.m_sName.cstr(), eType );
+	}
+
+	pRows->HeadEnd ( false, 0 );
+}
+
+void SendSqlMatch ( const ISphSchema& tSchema, RowBuffer_i* pRows, CSphMatch& tMatch, const BYTE* pBlobPool, const VecTraits_T<int>& dOrder, bool bDynamicDocid )
+{
+	auto& dRows = *pRows;
+	for ( int i : dOrder )
+	{
+		const CSphColumnInfo& dAttr = tSchema.GetAttr ( i );
+		if ( sphIsInternalAttr ( dAttr ) )
+			continue;
+
+		CSphAttrLocator tLoc = dAttr.m_tLocator;
+		ESphAttr eAttrType = dAttr.m_eAttrType;
+
+		switch ( eAttrType )
+		{
+		case SPH_ATTR_STRING:
+			dRows.PutArray ( sphGetBlobAttr ( tMatch, tLoc, pBlobPool ) );
+			break;
+		case SPH_ATTR_STRINGPTR:
+			{
+				const BYTE* pStr = nullptr;
+				if ( dAttr.m_eStage == SPH_EVAL_POSTLIMIT )
+				{
+					if ( bDynamicDocid )
+					{
+						dAttr.m_pExpr->StringEval ( tMatch, &pStr );
+					} else
+					{
+						auto pDynamic = tMatch.m_pDynamic;
+						if ( tMatch.m_pStatic )
+							tMatch.m_pDynamic = nullptr;
+						dAttr.m_pExpr->StringEval ( tMatch, &pStr );
+						tMatch.m_pDynamic = pDynamic;
+					}
+					dRows.PutString ( (const char*)pStr );
+				} else {
+					pStr = (const BYTE*)tMatch.GetAttr ( tLoc );
+					auto dString = sphUnpackPtrAttr ( pStr );
+					dRows.PutArray ( dString );
+				}
+				SafeDelete ( pStr );
+			}
+			break;
+
+		case SPH_ATTR_INTEGER:
+		case SPH_ATTR_TIMESTAMP:
+		case SPH_ATTR_BOOL:
+			dRows.PutNumAsString ( (DWORD)tMatch.GetAttr ( tLoc ) );
+			break;
+
+		case SPH_ATTR_BIGINT:
+			dRows.PutNumAsString ( tMatch.GetAttr ( tLoc ) );
+			break;
+
+		case SPH_ATTR_UINT64:
+			dRows.PutNumAsString ( (uint64_t)tMatch.GetAttr ( tLoc ) );
+			break;
+
+		case SPH_ATTR_FLOAT:
+			dRows.PutFloatAsString ( tMatch.GetAttrFloat ( tLoc ) );
+			break;
+
+		case SPH_ATTR_DOUBLE:
+			dRows.PutDoubleAsString ( tMatch.GetAttrDouble ( tLoc ) );
+			break;
+
+		case SPH_ATTR_INT64SET:
+		case SPH_ATTR_UINT32SET:
+			{
+				StringBuilder_c dStr;
+				auto dMVA = sphGetBlobAttr ( tMatch, tLoc, pBlobPool );
+				sphMVA2Str ( dMVA, eAttrType == SPH_ATTR_INT64SET, dStr );
+				dRows.PutArray ( dStr, false );
+				break;
+			}
+		case SPH_ATTR_INT64SET_PTR:
+		case SPH_ATTR_UINT32SET_PTR:
+			{
+				StringBuilder_c dStr;
+				sphPackedMVA2Str ( (const BYTE*)tMatch.GetAttr ( tLoc ), eAttrType == SPH_ATTR_INT64SET_PTR, dStr );
+				dRows.PutArray ( dStr, false );
+				break;
+			}
+
+		case SPH_ATTR_JSON:
+			{
+				auto pJson = sphGetBlobAttr ( tMatch, tLoc, pBlobPool );
+				JsonEscapedBuilder sTmp;
+				if ( pJson.second )
+					sphJsonFormat ( sTmp, pJson.first );
+				dRows.PutArray ( sTmp );
+			}
+			break;
+		case SPH_ATTR_JSON_PTR:
+			{
+				auto* pString = (const BYTE*)tMatch.GetAttr ( tLoc );
+				JsonEscapedBuilder sTmp;
+				if ( pString )
+				{
+					auto dJson = sphUnpackPtrAttr ( pString );
+					sphJsonFormat ( sTmp, dJson.first );
+				}
+				dRows.PutArray ( sTmp );
+			}
+			break;
+
+		case SPH_ATTR_FACTORS:
+		case SPH_ATTR_FACTORS_JSON:
+		case SPH_ATTR_JSON_FIELD:
+		case SPH_ATTR_JSON_FIELD_PTR:
+			assert ( false ); // index schema never contain such column
+			break;
+
+		default:
+			dRows.Add ( 1 );
+			dRows.Add ( '-' );
+			break;
+		}
+	}
+	dRows.Commit();
+}
+
+/// stream out matches
+class DirectSqlQueue_c final : public MatchSorter_c, ISphNoncopyable
+{
+	using BASE = MatchSorter_c;
+
+public:
+	explicit DirectSqlQueue_c ( RowBuffer_i* pOutput, void* pOpaque, StrVec_t dColumns );
+
+	bool				IsGroupby () const final { return false; }
+	int					GetLength () final { return 0; } // that ensures, flatten() will never called;
+	bool				Push ( const CSphMatch& tEntry ) final { return PushMatch(const_cast<CSphMatch&>(tEntry)); }
+	void				Push ( const VecTraits_T<const CSphMatch> & dMatches ) final
+	{
+		for ( const auto & i : dMatches )
+			if ( i.m_tRowID!=INVALID_ROWID )
+				PushMatch(const_cast<CSphMatch&>(i));
+	}
+
+	bool				PushGrouped ( const CSphMatch &, bool ) final { assert(0); return false; }
+	int					Flatten ( CSphMatch * ) final { return 0; }
+	void				Finalize ( MatchProcessor_i &, bool, bool ) final;
+	bool				CanBeCloned() const final { return false; }
+	ISphMatchSorter *	Clone () const final { return nullptr; }
+	void				MoveTo ( ISphMatchSorter *, bool ) final {}
+	void				SetSchema ( ISphSchema * pSchema, bool bRemapCmp ) final;
+	bool				IsCutoffDisabled() const final { return true; }
+	void				SetMerge ( bool bMerge ) final {}
+
+	void SetBlobPool ( const BYTE* pBlobPool ) final
+	{
+		m_pBlobPool = pBlobPool;
+		MakeCtx();
+	}
+
+	void SetColumnar ( columnar::Columnar_i* pColumnar ) final
+	{
+		m_pColumnar = pColumnar;
+		MakeCtx();
+	}
+
+private:
+	bool 						m_bSchemaSent = false;
+	int64_t						m_iDocs = 0;
+	RowBuffer_i*				m_pOutput;
+	const BYTE*					m_pBlobPool = nullptr;
+	columnar::Columnar_i*		m_pColumnar = nullptr;
+	CSphVector<ISphExpr*>		m_dDocstores;
+	CSphVector<ISphExpr*>		m_dFinals;
+	void * 						m_pOpaque;
+	void * 						m_pCurDocstore = nullptr;
+	void * 						m_pCurDocstoreReader = nullptr;
+	CSphQuery					m_dFake;
+	CSphQueryContext			m_dCtx;
+	StrVec_t					m_dColumns;
+	CSphVector<int>				m_dOrder;
+	bool						m_bDynamicDocid;
+	bool						m_bNotYetFinalized = true;
+
+	inline bool			PushMatch ( CSphMatch & tEntry );
+	void				SendSchema();
+	void				MakeCtx();
+};
+
+
+DirectSqlQueue_c::DirectSqlQueue_c ( RowBuffer_i* pOutput, void* pOpaque, StrVec_t dColumns )
+	: m_pOutput ( pOutput )
+	, m_pOpaque ( pOpaque )
+	, m_dCtx (m_dFake)
+	, m_dColumns ( std::move ( dColumns ) )
+{}
+
+void DirectSqlQueue_c::SendSchema()
+{
+	for ( const auto& sColumn : m_dColumns )
+	{
+		auto iIdx = m_pSchema->GetAttrIndex ( sColumn.cstr() );
+		if ( iIdx >= 0 )
+			m_dOrder.Add ( iIdx );
+	}
+
+	for ( int i = 0; i < m_pSchema->GetAttrsCount(); ++i )
+	{
+		auto& tCol = const_cast< CSphColumnInfo &>(m_pSchema->GetAttr ( i ));
+		if ( tCol.m_sName == sphGetDocidName() )
+			m_bDynamicDocid = tCol.m_tLocator.m_bDynamic;
+
+		if ( !tCol.m_pExpr )
+			continue;
+		switch ( tCol.m_eStage )
+		{
+		case SPH_EVAL_FINAL : m_dFinals.Add ( tCol.m_pExpr ); break;
+		case SPH_EVAL_POSTLIMIT: m_dDocstores.Add ( tCol.m_pExpr ); break;
+		default:
+			sphWarning ("Unknown stage in SendSchema(): %d", tCol.m_eStage);
+		}
+	}
+
+	SendSqlSchema ( *m_pSchema, m_pOutput, m_dOrder );
+	m_bSchemaSent = true;
+}
+
+void DirectSqlQueue_c::MakeCtx()
+{
+	CSphQueryResultMeta tFakeMeta;
+	CSphVector<const ISphSchema*> tFakeSchemas;
+	m_dCtx.SetupCalc ( tFakeMeta, *m_pSchema, *m_pSchema, m_pBlobPool, m_pColumnar, tFakeSchemas );
+}
+
+
+bool DirectSqlQueue_c::PushMatch ( CSphMatch & tEntry )
+{
+	if (!m_bSchemaSent)
+		SendSchema();
+	++m_iDocs;
+	auto* pDocstores = *(std::pair<void*,void*>**)m_pOpaque;
+	auto pDocstoreReader = pDocstores->first;
+	if ( pDocstoreReader!=std::exchange (m_pCurDocstore, pDocstoreReader) && pDocstoreReader )
+	{
+		DocstoreSession_c::InfoDocID_t tSessionInfo;
+		tSessionInfo.m_pDocstore = (const DocstoreReader_i *)pDocstoreReader;
+		tSessionInfo.m_iSessionId = -1;
+
+		// value is copied; no leak of pointer to local here.
+		m_dDocstores.for_each ( [&tSessionInfo] ( ISphExpr* pExpr ) { pExpr->Command ( SPH_EXPR_SET_DOCSTORE_DOCID, &tSessionInfo ); } );
+	}
+
+	auto pDocstore = pDocstores->second;
+	if ( pDocstore != std::exchange ( m_pCurDocstoreReader, pDocstore ) && pDocstore )
+	{
+		DocstoreSession_c::InfoRowID_t tSessionInfo;
+		tSessionInfo.m_pDocstore = (Docstore_i*)pDocstore;
+		tSessionInfo.m_iSessionId = -1;
+
+		// value is copied; no leak of pointer to local here.
+		m_dFinals.for_each ( [&tSessionInfo] ( ISphExpr* pExpr ) { pExpr->Command ( SPH_EXPR_SET_DOCSTORE_ROWID, &tSessionInfo ); } );
+	}
+
+	m_dCtx.CalcFinal(tEntry);
+
+	SendSqlMatch ( *m_pSchema, m_pOutput, tEntry, m_pBlobPool, m_dOrder, m_bDynamicDocid );
+	return true;
+}
+
+/// final update pass
+void DirectSqlQueue_c::Finalize ( MatchProcessor_i&, bool bCallProcessInResultSetOrder, bool bFinalizeMatches )
+{
+	if ( bFinalizeMatches && std::exchange ( m_bNotYetFinalized, false ) )
+		m_pOutput->Eof();
+}
+
+
+void DirectSqlQueue_c::SetSchema ( ISphSchema * pSchema, bool bRemapCmp )
+{
+	BASE::SetSchema ( pSchema, bRemapCmp );
+}
+
 //////////////////////////////////////////////////////////////////////////
 // SORTING+GROUPING QUEUE
 //////////////////////////////////////////////////////////////////////////
@@ -2276,7 +2592,6 @@ public:
 		// memorize old dynamic first
 		memcpy ( m_dRowBuf.Begin(), tDst.m_pDynamic, m_dRowBuf.GetLengthBytes() );
 
-		m_pSchema->FreeDataSpecial ( tDst, m_dOtherPtrRows );
 		m_pSchema->CloneMatchSpecial ( tDst, tSrc, m_dOtherPtrRows );
 
 		/*
@@ -2709,6 +3024,7 @@ protected:
 	{
 		if_const ( NOTIFICATIONS && bNotify )
 			m_dJustPopped.Add ( RowTagged_t ( m_dData[iMatch] ) );
+
 		m_pSchema->FreeDataPtrs ( m_dData[iMatch] );
 
 		// on final pass we totally wipe match.
@@ -5037,6 +5353,7 @@ void QueueCreator_c::CreateGrouperByAttr ( ESphAttr eType, const CSphColumnInfo 
 	case SPH_ATTR_BOOL:
 	case SPH_ATTR_INTEGER:
 	case SPH_ATTR_BIGINT:
+	case SPH_ATTR_FLOAT:
 		if ( tGroupByAttr.IsColumnar() || ( tGroupByAttr.IsColumnarExpr() && tGroupByAttr.m_eStage>SPH_EVAL_PREFILTER ) )
 		{
 			m_tGroupSorterSettings.m_pGrouper = CreateGrouperColumnarInt ( *GetAliasedColumnarAttr(tGroupByAttr) );
@@ -5832,6 +6149,7 @@ bool QueueCreator_c::ParseQueryItem ( const CSphQueryItem & tItem )
 	m_bZonespanlist |= bHasZonespanlist;
 	m_bExprsNeedDocids |= bExprsNeedDocids;
 	tExprCol.m_eAggrFunc = tItem.m_eAggrFunc;
+	tExprCol.m_iIndex = iSorterAttr>= 0 ? m_pSorterSchema->GetAttrIndexOriginal ( tItem.m_sAlias.cstr() ) : -1;
 	if ( !tExprCol.m_pExpr )
 		return Err ( "parse error: %s", m_sError.cstr() );
 
@@ -6721,6 +7039,9 @@ ISphMatchSorter * QueueCreator_c::SpawnQueue()
 		Precalculated_t tPrecalc = FetchPrecalculatedValues();
 		return sphCreateSorter1st ( m_eMatchFunc, m_eGroupFunc, &m_tQuery, m_tGroupSorterSettings, bNeedFactors, PredictAggregates(), tPrecalc );
 	}
+
+	if ( m_tQuery.m_iLimit == -1 && m_tSettings.m_pSqlRowBuffer )
+		return new DirectSqlQueue_c ( m_tSettings.m_pSqlRowBuffer, m_tSettings.m_pOpaque, std::move (m_tSettings.m_dCreateSchema) );
 
 	if ( m_tSettings.m_pCollection )
 		return new CollectQueue_c ( m_tSettings.m_iMaxMatches, *m_tSettings.m_pCollection );

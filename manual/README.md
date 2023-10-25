@@ -151,7 +151,6 @@
     * [KILL](Node_info_and_management/KILL.md)
     * [SHOW WARNINGS](Node_info_and_management/SHOW_WARNINGS.md)
     * [SHOW VARIABLES](Node_info_and_management/SHOW_VARIABLES.md)
-    * [SHOW COLLATION](Node_info_and_management/SHOW_COLLATION.md)
     * [Profiling]
         * [Query profiling](Node_info_and_management/Profiling/Query_profile.md)
         * [Query plan](Node_info_and_management/Profiling/Query_plan.md)
@@ -187,3 +186,4 @@
 * [🐞 Reporting bugs](Reporting_bugs.md)
 * [📖 References](References.md)
     * [Previous versions](References.md#Documentation-for-old-Manticore-versions)
+<!-- proofread -->
