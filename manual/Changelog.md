@@ -1,5 +1,29 @@
 # Changelog
 
+# Version 6.2.12
+Released: August 23rd 2023
+
+Version 6.2.12 continues the 6.2 series and addresses issues discovered after the release of 6.2.0.
+
+### Bugfixes
+* ❗[Issue #1351](https://github.com/manticoresoftware/manticoresearch/issues/1351) "Manticore 6.2.0 doesn't start via systemctl on Centos 7": Modified `TimeoutStartSec` from `infinity` to `0` for better compatibility with Centos 7.
+* ❗[Issue #1364](https://github.com/manticoresoftware/manticoresearch/issues/1364) "Crash after upgrading from 6.0.4 to 6.2.0": Added replay functionality for empty binlog files from older binlog versions.
+* [PR #1334](https://github.com/manticoresoftware/manticoresearch/pull/1334) "fix typo in searchdreplication.cpp": Corrected a typo in `searchdreplication.cpp`: beggining -> beginning.
+* [Issue #1337](https://github.com/manticoresoftware/manticoresearch/issues/1337) "Manticore 6.2.0 WARNING: conn (local)(12), sock=8088: bailing on failed MySQL header, AsyncNetInputBuffer_c::AppendData: error 11 (Resource temporarily unavailable) return -1": Lowered the verbosity level of the MySQL interface warning about the header to logdebugv.
+* [Issue #1355](https://github.com/manticoresoftware/manticoresearch/issues/1355) "join cluster hangs when node_address can't be resolved": Improved replication retry when certain nodes are unreachable, and their name resolution fails. This should resolve issues in Kubernetes and Docker nodes related to replication. Enhanced the error message for replication start failures and made updates to test model 376. Additionally, provided a clear error message for name resolution failures.
+* [Issue #1361](https://github.com/manticoresoftware/manticoresearch/issues/1361) "No lower case mapping for "Ø" in charset non_cjk": Adjusted the mapping for the 'Ø' character.
+* [Issue #1365](https://github.com/manticoresoftware/manticoresearch/issues/1365) "searchd leaves binlog.meta and binlog.001 after clean stop": Ensured that the last empty binlog file is removed properly.
+* [Commit 0871](https://github.com/manticoresoftware/manticoresearch/commit/0871070845e93ad702ae0dfb89b35e5f24cd0851): Fixed the `Thd_t` build issue on Windows related to atomic copy restrictions.
+* [Commit 1cc0](https://github.com/manticoresoftware/manticoresearch/commit/1cc04bedc174737118fd5a3663e35f4e95bd4f8c): Addressed an issue with FT CBO vs `ColumnarScan`.
+* [Commit c6bf](https://github.com/manticoresoftware/manticoresearch/commit/c6bfb30d53e3f4b67f17769667733677a661c95b): Made corrections to test 376 and added a substitution for the `AF_INET` error in the test.
+* [Commit cbc3](https://github.com/manticoresoftware/manticoresearch/commit/cbc38705e0b4dcc9665e3e8cf64826290ebd11cf): Resolved a deadlock issue during replication when updating blob attributes versus replacing documents. Also removed the rlock of the index during commit because it's already locked at a more basic level.
+
+### Minor changes
+* [Commit 4f91](https://github.com/manticoresoftware/manticoresearch/commit/4f913a36e84e01f950b2797051222b0b1094d6fe) Updated info on `/bulk` endpoints in the manual.
+
+### MCL
+* Support of [Manticore Columnar Library](https://github.com/manticoresoftware/columnar) v2.2.4
+
 # Version 6.2.0
 Released: August 4th 2023
 
@@ -53,7 +77,7 @@ Released: August 4th 2023
 * Field and attribute order is now consistent between `SHOW CREATE TABLE` and `DESC` operations.
 * If disk space is insufficient when executing `INSERT` queries, new `INSERT` queries will fail until enough disk space becomes available.
 * The [UINT64()](../Functions/Type_casting_functions.md#UINT64%28%29) type conversion function has been added.
-* The `/bulk` endpoint now processes empty lines as a [commit](../Data_creation_and_modification/Transactions.md#BEGIN,-COMMIT,-and-ROLLBACK) command. More info [here](../Data_creation_and_modification/Transactions.md#Transactions-in-/bulk).
+* The `/bulk` endpoint now processes empty lines as a [commit](../Data_creation_and_modification/Transactions.md#BEGIN,-COMMIT,-and-ROLLBACK) command. More info [here](../Data_creation_and_modification/Adding_documents_to_a_table/Adding_documents_to_a_real-time_table.md?client=JSON#Bulk-adding-documents).
 * Warnings have been implemented for [invalid index hints](../Searching/Options.md#Query-optimizer-hints), providing more transparency and allowing for error mitigation.
 * When `count(*)` is used with a single filter, queries now leverage precalculated data from secondary indexes when available, substantially speeding up query times.
 
@@ -63,6 +87,7 @@ Released: August 4th 2023
 * ⚠️ [Issue #1160](https://github.com/manticoresoftware/manticoresearch/issues/1160): The usage of `@` in table names has been disallowed to prevent syntax conflicts.
 * ⚠️ String fields/attributes marked as `indexed` and `attribute` are now regarded as a single field during `INSERT`, `DESC`, and `ALTER` operations.
 * ⚠️ [Issue #1057](https://github.com/manticoresoftware/manticoresearch/issues/1057): MCL libraries will no longer load on systems that don't support SSE 4.2.
+* ⚠️ [Issue #1143](https://github.com/manticoresoftware/manticoresearch/issues/1143): [agent_query_timeout](../Creating_a_table/Creating_a_distributed_table/Remote_tables.md#agent_query_timeout) was broken. Fixed and is now effective.
 
 ### Bugfixes
 * [Commit 2a6e](https://github.com/manticoresoftware/manticoresearch/commit/2a6ea8f7) "Crash on DROP TABLE": resolved a problem causing extended wait times to finish write operations (optimize, disk chunk save) on an RT table when executing a DROP TABLE statement. Added a warning to notify when a table directory is not empty after executing a DROP TABLE command.
@@ -131,7 +156,7 @@ Released: March 15 2023
 
 ### New features
 * Improved integration with Logstash, Beats etc. including:
-  - Support for Logstash versions >= 7.13.
+  - Support for Logstash versions >= 7.13, Filebeat versions >= 7.10.
   - Auto-schema support.
   - Added handling of bulk requests in Elasticsearch-like format.
 * [Buddy commit ce90](https://github.com/manticoresoftware/manticoresearch-buddy/commit/ce907ea) Log Buddy version on Manticore start.

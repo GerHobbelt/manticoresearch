@@ -744,6 +744,8 @@ static void MarkAvailableAnalyzers ( CSphVector<SecondaryIndexInfo_t> & dSIInfo,
 		// this belongs in the CBO, but for now let's just remove the option to evaluate FILTER if ANALYZER is present
 		// as ANALYZERs are always faster than FILTERs
 		dSIInfo[i].m_dCapabilities.RemoveValue ( SecondaryIndexType_e::FILTER );
+		if ( dSIInfo[i].m_eType==SecondaryIndexType_e::FILTER )
+			dSIInfo[i].m_eType = SecondaryIndexType_e::ANALYZER;
 	}
 }
 
@@ -1003,18 +1005,16 @@ CSphVector<SecondaryIndexInfo_t> SelectIterators ( const SelectIteratorCtx_t & t
 	dCapabilities.ZeroVec();
 	dBest.ZeroVec();
 
-	// if we don't have any options, no need to do cost calculation
-	if ( dSIInfo.all_of ( []( const auto & tSIInfo ){ return tSIInfo.m_dCapabilities.GetLength()==1; } ) )
-		return dSIInfo;
-
 	const int MAX_TRIES = 1024;
 	for ( int iTry = 0; iTry < MAX_TRIES; iTry++ )
 	{
 		for ( int i = 0; i < dCapabilities.GetLength(); i++ )
 			dSIInfo[i].m_eType = dSIInfo[i].m_dCapabilities.GetLength() ? dSIInfo[i].m_dCapabilities[dCapabilities[i]] : SecondaryIndexType_e::NONE;
 
-		std::unique_ptr<CostEstimate_i> pCostEstimate ( CreateCostEstimate ( dSIInfo, tCtx ) );
-
+		// don't use cutoff if we have more than one filter
+		int iCutoff = dSIInfo.GetLength() > 1 ? -1 : tCtx.m_iCutoff;
+		
+		std::unique_ptr<CostEstimate_i> pCostEstimate ( CreateCostEstimate ( dSIInfo, tCtx, iCutoff ) );
 		float fCost = pCostEstimate->CalcQueryCost();
 		if ( fCost < fBestCost )
 		{
@@ -1358,6 +1358,11 @@ CSphVector<RowidIterator_i *> CreateSecondaryIndexIterator ( const SI::Index_i *
 {
 	if ( !pSIIndex )
 		return {};
+
+	// don't use cutoff if we have more than one instance of SecondaryIndex/ColumnarScan
+	int iNumIterators = dSIInfo.count_of ( []( auto & tSI ){ return tSI.m_eType==SecondaryIndexType_e::INDEX || tSI.m_eType==SecondaryIndexType_e::ANALYZER; } );
+	if ( iNumIterators > 1 )
+		iCutoff = -1;
 
 	SIIteratorCreator_c tCreator ( pSIIndex, dSIInfo, dFilters, eCollation, tSchema, uRowsCount, iCutoff );
 	return tCreator.Create();
