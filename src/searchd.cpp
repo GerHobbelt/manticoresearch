@@ -5320,7 +5320,7 @@ private:
 	bool							AcquireInvokedIndexes();
 	void							UniqLocals ( VecTraits_T<LocalIndex_t>& dLocals );
 	void							RunActionQuery ( const CSphQuery & tQuery, const CSphString & sIndex, CSphString * pErrors ); ///< run delete/update
-	bool							BuildIndexList ( int & iDivideLimits, VecRefPtrsAgentConn_t & dRemotes, CSphVector<DistrServedByAgent_t> & dDistrServedByAgent ); // fixme!
+	bool							BuildIndexList ( int & iDivideLimits, VecRefPtrsAgentConn_t & dRemotes, CSphVector<DistrServedByAgent_t> & dDistrServedByAgent, int iAgentQueryTimeoutMs ); // fixme!
 	void							CalcTimeStats ( int64_t tmCpu, int64_t tmSubset, const CSphVector<DistrServedByAgent_t> & dDistrServedByAgent );
 	void							CalcPerIndexStats ( const CSphVector<DistrServedByAgent_t> & dDistrServedByAgent ) const;
 	void							CalcGlobalStats ( int64_t tmCpu, int64_t tmSubset, int64_t tmLocal, const CSphIOStats & tIO, const VecRefPtrsAgentConn_t & dRemotes ) const;
@@ -6945,7 +6945,7 @@ static CSphVector<LocalIndex_t> CollectAllLocalIndexes ( const CSphVector<CSphNa
 }
 
 // returns true = real indexes, false = sysvar (i.e. only one 'index' named from @@)
-bool SearchHandler_c::BuildIndexList ( int & iDivideLimits, VecRefPtrsAgentConn_t & dRemotes, CSphVector<DistrServedByAgent_t> & dDistrServedByAgent )
+bool SearchHandler_c::BuildIndexList ( int & iDivideLimits, VecRefPtrsAgentConn_t & dRemotes, CSphVector<DistrServedByAgent_t> & dDistrServedByAgent, int iAgentQueryTimeoutMs )
 {
 	const CSphQuery & tQuery = m_dNQueries.First ();
 
@@ -7001,7 +7001,7 @@ bool SearchHandler_c::BuildIndexList ( int & iDivideLimits, VecRefPtrsAgentConn_
 				pConn->m_iStoreTag = iOrderTag++;
 				pConn->m_iWeight = iWeight;
 				pConn->m_iMyConnectTimeoutMs = pDist->m_iAgentConnectTimeoutMs;
-				pConn->m_iMyQueryTimeoutMs = pDist->m_iAgentQueryTimeoutMs;
+				pConn->m_iMyQueryTimeoutMs = iAgentQueryTimeoutMs ? iAgentQueryTimeoutMs : pDist->m_iAgentQueryTimeoutMs;
 				dRemotes.Add ( pConn );
 			}
 
@@ -7116,7 +7116,7 @@ void SearchHandler_c::RunSubset ( int iStart, int iEnd )
 			m_dNAggrResults.for_each ( [this] ( auto& r ) { r.m_sError = (CSphString) m_sError; } );
 	});
 
-	if ( BuildIndexList ( iDivideLimits, dRemotes, dDistrServedByAgent ) )
+	if ( BuildIndexList ( iDivideLimits, dRemotes, dDistrServedByAgent, tFirst.m_iAgentQueryTimeoutMs ) )
 	{
 		// process query to meta, as myindex.status, etc.
 		if ( !tFirst.m_dStringSubkeys.IsEmpty () )
@@ -7718,9 +7718,9 @@ static const char * g_dSqlStmts[] =
 	"show_status", "show_meta", "set", "begin", "commit", "rollback", "call",
 	"desc", "show_tables", "create_table", "create_table_like", "drop_table", "show_create_table", "update", "create_func",
 	"drop_func", "attach_index", "flush_rtindex", "flush_ramchunk", "show_variables", "truncate_rtindex",
-	"select_sysvar", "show_collation", "show_character_set", "optimize_index", "show_agent_status",
+	"select_columns", "show_collation", "show_character_set", "optimize_index", "show_agent_status",
 	"show_index_status", "show_index_status", "show_profile", "alter_add", "alter_drop", "show_plan",
-	"select_dual", "show_databases", "create_plugin", "drop_plugin", "show_plugins", "show_threads",
+	"show_databases", "create_plugin", "drop_plugin", "show_plugins", "show_threads",
 	"facet", "alter_reconfigure", "show_index_settings", "flush_index", "reload_plugins", "reload_index",
 	"flush_hostnames", "flush_logs", "reload_indexes", "sysfilters", "debug", "alter_killlist_target",
 	"alter_index_settings", "join_cluster", "cluster_create", "cluster_delete", "cluster_index_add",
@@ -15025,17 +15025,34 @@ void HandleMysqlOptimize ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 	tOut.Ok();
 }
 
-// STMT_SELECT_SYSVAR: SELECT @@sysvar1 [ as alias] [@@sysvarN [ as alias]] [limit M]
-void HandleMysqlSelectSysvar ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
+class ExtraLastInsertID_c final: public ISphExtra
+{
+	bool ExtraDataImpl ( ExtraData_e eCmd, void** pData ) final
+	{
+		if ( eCmd != EXTRA_GET_LAST_INSERT_ID )
+			return false;
+
+		auto* sVal = (CSphString*)pData;
+		assert ( sVal );
+		StringBuilder_c tBuf ( "," );
+		session::Info().GetClientSession()->m_dLastIds.for_each ( [&tBuf] ( auto& iId ) { tBuf << iId; } );
+		tBuf.MoveTo ( *sVal );
+		return true;
+	}
+};
+
+
+// STMT_SELECT_COLUMNS: SELECT @@sysvar1 [ as alias] [@@sysvarN [ as alias]] [limit M]
+// SELECT expr, @@sysvar1, expr2, ... [limit M]
+void HandleMysqlSelectColumns ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, ClientSession_c* pSession )
 {
 	struct SysVar_t
 	{
 		const MysqlColumnType_e m_eType;
-		const char * m_sName;
+		const char* m_szName;
 		std::function<CSphString ( void )> m_fnValue;
 	};
 
-	auto pVars = session::Info().GetClientSession();
 	const SysVar_t dSysvars[] =
 	{	{ MYSQL_COL_STRING,	nullptr, [] {return "<empty>";}}, // stub
 		{ MYSQL_COL_LONG,	"@@session.auto_increment_increment",	[] {return "1";}},
@@ -15044,117 +15061,132 @@ void HandleMysqlSelectSysvar ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 		{ MYSQL_COL_LONG,	"@@max_allowed_packet", [] { StringBuilder_c s; s << g_iMaxPacketSize; return CSphString(s); }},
 		{ MYSQL_COL_STRING,	"@@version_comment", [] { return szGIT_BRANCH_ID;}},
 		{ MYSQL_COL_LONG,	"@@lower_case_table_names", [] { return "1"; }},
-		{ MYSQL_COL_STRING,	"@@session.last_insert_id", [&pVars]
-			{
-				StringBuilder_c s ( "," );
-				pVars->m_dLastIds.Apply ( [&s] ( int64_t iID ) { s << iID; } );
-				return CSphString(s);
-			}},
-		{ MYSQL_COL_LONG,	"@@autocommit", [&pVars] { return pVars->m_bAutoCommit ? "1" : "0"; }},
+		{ MYSQL_COL_STRING,	"@@session.last_insert_id", [pSession] {
+			StringBuilder_c s ( "," );
+			pSession->m_dLastIds.Apply ( [&s] ( int64_t iID ) { s << iID; } );
+			return CSphString ( s );
+		}},
+		{ MYSQL_COL_LONG, "@@autocommit", [pSession] { return pSession->m_bAutoCommit ? "1" : "0"; } },
 	};
 
-	auto fnVar = [&dSysvars] ( const CSphString & sVar )->const SysVar_t &
+	auto VarIdxByName = [&dSysvars] ( const CSphString& sName ) noexcept -> int
 	{
-		for ( const auto & tVar : dSysvars )
-			if ( sVar==tVar.m_sName )
-				return tVar;
-
-		return dSysvars[0];
+		constexpr auto iSysvars = sizeof ( dSysvars ) / sizeof ( dSysvars[0] );
+		for ( int i = 1; i < iSysvars; ++i )
+			if ( sName == dSysvars[i].m_szName )
+				return i;
+		return 0;
 	};
+
+	const auto& dItems = tStmt.m_tQuery.m_dItems;
+
+	struct PreparedItem_t {
+		ESphAttr m_eType;
+		MysqlColumnType_e m_eTypeMysql;
+		ISphExprRefPtr_c m_pExpr;
+		int m_iSysvarIdx;
+		const char* m_szAlias;
+		CSphString m_sError;
+	};
+
+	CSphVector<PreparedItem_t> dColumns;
+
+	bool bHaveValidExpressions = false; // whether we have at least one expression among @@sysvars
+	bool bHaveInvalidExpressions = false; // whether at least one expression is erroneous
+
+	for ( const auto& dItem : dItems )
+	{
+		bool bIsExpr = !dItem.m_sExpr.Begins ( "@@" );
+		CSphString sError;
+		auto iVar = VarIdxByName ( dItem.m_sExpr );
+		if ( !iVar )
+		{
+			CSphString sVar = dItem.m_sExpr;
+			CSphSchema tSchema;
+			ESphAttr eAttrType;
+			ExprParseArgs_t tExprArgs;
+			tExprArgs.m_pAttrType = &eAttrType;
+			ISphExprRefPtr_c pExpr { sphExprParse ( sVar.cstr(), tSchema, sError, tExprArgs ) };
+			if ( pExpr )
+			{
+				dColumns.Add ( { eAttrType, ESphAttr2MysqlColumn ( eAttrType ), pExpr, -1, dItem.m_sAlias.cstr() } );
+				bHaveValidExpressions = true;
+				continue;
+			}
+			bHaveInvalidExpressions |= bIsExpr;
+		}
+		dColumns.Add ( { SPH_ATTR_NONE, dSysvars[iVar].m_eType, nullptr, iVar, dItem.m_sAlias.cstr(), sError } );
+	}
+
+	assert ( dColumns.GetLength() == dItems.GetLength() );
+
+	// fail when we have error(s) in expression(s).
+	if ( bHaveInvalidExpressions )
+	{
+		StringBuilder_c sError ("; ");
+		dColumns.for_each( [&sError] (const PreparedItem_t& dCol) { if ( !dCol.m_sError.IsEmpty()) sError << dCol.m_sError; });
+		tOut.ErrorEx ( tStmt.m_sStmt, sError.cstr() );
+		return;
+	}
 
 	// fill header
-	tOut.HeadBegin ( tStmt.m_tQuery.m_dItems.GetLength () );
-	for ( const auto& dItem : tStmt.m_tQuery.m_dItems )
-		tOut.HeadColumn ( dItem.m_sAlias.cstr (), fnVar ( dItem.m_sExpr ).m_eType );
-	tOut.HeadEnd ();
+	tOut.HeadBegin ( dColumns.GetLength() );
+	for ( const auto& dColumn : dColumns )
+		tOut.HeadColumn ( dColumn.m_szAlias, dColumn.m_eTypeMysql );
+
+	if ( !tOut.HeadEnd() )
+		return;
+
+	if ( bHaveValidExpressions )
+	{
+		ExtraLastInsertID_c tIds;
+		for ( auto& pExpr : dColumns )
+			if ( pExpr.m_pExpr )
+				pExpr.m_pExpr->Command ( SPH_EXPR_SET_EXTRA_DATA, &tIds );
+	}
+
+	std::optional<ExtraLastInsertID_c> tIds;
 
 	// fill values
-	for ( const auto & tItem : tStmt.m_tQuery.m_dItems )
-		tOut.PutString ( fnVar ( tItem.m_sExpr ).m_fnValue().cstr() );
+	for ( auto& dColumn : dColumns )
+	{
+		if ( dColumn.m_pExpr ) // expression
+		{
+			if ( !tIds.has_value() )
+				tIds.emplace();
+
+			auto& pExpr = dColumn.m_pExpr;
+			pExpr->Command ( SPH_EXPR_SET_EXTRA_DATA, &tIds.value() );
+
+			CSphMatch tMatch;
+
+			switch ( dColumn.m_eType )
+			{
+			case SPH_ATTR_STRINGPTR:
+				{
+					const BYTE* pStr = nullptr;
+					int iLen = pExpr->StringEval ( tMatch, &pStr );
+					tOut.PutArray ( { pStr, iLen } );
+					FreeDataPtr ( *pExpr, pStr );
+					break;
+				}
+			case SPH_ATTR_INTEGER:	tOut.PutNumAsString ( pExpr->IntEval ( tMatch ) ); break;
+			case SPH_ATTR_BIGINT:	tOut.PutNumAsString ( pExpr->Int64Eval ( tMatch ) ); break;
+			case SPH_ATTR_UINT64:	tOut.PutNumAsString ( (uint64_t)pExpr->Int64Eval ( tMatch ) ); break;
+			case SPH_ATTR_FLOAT:	tOut.PutFloatAsString ( pExpr->Eval ( tMatch ) ); break;
+			case SPH_ATTR_DOUBLE:	tOut.PutDoubleAsString ( pExpr->Eval ( tMatch ) ); break;
+			default:
+				tOut.PutNULL();
+				break;
+			}
+		}
+		else
+			tOut.PutString ( dSysvars[dColumn.m_iSysvarIdx].m_fnValue() );
+	}
 
 	// finalize
 	tOut.Commit ();
 	tOut.Eof ();
-}
-
-struct ExtraLastInsertID_t : public ISphExtra
-{
-	explicit ExtraLastInsertID_t ( const CSphVector<int64_t> & dIds )
-		: m_dIds ( dIds )
-	{}
-
-	bool ExtraDataImpl ( ExtraData_e eCmd, void ** pData ) override
-	{
-		if ( eCmd==EXTRA_GET_LAST_INSERT_ID )
-		{
-			StringBuilder_c tBuf ( "," );
-			for ( int64_t iID : m_dIds )
-				tBuf.Appendf ( INT64_FMT, iID );
-
-			auto * sVal = ( CSphString *)pData;
-			assert ( sVal );
-			*sVal = tBuf.cstr();
-
-			return true;
-		}
-		return false;
-	}
-
-	const CSphVector<int64_t> & m_dIds;
-};
-
-
-
-void HandleMysqlSelectDual ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
-{
-	CSphString sVar = tStmt.m_tQuery.m_sQuery;
-	CSphSchema	tSchema;
-	ESphAttr eAttrType;
-	CSphString sError;
-	ExprParseArgs_t tExprArgs;
-	tExprArgs.m_pAttrType = &eAttrType;
-
-	CSphRefcountedPtr<ISphExpr> pExpr { sphExprParse ( sVar.cstr(), tSchema, sError, tExprArgs ) };
-
-	if ( !pExpr )
-	{
-		tOut.Error ( tStmt.m_sStmt, sError.cstr() );
-		return;
-	}
-
-	tOut.HeadBegin(1);
-	tOut.HeadColumn ( sVar.cstr() );
-	tOut.HeadEnd();
-
-	auto pVars = session::Info().GetClientSession();
-	ExtraLastInsertID_t tIds ( pVars->m_dLastIds );
-	pExpr->Command ( SPH_EXPR_SET_EXTRA_DATA, &tIds );
-
-	CSphMatch tMatch;
-	const BYTE * pStr = nullptr;
-
-	switch ( eAttrType )
-	{
-		case SPH_ATTR_STRINGPTR:
-		{
-			int  iLen = pExpr->StringEval ( tMatch, &pStr );
-			tOut.PutArray ( { pStr, iLen } );
-			FreeDataPtr ( *pExpr, pStr );
-			break;
-		}
-		case SPH_ATTR_INTEGER:	tOut.PutNumAsString ( pExpr->IntEval ( tMatch ) ); break;
-		case SPH_ATTR_BIGINT:	tOut.PutNumAsString ( pExpr->Int64Eval ( tMatch ) ); break;
-		case SPH_ATTR_UINT64:	tOut.PutNumAsString ( (uint64_t)pExpr->Int64Eval ( tMatch ) ); break;
-		case SPH_ATTR_FLOAT:	tOut.PutFloatAsString ( pExpr->Eval ( tMatch ) ); break;
-		case SPH_ATTR_DOUBLE:	tOut.PutDoubleAsString ( pExpr->Eval ( tMatch ) ); break;
-		default:
-			tOut.PutNULL();
-			break;
-	}
-
-	// done
-	tOut.Commit();
-	tOut.Eof();
 }
 
 
@@ -16576,27 +16608,6 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 	tCrashQuery.m_eType = QUERY_SQL;
 	tCrashQuery.m_dQuery = { (const BYTE*) sQuery.first, sQuery.second };
 
-	// ad-hoc, make generalized select()
-	if ( StrEqN ( sQuery.first, "select DATABASE()" ) )
-	{
-		// result set header packet
-		tOut.HeadOfStrings ( { "DATABASE()" } );
-		tOut.PutString ( g_sDbName );
-		tOut.Commit();
-		tOut.Eof ( false );
-		return true;
-	}
-
-	// notice order! if sQuery is 'select DATABASE()' it will match this condition, but it is already processed by ad-hoc above
-	if ( StrEqN ( sQuery, "select DATABASE(), USER() limit 1" ) )
-	{
-		// result set header packet
-		tOut.HeadTuplet ( "DATABASE()", "USER()" );
-		tOut.DataTuplet ( g_sDbName.cstr(), tSess.GetVip() ? "VIP" : "Usual" );
-		tOut.Eof ( false );
-		return true;
-	}
-
 	// parse SQL query
 	if ( tSess.IsProfile() )
 		m_tProfile.Switch ( SPH_QSTATE_SQL_PARSE );
@@ -16896,8 +16907,8 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 		HandleMysqlOptimize ( tOut, *pStmt );
 		return true;
 
-	case STMT_SELECT_SYSVAR:
-		HandleMysqlSelectSysvar ( tOut, *pStmt );
+	case STMT_SELECT_COLUMNS:
+		HandleMysqlSelectColumns ( tOut, *pStmt, this );
 		return true;
 
 	case STMT_SHOW_COLLATION:
@@ -16939,10 +16950,6 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 	case STMT_SHOW_PLAN:
 		HandleMysqlShowPlan ( tOut, m_tLastProfile, false, ::IsDot ( *pStmt ) );
 		return false; // do not profile this call, keep last query profile
-
-	case STMT_SELECT_DUAL:
-		HandleMysqlSelectDual ( tOut, *pStmt );
-		return true;
 
 	case STMT_SHOW_DATABASES:
 		HandleMysqlShowDatabases ( tOut, *pStmt );
@@ -19408,6 +19415,7 @@ void ConfigureSearchd ( const CSphConfig & hConf, bool bOptPIDFile, bool bTestMo
 	}
 
 	g_sMySQLVersion = hSearchd.GetStr ( "mysql_version_string", g_sMySQLVersion.cstr() );
+	sphinxexpr::MySQLVersion() = g_sMySQLVersion;
 
 	AllowOnlyNot ( hSearchd.GetInt ( "not_terms_only_allowed", 0 )!=0 );
 	ConfigureDaemonLog ( hSearchd.GetStr ( "query_log_commands" ) );

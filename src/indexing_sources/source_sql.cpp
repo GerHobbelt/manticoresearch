@@ -454,6 +454,9 @@ bool CSphSource_SQL::IterateStart ( CSphString & sError )
 {
 	assert ( m_bSqlConnected );
 
+	if ( !QueryPreAll ( sError ) )
+		return false;
+
 	// run pre-queries
 	ARRAY_FOREACH ( i, m_tParams.m_dQueryPre )
 	{
@@ -498,8 +501,8 @@ bool CSphSource_SQL::IterateStart ( CSphString & sError )
 	// some post-query setup
 	m_tSchema.Reset();
 
-	for ( int i=0; i<SPH_MAX_FIELDS; ++i )
-		m_dUnpack[i] = SPH_UNPACK_NONE;
+	for (auto & i : m_dUnpack)
+		i = SPH_UNPACK_NONE;
 
 	m_iSqlFields = SqlNumFields(); // for rowdump
 
@@ -648,6 +651,23 @@ bool CSphSource_SQL::IterateStart ( CSphString & sError )
 
 	// log it
 	DumpRowsHeader();
+	return true;
+}
+
+bool CSphSource_SQL::QueryPreAll ( CSphString& sError )
+{
+	// run pre-queries
+	ARRAY_FOREACH ( i, m_tParams.m_dQueryPreAll )
+	{
+		if ( !SqlQuery ( m_tParams.m_dQueryPreAll[i].cstr() ) )
+		{
+			sError.SetSprintf ( "sql_query_pre_all[%d]: %s (DSN=%s)", i, SqlError(), m_sSqlDSN.cstr() );
+			SqlDisconnect();
+			return false;
+		}
+//		sphWarn ( "query_pre_app %d: %s", i, m_tParams.m_dQueryPreAll[i].cstr() );
+		SqlDismissResult();
+	}
 	return true;
 }
 
@@ -1033,6 +1053,9 @@ bool CSphSource_SQL::IterateMultivaluedStart ( int iAttr, CSphString & sError )
 	if ( !(tAttr.m_eAttrType==SPH_ATTR_UINT32SET || tAttr.m_eAttrType==SPH_ATTR_INT64SET ) )
 		return false;
 
+	if ( !QueryPreAll ( sError ) )
+		return false;
+
 	CSphString sPrefix;
 	switch ( tAttr.m_eSrc )
 	{
@@ -1350,6 +1373,9 @@ bool CSphSource_SQL::FetchJoinedFields ( CSphAutofile & tFile, CSphVector<std::u
 		m_iJoinedHitField = -1;
 		return true;
 	}
+
+	if ( !QueryPreAll ( sError ) )
+		return false;
 
 	dJoinedOffsets.Resize(m_tSchema.GetFieldsCount());
 	CSphWriter tWriter;

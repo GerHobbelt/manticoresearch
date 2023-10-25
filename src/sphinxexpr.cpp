@@ -71,6 +71,12 @@ inline Str_t CurrentUser()
 	return { "Usual", 5 };
 }
 
+CSphString& sphinxexpr::MySQLVersion()
+{
+	static CSphString sSQLVersion;
+	return sSQLVersion;
+}
+
 inline int ConnID ()
 {
 	return session::GetConnID ();
@@ -496,6 +502,10 @@ public:
 		} else
 			m_iLen = m_sVal.Length();
 	}
+
+	Expr_GetStrConst_c ( Str_t sVal, bool bUnescape )
+		: Expr_GetStrConst_c ( (const char*) sVal.first, (int) sVal.second, bUnescape )
+	{}
 
 	int StringEval ( const CSphMatch &, const BYTE ** ppStr ) const final
 	{
@@ -1986,12 +1996,6 @@ public:
 			return iLen;
 
 		case JSON_DOUBLE_VECTOR:
-			fVal = JsonAggr<float> ( eJson, pVal, m_eFunc, nullptr );
-			sBuf.SetSprintf ( "%f", fVal );
-			iLen = sBuf.Length();
-			*ppStr = (const BYTE *) sBuf.Leak();
-			return iLen;
-
 		case JSON_MIXED_VECTOR:
 			fVal = JsonAggr<float> ( eJson, pVal, m_eFunc, nullptr );
 			sBuf.SetSprintf ( "%f", fVal );
@@ -3665,6 +3669,9 @@ enum Tokh_e : BYTE
 	FUNC_LAST_INSERT_ID,
 	FUNC_LEVENSHTEIN,
 	FUNC_DATE_FORMAT,
+	FUNC_DATABASE,
+	FUNC_USER,
+	FUNC_VERSION,
 
 	FUNC_FUNCS_COUNT, // insert any new functions ABOVE this one
 	TOKH_TOKH_OFFSET = FUNC_FUNCS_COUNT,
@@ -3794,6 +3801,9 @@ const static TokhKeyVal_t g_dKeyValTokens[] = // no order is necessary, but crea
 	{ "last_insert_id",	FUNC_LAST_INSERT_ID	 },
 	{ "levenshtein",	FUNC_LEVENSHTEIN	 },
 	{ "date_format",	FUNC_DATE_FORMAT	 },
+	{ "database",		FUNC_DATABASE		 },
+	{ "user",			FUNC_USER			 },
+	{ "version",		FUNC_VERSION		 },
 
 	// other reserved (operators, columns, etc.)
 	{ "count",			TOKH_COUNT			},
@@ -3845,49 +3855,49 @@ static Tokh_e TokHashLookup ( Str_t sKey )
 
 	const static BYTE dAsso[] = // values 66..91 (A..Z) copy from 98..123 (a..z),
 	{
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121,  28, 121,
-       43,  36,  12, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121,   4,  37,  14,   3,  37,
-	   29,  44,  54,  29, 121, 121,  16,  36,   4,  26,
-	   16,  11,   9,   5,   8,  27,  57,  35,  33,  34,
-	   18, 121, 121, 121, 121,   3, 121,   4,  37,  14,
-        3,  37,  29,  44,  54,  29, 121, 121,  16,  36,
-        4,  26,  16,  11,   9,   5,   8,  27,  57,  35,
-       33,  34,  18, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121, 121, 121, 121, 121,
-      121, 121, 121, 121, 121, 121
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126,  39, 126,
+       50,  44,  49, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126,  33,  39,  11,   0,  17,
+	   31,  29,  44,   6, 126,  126, 13,  23,   1,  34,
+	   19,  20,   6,   2,   5,  27,  55,  44,  34,  23,
+	   42, 126, 126, 126, 126,  35, 126,  33,  39,  11,
+        0,  17,  31,  29,  44,   6, 126, 126,  13,  23,
+        1,  34,  19,  20,   6,   2,   5,  27,  55,  44,
+       34,  23,  42, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+      126, 126, 126, 126, 126, 126
 	};
 
 	const static short dIndexes[] =
     {
-		-1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-		-1, -1, -1, 78, -1, -1, 4, 1, -1, -1,
-		66, 12, 6, 80, 77, -1, 10, 5, 22, 42,
-		73, 38, 40, 49, 59, 31, 84, 79, 71, 60,
-		85, 36, 39, 51, 58, 82, 28, 23, 43, 52,
-		83, 17, -1, 46, 74, 44, 65, 69, -1, 32,
-		27, 30, 63, 2, 41, 70, 33, 54, 62, 3,
-		56, 64, 9, 47, 15, 61, 13, 0, 75, 35,
-		48, 57, 37, 21, 19, 34, 55, 53, 72, 25,
-		68, 67, 29, 8, 20, 11, -1, 50, -1, 16,
-		-1, 18, -1, -1, 14, 24, -1, 7, -1, -1,
-		-1, 76, -1, -1, 45, -1, -1, -1, -1, 26,
-		81,
+		-1, -1, -1, -1, -1, -1, -1, 4, -1, 31,
+		87, 66, 12, -1, 83, 80, 6, 10, 5, 22,
+		42, 73, 38, 40, 46, 59, 85, 28, 23, 71,
+		74, 88, 30, 35, 2, 58, 81, 51, 36, 27,
+		1, 54, 82, 63, 62, 43, 86, 21, 77, 15,
+		47, 44, 64, 33, 75, 32, 49, 69, 9, 50,
+		39, 78, 60, 55, 48, 53, 17, 57, 70, 76,
+		56, 26, 37, 16, 67, 34, 3, 13, 41, 11,
+		72, 20, 61, 52, 29, 14, 8, -1, -1, -1,
+		68, 19, 0, 79, 24, -1, 7, -1, -1, -1,
+		-1, -1, -1, -1, -1, -1, -1, -1, -1, 18,
+		25, -1, -1, 84, -1, -1, -1, -1, -1, -1,
+		-1, 65, -1, -1, -1, 45,
 	};
 
 	auto * s = (const BYTE*) sKey.first;
@@ -3960,7 +3970,7 @@ static int VARIABLE_IS_NOT_USED G_FUNC_HASH_CHECK = TokHashCheck();
 struct FuncDesc_t
 {
 	//const char *	m_sName;
-	int				m_iArgs;
+	int				m_iArgs;	// positive assume exact N, negative assume 'at least'
 	int				m_iNodeType; // usually TOK_FUNC, but sometimes not
 	//	Tokh_e			m_eFunc;
 	ESphAttr		m_eRet;
@@ -4028,10 +4038,10 @@ static FuncDesc_t g_dFuncs[FUNC_FUNCS_COUNT] = // Keep same order as in Tokh_e
 	{ /*"uint64",		*/		1,	TOK_FUNC,		/*FUNC_UINT64,			*/	SPH_ATTR_UINT64 },
 	{ /*"query",		*/		0,	TOK_FUNC,		/*FUNC_QUERY,			*/	SPH_ATTR_STRINGPTR },
 
-	{ /*"curtime",		*/		0,	TOK_FUNC,		/*FUNC_CURTIME,			*/	SPH_ATTR_STRINGPTR },
-	{ /*"utc_time",		*/		0,	TOK_FUNC,		/*FUNC_UTC_TIME,		*/	SPH_ATTR_STRINGPTR },
-	{ /*"utc_timestamp",*/		0,	TOK_FUNC,		/*FUNC_UTC_TIMESTAMP,	*/	SPH_ATTR_STRINGPTR },
-	{ /*"timediff",		*/		2,	TOK_FUNC,		/*FUNC_TIMEDIFF,		*/	SPH_ATTR_STRINGPTR },
+	{ /*"curtime",		*/		0,	TOK_FUNC,		/*FUNC_CURTIME,			*/	SPH_ATTR_STRINGPTR }, // also evals numerics
+	{ /*"utc_time",		*/		0,	TOK_FUNC,		/*FUNC_UTC_TIME,		*/	SPH_ATTR_STRINGPTR }, // also evals numerics
+	{ /*"utc_timestamp",*/		0,	TOK_FUNC,		/*FUNC_UTC_TIMESTAMP,	*/	SPH_ATTR_STRINGPTR }, // also evals numerics
+	{ /*"timediff",		*/		2,	TOK_FUNC,		/*FUNC_TIMEDIFF,		*/	SPH_ATTR_STRINGPTR }, // also evals numerics
 	{ /*"current_user",	*/		0,	TOK_FUNC,		/*FUNC_CURRENT_USER,	*/	SPH_ATTR_STRINGPTR },
 	{ /*"connection_id",*/		0,	TOK_FUNC,		/*FUNC_CONNECTION_ID,	*/	SPH_ATTR_INTEGER },
 	{ /*"all",			*/		-1,	TOK_FUNC_JA,	/*FUNC_ALL,				*/	SPH_ATTR_INTEGER },
@@ -4046,13 +4056,16 @@ static FuncDesc_t g_dFuncs[FUNC_FUNCS_COUNT] = // Keep same order as in Tokh_e
 
 	{  /*"regex",		*/		2,	TOK_FUNC,		/*FUNC_REGEX,			*/	SPH_ATTR_INTEGER },
 
-	{  /*"substring_index",*/	3,	TOK_FUNC,		/*FUNC_SUBSTRING_INDEX,	*/	SPH_ATTR_STRINGPTR },
-	{  /*"upper",          */	1,	TOK_FUNC,		/*FUNC_UPPER,           */	SPH_ATTR_STRINGPTR },
-	{  /*"lower",          */	1,	TOK_FUNC,		/*FUNC_LOWER,           */	SPH_ATTR_STRINGPTR },
+	{  /*"substring_index",*/	3,	TOK_FUNC,		/*FUNC_SUBSTRING_INDEX,	*/	SPH_ATTR_STRINGPTR }, // also evals numerics
+	{  /*"upper",          */	1,	TOK_FUNC,		/*FUNC_UPPER,           */	SPH_ATTR_STRINGPTR }, // also evals numerics
+	{  /*"lower",          */	1,	TOK_FUNC,		/*FUNC_LOWER,           */	SPH_ATTR_STRINGPTR }, // also evals numerics
 
 	{  /*"last_insert_id",*/	0,	TOK_FUNC,		/*FUNC_LAST_INSERT_ID,	*/	SPH_ATTR_STRINGPTR },
 	{ /*"levenshtein", */		-1,	TOK_FUNC,		/*FUNC_LEVENSHTEIN,		*/	SPH_ATTR_NONE },
 	{ /*"date_format", */		2,	TOK_FUNC,		/*FUNC_DATE_FORMAT,		*/	SPH_ATTR_STRINGPTR },
+	{ /*"database", */			0,	TOK_FUNC,		/*FUNC_DATABASE,		*/	SPH_ATTR_STRINGPTR },
+	{ /*"user", */				0,	TOK_FUNC,		/*FUNC_USER,			*/	SPH_ATTR_STRINGPTR },
+	{ /*"version", */			0,	TOK_FUNC,		/*FUNC_VERSION,			*/	SPH_ATTR_STRINGPTR },
 };
 
 
@@ -4069,9 +4082,26 @@ static inline const char* FuncNameByHash ( int iFunc )
 		, "rankfactors", "packedfactors", "bm25f", "integer", "double", "length", "least", "greatest"
 		, "uint", "uint64", "query", "curtime", "utc_time", "utc_timestamp", "timediff", "current_user"
 		, "connection_id", "all", "any", "indexof", "min_top_weight", "min_top_sortval", "atan2", "rand"
-		, "regex", "substring_index", "upper", "lower", "last_insert_id", "levenshtein", "date_format" };
+		, "regex", "substring_index", "upper", "lower", "last_insert_id", "levenshtein", "date_format"
+		, "database", "user", "version" };
 
 	return dNames[iFunc];
+}
+
+// set of functions which evals to SPH_ATTR_STRINGPTR, but also can eval to numerics
+static inline bool CanEvalNumbers ( int iFunc )
+{
+	switch (iFunc)
+	{
+	case FUNC_CURTIME:
+	case FUNC_UTC_TIME:
+	case FUNC_UTC_TIMESTAMP:
+	case FUNC_TIMEDIFF:
+	case FUNC_SUBSTRING_INDEX:
+	case FUNC_UPPER:
+	case FUNC_LOWER: return true;
+	default: return false;
+	}
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -4083,6 +4113,32 @@ static void ConvertArgsJson ( VecRefPtrs_t<ISphExpr*> & dArgs );
 static inline bool IsInt ( ESphAttr eType )
 {
 	return eType==SPH_ATTR_INTEGER || eType==SPH_ATTR_BIGINT;
+}
+
+/// check whether the type can be promoted to integer
+static inline bool IsNumericLike ( ESphAttr eType )
+{
+	switch ( eType )
+	{
+	case SPH_ATTR_INTEGER:
+	case SPH_ATTR_TIMESTAMP:
+	case SPH_ATTR_BOOL:
+	case SPH_ATTR_BIGINT:
+	case SPH_ATTR_TOKENCOUNT:
+	case SPH_ATTR_UINT64: return true;
+	default: return false;
+	}
+}
+
+/// check whether the type can be promoted to float
+static inline bool IsFloatLike ( ESphAttr eType )
+{
+	switch ( eType )
+	{
+	case SPH_ATTR_FLOAT:
+	case SPH_ATTR_DOUBLE: return true;
+	default: return false;
+	}
 }
 
 static inline bool IsJson ( ESphAttr eAttr )
@@ -7075,6 +7131,7 @@ ISphExpr * ExprParser_t::CreateFuncExpr ( int iNode, VecRefPtrs_t<ISphExpr*> & d
 
 	case FUNC_LAST_INSERT_ID: return new Expr_LastInsertID_c();
 	case FUNC_CURRENT_USER:
+	case FUNC_USER:
 	{
 		auto sUser = CurrentUser();
 		return new Expr_GetStrConst_c ( sUser.first, sUser.second, false );
@@ -7083,6 +7140,8 @@ ISphExpr * ExprParser_t::CreateFuncExpr ( int iNode, VecRefPtrs_t<ISphExpr*> & d
 	case FUNC_LEVENSHTEIN: return CreateLevenshteinNode ( dArgs[0], dArgs[1], ( dArgs.GetLength()>2 ? dArgs[2] : nullptr ) );
 
 	case FUNC_DATE_FORMAT: return new ExprDateFormat_c ( dArgs[0], dArgs[1] );
+	case FUNC_DATABASE: return new Expr_GetStrConst_c ( FROMS ( "Manticore" ), false ) ;
+	case FUNC_VERSION: return new Expr_GetStrConst_c ( FromStr ( sphinxexpr::MySQLVersion() ), false );
 
 	default: // just make gcc happy
 		assert ( 0 && "unhandled function id" );
@@ -7131,6 +7190,9 @@ ISphExpr * ExprParser_t::CreateTree ( int iNode )
 		case FUNC_QUERY:
 		case FUNC_CURRENT_USER:
 		case FUNC_CONNECTION_ID:
+		case FUNC_DATABASE:
+		case FUNC_USER:
+		case FUNC_VERSION:
 			bSkipChildren = true;
 			break;
 		default:
@@ -9324,21 +9386,27 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 	bool bGotString = false, bGotMva = false;
 	CSphVector<ESphAttr> dRetTypes;
 	GatherArgRetTypes ( iArg, dRetTypes );
-	ARRAY_FOREACH ( i, dRetTypes )
+	for ( ESphAttr eRetType: dRetTypes ) switch ( eRetType )
 	{
-		bGotString |= dRetTypes[i]==SPH_ATTR_STRING;
-		bGotMva |= ( dRetTypes[i]==SPH_ATTR_UINT32SET || dRetTypes[i]==SPH_ATTR_INT64SET || dRetTypes[i]==SPH_ATTR_UINT32SET_PTR || dRetTypes[i]==SPH_ATTR_INT64SET_PTR );
+		case SPH_ATTR_UINT32SET: case SPH_ATTR_INT64SET: case SPH_ATTR_UINT32SET_PTR: case SPH_ATTR_INT64SET_PTR: bGotMva = true; break;
+		case SPH_ATTR_STRING : bGotString = true;
+		default:;
 	}
-	if ( bGotString && !( eFunc==FUNC_LENGTH || eFunc==FUNC_TO_STRING || eFunc==FUNC_CONCAT || eFunc==FUNC_SUBSTRING_INDEX || eFunc==FUNC_UPPER  || eFunc ==FUNC_LOWER || eFunc==FUNC_CRC32 || eFunc==FUNC_EXIST || eFunc==FUNC_POLY2D || eFunc==FUNC_GEOPOLY2D || eFunc==FUNC_REGEX || eFunc==FUNC_LEVENSHTEIN || eFunc==FUNC_DATE_FORMAT ) )
+
+	if ( bGotString ) switch ( eFunc )
 	{
-		m_sParserError.SetSprintf ( "%s() arguments can not be string", sFuncName );
-		return -1;
+		default: m_sParserError.SetSprintf ( "%s() arguments can not be string", sFuncName ); return -1;
+		case FUNC_LENGTH: case FUNC_TO_STRING: case FUNC_CONCAT: case FUNC_SUBSTRING_INDEX: case FUNC_UPPER: case FUNC_LOWER: case FUNC_CRC32:
+		case FUNC_EXIST: case FUNC_POLY2D: case FUNC_GEOPOLY2D: case FUNC_REGEX: case FUNC_LEVENSHTEIN: case FUNC_DATE_FORMAT: case FUNC_BIGINT:;
 	}
-	if ( bGotMva && !( eFunc==FUNC_TO_STRING || eFunc==FUNC_LENGTH || eFunc==FUNC_LEAST || eFunc==FUNC_GREATEST ) )
+
+	if ( bGotMva ) switch ( eFunc )
 	{
-		m_sParserError.SetSprintf ( "%s() arguments can not be MVA", sFuncName );
-		return -1;
+		default: m_sParserError.SetSprintf ( "%s() arguments can not be MVA", sFuncName ); return -1;
+		case FUNC_TO_STRING: case FUNC_LENGTH: case FUNC_LEAST: case FUNC_GREATEST:;
 	}
+
+	auto& dArg = m_dNodes[iArg];
 
 	switch ( eFunc )
 	{
@@ -9359,13 +9427,9 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 		break;
 	case FUNC_EXIST:
 		{
-			int iExistLeft = m_dNodes[iArg].m_iLeft;
-			int iExistRight = m_dNodes[iArg].m_iRight;
-			bool bIsLeftGood = ( m_dNodes[iExistLeft].m_eRetType==SPH_ATTR_STRING );
-			ESphAttr eRight = m_dNodes[iExistRight].m_eRetType;
-			bool bIsRightGood = ( eRight==SPH_ATTR_INTEGER || eRight==SPH_ATTR_TIMESTAMP || eRight==SPH_ATTR_BOOL
-				|| eRight==SPH_ATTR_FLOAT || eRight==SPH_ATTR_BIGINT );
-
+			ESphAttr eLeft = m_dNodes[dArg.m_iLeft].m_eRetType, eRight = m_dNodes[dArg.m_iRight].m_eRetType;
+			bool bIsLeftGood = ( eLeft==SPH_ATTR_STRING );
+			bool bIsRightGood = ( eRight==SPH_ATTR_INTEGER || eRight==SPH_ATTR_TIMESTAMP || eRight==SPH_ATTR_BOOL || eRight==SPH_ATTR_FLOAT || eRight==SPH_ATTR_BIGINT );
 			if ( !bIsLeftGood || !bIsRightGood )
 			{
 				if ( bIsRightGood )
@@ -9387,10 +9451,25 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 	case FUNC_HOUR:
 	case FUNC_MINUTE:
 	case FUNC_SECOND:
-		assert ( iArg>=0 );
-		if ( m_dNodes[iArg].m_eRetType!=SPH_ATTR_INTEGER && m_dNodes[iArg].m_eRetType!=SPH_ATTR_TIMESTAMP && m_dNodes[iArg].m_eRetType!=SPH_ATTR_BIGINT )
+		assert ( iArg >= 0 );
+		if ( !( dArg.m_eRetType==SPH_ATTR_INTEGER
+				 || dArg.m_eRetType==SPH_ATTR_TIMESTAMP
+				 || dArg.m_eRetType==SPH_ATTR_BIGINT
+				 || CanEvalNumbers ( dArg.m_iFunc ) ) )
 		{
-			m_sParserError.SetSprintf ( "%s() argument must be integer, bigint or timestamp", sFuncName );
+			m_sParserError.SetSprintf ( "%s() argument must be integer, bigint, timestamp, or evaluated to number", sFuncName );
+			return -1;
+		}
+		break;
+
+	case FUNC_BIGINT:
+		assert ( iArg >= 0 );
+		if ( !( dArg.m_eRetType == SPH_ATTR_JSON_FIELD
+				 || IsFloatLike ( dArg.m_eRetType )
+				 || IsNumericLike ( dArg.m_eRetType )
+				 || CanEvalNumbers ( dArg.m_iFunc ) ) )
+		{
+			m_sParserError.SetSprintf ( "%s() argument must be number, or evaluated to number", sFuncName );
 			return -1;
 		}
 		break;
@@ -9517,8 +9596,7 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 	case FUNC_REGEX:
 		{
 #if WITH_RE2
-			int iLeft = m_dNodes[iArg].m_iLeft;
-			ESphAttr eLeft = m_dNodes[iLeft].m_eRetType;
+			ESphAttr eLeft = m_dNodes[dArg.m_iLeft].m_eRetType;
 			bool bIsLeftGood = ( eLeft==SPH_ATTR_STRING || eLeft==SPH_ATTR_STRINGPTR || eLeft==SPH_ATTR_JSON_FIELD );
 			if ( !bIsLeftGood )
 			{
@@ -9526,8 +9604,7 @@ int ExprParser_t::AddNodeFunc ( int iFunc, int iArg )
 				return -1;
 			}
 
-			int iRight = m_dNodes[iArg].m_iRight;
-			ESphAttr eRight = m_dNodes[iRight].m_eRetType;
+			ESphAttr eRight = m_dNodes[dArg.m_iRight].m_eRetType;
 			bool bIsRightGood = ( eRight==SPH_ATTR_STRING );
 			if ( !bIsRightGood )
 			{

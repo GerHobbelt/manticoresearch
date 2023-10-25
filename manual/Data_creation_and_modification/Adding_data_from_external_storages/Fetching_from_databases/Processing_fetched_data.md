@@ -39,7 +39,7 @@ Plain attributes only allow attaching 1 value per each document. However, there 
 
 The MVA can take the values from a column (like the rest of the data types) - in this case, the column in the result set must provide a string with multiple integer values separated by commas - or by running a separate query to get the values.
 
-In case of query, the engine runs the query, groups the result by IDs, and attaches the values to their corresponding documents in the table. Values with an ID not found in the table are discarded.
+In case of query, the engine runs the query, groups the result by IDs, and attaches the values to their corresponding documents in the table. Values with an ID not found in the table are discarded. Before query, set of `sql_query_pre_all`, if any, will be executed.
 
 The declaration format for sql_attr_multi is as follows:
 
@@ -142,6 +142,7 @@ The query must return exactly 2 columns: document ID, and text to append to a jo
 then the indexing results would be equivalent to adding a new text field with a value of 'red right hand' to document 1 and 'mysql sphinx' to document 2, including the keyword positions inside the field in the order they come from the query. If the rows need to be in a specific order, that needs to be explicitly defined in the query.
 
 Joined fields are only indexed differently. There are no other differences between joined fields and regular text fields.
+Before joined fields query, set of `sql_query_pre_all`, if any, will be executed. That will allow you to set desired encoding, etc. for joined fields context.
 
 When a single query is not efficient enough or does not work because of the database driver limitations, ranged queries can be used. It works similarly to the ranged queries in the main indexing loop. The range will be queried for and fetched upfront once, then multiple queries with different `$start` and `$end` substitutions will be run to fetch the actual data.
 
@@ -159,7 +160,7 @@ Document IDs can be duplicate, but they must be in ascending order. Payloads **m
 
 The only ranker that accounts for payloads is `proximity_bm25` (the default [ranker](../../Searching/Sorting_and_ranking.md#Available-built-in-rankers)). On tables with payload fields, it will automatically switch to a variant that matches keywords in those fields, computes a sum of matched payloads multiplied by field weights, and adds that sum to the final rank.
 
-Pleas note that the payload field is ignored for full-text queries containing complex operators. It only works for simple bag-of-words queries.
+Please note that the payload field is ignored for full-text queries containing complex operators. It only works for simple bag-of-words queries.
 
 <!-- intro -->
 Configuration example:
