@@ -472,10 +472,7 @@ static std::pair<bool, CSphString> BuddyQuery ( bool bHttp, Str_t sQueryError, S
 static bool HasProhibitBuddy ( const OptionsHash_t & hOptions )
 {
 	CSphString * pProhibit = hOptions ( "user-agent" );
-	if ( !pProhibit )
-		return false;
-
-	return ( pProhibit->Begins ( "Manticore Buddy" ) );
+	return pProhibit != nullptr && ( pProhibit->Begins ( "Manticore Buddy" ) );
 }
 
 struct BuddyReply_t
@@ -534,10 +531,7 @@ static bool ParseReply ( char * sReplyRaw, BuddyReply_t & tParsed, CSphString & 
 		sError.SetSprintf ( "wrong budy reply version (%d), daemon version (%d), upgrade buddy", iVer, g_iBuddyVersion );
 		return false;
 	}
-	if ( bson::IsNullNode ( tParsed.m_tType ) || bson::IsNullNode ( tParsed.m_tMessage ) )
-		return false;
-
-	return true;
+	return !( bson::IsNullNode ( tParsed.m_tType ) || bson::IsNullNode ( tParsed.m_tMessage ) );
 }
 
 static const sph::StringSet g_dAllowedEndpoints = {
@@ -550,33 +544,25 @@ static bool RequestSkipBuddy ( Str_t sSrcQuery, const CSphString & sURL )
 	return ( IsEmpty ( sSrcQuery ) && !g_dAllowedEndpoints[sURL] );
 }
 
-bool ProcessHttpQueryBuddy ( CharStream_c & tSource, OptionsHash_t & hOptions, CSphVector<BYTE> & dResult, bool bNeedHttpResponse, http_method eRequestType )
+// we call it ALWAYS, because even with absolutely correct result, we still might reject it for '/cli' endpoint if buddy is not available or prohibited
+bool ProcessHttpQueryBuddy ( HttpProcessResult_t & tRes, Str_t sSrcQuery, OptionsHash_t & hOptions, CSphVector<BYTE> & dResult, bool bNeedHttpResponse )
 {
-	Str_t sSrcQuery = dEmptyStr;
-	HttpProcessResult_t tRes = ProcessHttpQuery ( tSource, sSrcQuery, hOptions, dResult, bNeedHttpResponse, eRequestType );
-
-	if ( tRes.m_bOk || tRes.m_eEndpoint==SPH_HTTP_ENDPOINT_INDEX || !HasBuddy() || HasProhibitBuddy ( hOptions ) || RequestSkipBuddy ( sSrcQuery, hOptions["full_url"] ) )
+	if ( tRes.m_bOk || !HasBuddy() || tRes.m_eEndpoint==SPH_HTTP_ENDPOINT_INDEX || HasProhibitBuddy ( hOptions ) || RequestSkipBuddy ( sSrcQuery, hOptions["full_url"] ) )
 	{
 		if ( tRes.m_eEndpoint==SPH_HTTP_ENDPOINT_CLI )
 		{
 			if ( !HasBuddy() )
-			{
 				tRes.m_sError.SetSprintf ( "can not process /cli endpoint without buddy" );
-				sphHttpErrorReply ( dResult, SPH_HTTP_STATUS_501, tRes.m_sError.cstr() );
-
-			} else if ( HasProhibitBuddy ( hOptions ) )
-			{
+			else if ( HasProhibitBuddy ( hOptions ) )
 				tRes.m_sError.SetSprintf ( "can not process /cli endpoint with User-Agent:Manticore Buddy" );
-				sphHttpErrorReply ( dResult, SPH_HTTP_STATUS_501, tRes.m_sError.cstr() );
-			}
+			sphHttpErrorReply ( dResult, SPH_HTTP_STATUS_501, tRes.m_sError.cstr() );
 		}
 		
 		assert ( dResult.GetLength()>0 );
 		return tRes.m_bOk;
 	}
 
-	auto tReplyRaw = BuddyQuery ( true, FromStr ( tRes.m_sError ), FromStr ( hOptions["full_url"] ), FromStr ( sSrcQuery ) );
-
+	auto tReplyRaw = BuddyQuery ( true, FromStr ( tRes.m_sError ), FromStr ( hOptions["full_url"] ), sSrcQuery );
 	if ( !tReplyRaw.first )
 	{
 		sphWarning ( "[BUDDY] [%d] error: %s", session::GetConnID(), tReplyRaw.second.cstr() );
@@ -604,26 +590,13 @@ bool ProcessHttpQueryBuddy ( CharStream_c & tSource, OptionsHash_t & hOptions, C
 	return true;
 }
 
-bool ProcessSqlQueryBuddy ( Str_t sQuery, BYTE & uPacketID, GenericOutputBuffer_c & tOut )
+void ProcessSqlQueryBuddy ( Str_t sSrcQuery, Str_t tError, std::pair<int, BYTE> tSavedPos, BYTE& uPacketID, GenericOutputBuffer_c& tOut )
 {
-	BYTE uRefPacketID = uPacketID;
-	int iRefPos = tOut.GetSentCount();
-
-	std::unique_ptr<RowBuffer_i> tRows ( CreateSqlRowBuffer ( &uPacketID, &tOut ) );
-	auto& tSess = session::Info();
-	tSess.m_pSqlRowBuffer = tRows.get();
-	bool bKeepProfile = session::Execute ( sQuery, *tRows );
-	bool bOk = !tRows->IsError();
-
-	if ( bOk || !HasBuddy() )
-		return bKeepProfile;
-
-	auto tReplyRaw = BuddyQuery ( false, FromStr ( tRows->GetError() ), Str_t(), sQuery );
-
+	auto tReplyRaw = BuddyQuery ( false, tError, Str_t(), sSrcQuery );
 	if ( !tReplyRaw.first )
 	{
 		sphWarning ( "[BUDDY] [%d] error: %s", session::GetConnID(), tReplyRaw.second.cstr() );
-		return bKeepProfile;
+		return;
 	}
 
 	CSphString sError;
@@ -631,28 +604,27 @@ bool ProcessSqlQueryBuddy ( Str_t sQuery, BYTE & uPacketID, GenericOutputBuffer_
 	if ( !ParseReply ( const_cast<char *>( tReplyRaw.second.cstr() ), tReplyParsed, sError ) )
 	{
 		sphWarning ( "[BUDDY] [%d] %s: %s", session::GetConnID(), sError.cstr(), tReplyRaw.second.cstr() );
-		return bKeepProfile;
+		return;
 	}
 	if ( bson::String ( tReplyParsed.m_tType )!="sql response" )
 	{
 		sphWarning ( "[BUDDY] [%d] wrong response type %s: %s", session::GetConnID(), bson::String ( tReplyParsed.m_tType ).cstr(), tReplyRaw.second.cstr() );
-		return bKeepProfile;
+		return;
 	}
 
 	if ( bson::IsNullNode ( tReplyParsed.m_tMessage ) || !bson::IsArray ( tReplyParsed.m_tMessage ) )
 	{
 		const char * sReplyType = ( bson::IsNullNode ( tReplyParsed.m_tMessage ) ? "empty" : "not cli reply array" );
 		sphWarning ( "[BUDDY] [%d] wrong reply format - %s: %s", session::GetConnID(), sReplyType, tReplyRaw.second.cstr() );
-		return bKeepProfile;
+		return;
 	}
 
 	// reset back out buff and packet
-	uPacketID = uRefPacketID;
-	tOut.Rewind ( iRefPos );
+	uPacketID = tSavedPos.second;
+	tOut.Rewind ( tSavedPos.first );
 	std::unique_ptr<RowBuffer_i> tBuddyRows ( CreateSqlRowBuffer ( &uPacketID, &tOut ) );
 
-	ConvertJsonDataset ( tReplyParsed.m_tMessage, sQuery.first, *tBuddyRows );
-	return bKeepProfile;
+	ConvertJsonDataset ( tReplyParsed.m_tMessage, sSrcQuery.first, *tBuddyRows );
 }
 
 #ifdef _WIN32

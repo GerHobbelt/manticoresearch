@@ -1411,7 +1411,7 @@ public:
 		return true;
 	}
 
-	void Eof ( bool bMoreResults , int iWarns ) override
+	void Eof ( bool bMoreResults, int iWarns, const char* ) override
 	{
 		m_dBuf.FinishBlock ( true ); // last doc, allow empty
 		m_dBuf.FinishBlock ( false ); // docs section
@@ -2299,7 +2299,7 @@ static std::unique_ptr<HttpHandler_c> CreateHttpHandler ( ESphHttpEndpoint eEndp
 	return nullptr;
 }
 
-HttpProcessResult_t ProcessHttpQuery ( CharStream_c & tSource, Str_t & sQuery, OptionsHash_t & hOptions, CSphVector<BYTE> & dResult, bool bNeedHttpResponse, http_method eRequestType )
+HttpProcessResult_t ProcessHttpQuery ( CharStream_c & tSource, Str_t & sSrcQuery, OptionsHash_t & hOptions, CSphVector<BYTE> & dResult, bool bNeedHttpResponse, http_method eRequestType )
 {
 	TRACE_CONN ( "conn", "ProcessHttpQuery" );
 
@@ -2308,7 +2308,7 @@ HttpProcessResult_t ProcessHttpQuery ( CharStream_c & tSource, Str_t & sQuery, O
 	const CSphString & sEndpoint = hOptions["endpoint"];
 	tRes.m_eEndpoint = StrToHttpEndpoint ( sEndpoint );
 
-	std::unique_ptr<HttpHandler_c> pHandler = CreateHttpHandler ( tRes.m_eEndpoint, tSource, sQuery, hOptions, eRequestType );
+	std::unique_ptr<HttpHandler_c> pHandler = CreateHttpHandler ( tRes.m_eEndpoint, tSource, sSrcQuery, hOptions, eRequestType );
 	if ( !pHandler )
 	{
 		if ( tRes.m_eEndpoint == SPH_HTTP_ENDPOINT_INDEX )
@@ -2343,13 +2343,15 @@ HttpProcessResult_t ProcessHttpQuery ( CharStream_c & tSource, Str_t & sQuery, O
 	return tRes;
 }
 
-bool sphProcessHttpQueryNoResponce ( const CSphString & sEndpoint, const CSphString& sQuery, CSphVector<BYTE> & dResult )
+void sphProcessHttpQueryNoResponce ( const CSphString & sEndpoint, const CSphString & sQuery, CSphVector<BYTE> & dResult )
 {
 	OptionsHash_t hOptions;
 	hOptions.Add ( sEndpoint, "endpoint" );
 
 	BlobStream_c tQuery ( sQuery );
-	return ProcessHttpQueryBuddy ( tQuery, hOptions, dResult, false, HTTP_GET );
+	Str_t sSrcQuery;
+	HttpProcessResult_t tRes = ProcessHttpQuery ( tQuery, sSrcQuery, hOptions, dResult, false, HTTP_GET );
+	ProcessHttpQueryBuddy ( tRes, sSrcQuery, hOptions, dResult, false );
 }
 
 bool HttpRequestParser_c::ProcessClientHttp ( AsyncNetInputBuffer_c& tIn, CSphVector<BYTE>& dResult )
@@ -2372,7 +2374,9 @@ bool HttpRequestParser_c::ProcessClientHttp ( AsyncNetInputBuffer_c& tIn, CSphVe
 	if ( IsLogManagementEnabled() && eEndpoint==SPH_HTTP_ENDPOINT_TOTAL && m_sEndpoint.Ends ( "_bulk" ) )
 		eEndpoint = SPH_HTTP_ENDPOINT_ES_BULK;
 
-	return ProcessHttpQueryBuddy ( *pSource, m_hOptions, dResult, true, m_eType );
+	Str_t sSrcQuery;
+	HttpProcessResult_t tRes = ProcessHttpQuery ( *pSource, sSrcQuery, m_hOptions, dResult, true, m_eType );
+	return ProcessHttpQueryBuddy ( tRes, sSrcQuery, m_hOptions, dResult, true );
 }
 
 void sphHttpErrorReply ( CSphVector<BYTE> & dData, ESphHttpStatus eCode, const char * szError )
