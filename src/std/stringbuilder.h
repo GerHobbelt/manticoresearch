@@ -53,6 +53,7 @@ public:
 	const char *		cstr() const { return m_szBuffer ? m_szBuffer : ""; }
 	explicit operator	CSphString() const { return { cstr() }; }
 	explicit operator	Str_t() const { return m_szBuffer ? Str_t { m_szBuffer, m_iUsed } : dEmptyStr; }
+	explicit operator	ByteBlob_t() const { return m_szBuffer ? ByteBlob_t { (const BYTE*) m_szBuffer, m_iUsed } : S2B(dEmptyStr); }
 
 	// move out (de-own) value
 	BYTE *				Leak();
@@ -65,6 +66,8 @@ public:
 	// different kind of fullfillments
 	StringBuilder_c &	AppendChunk ( const Str_t& sChunk, char cQuote = '\0' );
 	StringBuilder_c &	AppendString ( const CSphString & sText, char cQuote = '\0' );
+	StringBuilder_c &	AppendString ( const char* szText, char cQuote = '\0' );
+	StringBuilder_c &	AppendString ( Str_t sText, char cQuote = '\0' );
 
 	StringBuilder_c &	operator = ( StringBuilder_c rhs ) noexcept;
 	template<typename T>
@@ -76,7 +79,7 @@ public:
 	/*
 	 * Two guys below distinguishes `const char*` param from `const char[]`.
 	 * First one implies strlen() and uses it
-	 * Second implies length to be now at compile time, and avoids strlen().
+	 * Second implies length to be known at compile time, and avoids strlen().
 	 * So, << "bar" - will be faster, as we know size of that literal in compile time.
 	 * Look at TEST ( functions, stringbuilder_templated ) for experiments.
 	 */
@@ -112,6 +115,7 @@ public:
 	void				AppendRawChunk ( Str_t sText ); // append without any commas
 	StringBuilder_c &	SkipNextComma();
 	StringBuilder_c &	AppendName ( const char * szName, bool bQuoted=true ); // append "szName":
+	StringBuilder_c &	AppendName ( const Str_t& sName, bool bQuoted = true );   // append "sName":
 
 	// these use standard sprintf() inside
 	StringBuilder_c &	vAppendf ( const char * sTemplate, va_list ap );

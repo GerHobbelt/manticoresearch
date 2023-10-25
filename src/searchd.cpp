@@ -49,6 +49,7 @@
 #include "config_reloader.h"
 #include "secondarylib.h"
 #include "task_dispatcher.h"
+#include "tracer.h"
 
 // services
 #include "taskping.h"
@@ -1132,7 +1133,7 @@ LONG WINAPI CrashLogger::HandleCrash ( EXCEPTION_POINTERS * pExc )
 					sphSafeInfo ( g_iLogFile, "thd %d (%s), proto %s, state %s, command %s", iThd,
 							pThread->m_sThreadName.cstr(),
 							ProtoName (pSrc->GetProto()), TaskStateName ( pSrc->GetTaskState() ),
-							pSrc->m_sCommand ? pSrc->m_sCommand : "-" );
+							pSrc->m_szCommand ? pSrc->m_szCommand : "-" );
 					++iThd;
 					break;
 				}
@@ -3337,7 +3338,7 @@ static void SendJsonField ( ISphOutputBuffer& tOut, const BYTE * pJSON, bool bSe
 	}
 
 	auto dData = sphUnpackPtrAttr ( pJSON );
-	if ( IsNull ( dData ) || *dData.first==JSON_EOF )
+	if ( IsEmpty ( dData ) || *dData.first==JSON_EOF )
 		tOut.SendByte ( JSON_EOF );
 	else
 	{
@@ -5195,6 +5196,7 @@ private:
 	VecTraits_T<CSphQueryResult>		m_dNResults;		///< working subset of result pointers
 	VecTraits_T<SearchFailuresLog_c>	m_dNFailuresSet;	///< working subset of failures
 
+	StringBuilder_c						m_sError;
 private:
 	bool							ParseSysVar();
 	bool							ParseIdxSubkeys();
@@ -5511,6 +5513,7 @@ SphQueueSettings_t SearchHandler_c::MakeQueueSettings ( const CSphIndex * pIndex
 	tQS.m_iMaxMatches = GetMaxMatches ( iMaxMatches, pIndex );
 	tQS.m_bNeedDocids = m_bNeedDocIDs;	// need docids to merge results from indexes
 	tQS.m_fnGetCountDistinct = [pIndex]( const CSphString & sAttr ){ return pIndex->GetCountDistinct(sAttr); };
+	tQS.m_bEnableFastDistinct = m_dLocal.GetLength()<=1;
 	return tQS;
 }
 
@@ -5953,15 +5956,12 @@ void SearchHandler_c::RunLocalSearches ()
 	for ( int i = 0; i<iNumLocals; ++i )
 		dOrder[i] = i;
 
-	// the context
-	ClonableCtx_T<LocalSearchRef_t, LocalSearchClone_t> dCtx { m_tHook, pMainExtra, m_dNFailuresSet, m_dNAggrResults, m_dNResults };
-
-	auto iConcurrency = m_dNQueries.First().m_iCouncurrency;
-	if ( !iConcurrency )
-		iConcurrency = GetEffectiveDistThreads ();
-
 	auto tDispatch = GetEffectiveBaseDispatcherTemplate();
-	auto pDispatcher = Dispatcher::Make ( iNumLocals, iConcurrency, tDispatch );
+	Dispatcher::Unify ( tDispatch, m_dNQueries.First().m_tMainDispatcher );
+	auto pDispatcher = Dispatcher::Make ( iNumLocals, m_dNQueries.First().m_iCouncurrency, tDispatch );
+
+	// the context
+	ClonableCtx_T<LocalSearchRef_t, LocalSearchClone_t, Threads::ECONTEXT::UNORDERED> dCtx { m_tHook, pMainExtra, m_dNFailuresSet, m_dNAggrResults, m_dNResults };
 	dCtx.LimitConcurrency ( pDispatcher->GetConcurrency() );
 
 	bool bSingle = pDispatcher->GetConcurrency()==1;
@@ -5990,7 +5990,10 @@ void SearchHandler_c::RunLocalSearches ()
 		int iJob = -1; // make it consumed
 
 		if ( !pSource->FetchTask ( iJob ) )
+		{
+			sphLogDebug ( "Early finish parallel RunLocalSearches because of empty queue" );
 			return; // already nothing to do, early finish.
+		}
 
 		// these two moved from inside the loop to avoid construction on every turn
 		CSphVector<ISphMatchSorter *> dSorters ( iQueries );
@@ -5998,6 +6001,7 @@ void SearchHandler_c::RunLocalSearches ()
 
 		auto tJobContext = dCtx.CloneNewContext();
 		auto& tCtx = tJobContext.first;
+		sphLogDebug ( "RunLocalSearches cloned context %d", tJobContext.second );
 		Threads::Coro::Throttler_c tThrottler ( session::GetThrottlingPeriodMS () );
 		while ( true )
 		{
@@ -6005,10 +6009,9 @@ void SearchHandler_c::RunLocalSearches ()
 				return; // all is done
 
 			auto iLocal = dOrder[iJob];
+			sphLogDebugv ( "RunLocalSearches %d, iJob: %d, iLocal: %d, mass %d", tJobContext.second, iJob, iLocal, (int) m_dLocal[iLocal].m_iMass );
 			iJob = -1; // mark it consumed
-//			sphWarning ( "iJob: %d, iLocal: %d, mass %d", iJob, iLocal, (int) m_dLocal[iLocal].m_iMass );
 
-			sphLogDebugv ("Tick coro search");
 			int64_t iCpuTime = -sphTaskCpuTimer ();
 
 			// FIXME!!! handle different proto
@@ -6143,6 +6146,7 @@ void SearchHandler_c::RunLocalSearches ()
 			tThrottler.ThrottleAndKeepCrashQuery (); // we set CrashQuery anyway at the start of the loop
 		}
 	});
+	sphLogDebug ( "RunLocalSearches processed in %d thread(s)", dCtx.NumWorked() );
 	dCtx.Finalize (); // merge mt results (if any)
 
 	tGlobalSorters.MergeResults(m_dNAggrResults);
@@ -6419,11 +6423,8 @@ bool SearchHandler_c::ParseSysVar ()
 		}
 	}
 
-	StringBuilder_c sN;
-	sN << sVar;
-	dSubkeys.for_each ( [&sN] ( CSphString & sVal ) { sN << sVal; } );
-	m_dNAggrResults.for_each (
-			[&sN] ( AggrResult_t & r ) { r.m_sError.SetSprintf ( "no such variable %s", sN.cstr () ); } );
+	m_sError << "no such variable " << sVar;
+	dSubkeys.for_each ( [this] ( const auto& s ) { m_sError << s; } );
 	return false;
 }
 
@@ -6432,8 +6433,7 @@ bool SearchHandler_c::ParseIdxSubkeys ()
 	const auto & sVar = m_dLocal.First ().m_sName;
 	const auto & dSubkeys = m_dNQueries.First ().m_dStringSubkeys;
 
-	if ( dSubkeys.IsEmpty () )
-		return false;
+	assert ( !dSubkeys.IsEmpty () );
 
 	bool bSchema = ( dSubkeys.GetLength()>1 && dSubkeys.Last ()==".table" );
 	TableFeeder_fn fnFeed;
@@ -6444,7 +6444,11 @@ bool SearchHandler_c::ParseIdxSubkeys ()
 	else if ( dSubkeys[0]==".files" ) // select .. from idx.files
 		fnFeed = [this] ( RowBuffer_i * pBuf ) { HandleSelectFiles ( *pBuf, m_pStmt ); };
 	else
+	{
+		m_sError << "No such index " << sVar;
+		dSubkeys.for_each ([this] (const auto& s) { m_sError << s;});
 		return false;
+	}
 
 	cServedIndexRefPtr_c pIndex;
 	if ( bSchema )
@@ -6539,10 +6543,8 @@ bool SearchHandler_c::AcquireInvokedIndexes()
 	if ( sFailed.IsEmpty ())
 		return true;
 
-	// report failed for each result
-	for ( auto& dResult : m_dNAggrResults )
-		dResult.m_sError.SetSprintf ( "unknown local index(es) '%s' in search request", sFailed.cstr() );
-
+	// report failed
+	m_sError << "unknown local index(es) '" << sFailed << "' in search request";
 	return false;
 }
 
@@ -6906,6 +6908,12 @@ void SearchHandler_c::RunSubset ( int iStart, int iEnd )
 	CSphVector<DistrServedByAgent_t> dDistrServedByAgent;
 	int iDivideLimits = 1;
 
+	auto fnError = AtScopeExit ( [this]()
+	{
+		if ( !m_sError.IsEmpty() )
+			m_dNAggrResults.for_each ( [this] ( auto& r ) { r.m_sError = (CSphString) m_sError; } );
+	});
+
 	if ( BuildIndexList ( iDivideLimits, dRemotes, dDistrServedByAgent ) )
 	{
 		// process query to meta, as myindex.status, etc.
@@ -6930,8 +6938,7 @@ void SearchHandler_c::RunSubset ( int iStart, int iEnd )
 	// sanity check
 	if ( dRemotes.IsEmpty() && m_dLocal.IsEmpty() )
 	{
-		const char * szT = ( m_dLocal.IsEmpty () ? "indexes" : "local indexes" );
-		m_dNAggrResults.Apply ( [szT] ( AggrResult_t & r ) { r.m_sError.SetSprintf ( "no enabled %s to search", szT );} );
+		m_sError << "no enabled indexes to search";
 		return;
 	}
 
@@ -7857,11 +7864,11 @@ static void MakeSnippetsCoro ( const VecTraits_T<int>& dTasks, CSphVector<Excerp
 	CSphVector<int> dStubFields;
 	dStubFields.Add ( 0 );
 
-	// the context
-	ClonableCtx_T<SnippedBuilderCtxRef_t, SnippedBuilderCtxClone_t> dCtx { pBuilder };
-
 	auto tDispatch = GetEffectiveBaseDispatcherTemplate();
-	auto pDispatcher = Dispatcher::Make ( iJobs, GetEffectiveDistThreads(), tDispatch );
+	auto pDispatcher = Dispatcher::Make ( iJobs, 0, tDispatch );
+
+	// the context
+	ClonableCtx_T<SnippedBuilderCtxRef_t, SnippedBuilderCtxClone_t, Threads::ECONTEXT::UNORDERED> dCtx { pBuilder };
 	dCtx.LimitConcurrency ( pDispatcher->GetConcurrency() );
 
 	Coro::ExecuteN ( dCtx.Concurrency ( iJobs ), [&]
@@ -7871,15 +7878,19 @@ static void MakeSnippetsCoro ( const VecTraits_T<int>& dTasks, CSphVector<Excerp
 		int iJob = -1; // make it consumed
 
 		if ( !pSource->FetchTask ( iJob ) )
+		{
+			sphLogDebug ( "Early finish parallel MakeSnippetsCoro because of empty queue" );
 			return; // already nothing to do, early finish.
+		}
 
 		auto tJobContext = dCtx.CloneNewContext();
 		auto& tCtx = tJobContext.first;
+		sphLogDebug ( "MakeSnippetsCoro cloned context %d", tJobContext.second );
 		Threads::Coro::Throttler_c tThrottler ( session::GetThrottlingPeriodMS () );
 		while (true)
 		{
 			myinfo::SetTaskInfo ( "s %d:", iJob );
-			sphLogDebug ( "MakeSnippetsCoro Coro loop tick %d[%d]", iJob, dTasks[iJob] );
+			sphLogDebugv ( "MakeSnippetsCoro %d %d[%d]", tJobContext.second, iJob, dTasks[iJob] );
 			MakeSingleLocalSnippetWithFields ( dQueries[dTasks[iJob]], q, tCtx.m_pBuilder, dStubFields );
 			sphLogDebug ( "MakeSnippetsCoro Coro loop tick %d finished", iJob );
 			iJob = -1; // mark it consumed
@@ -8942,7 +8953,7 @@ static bool BuildDistIndexStatus ( VectorLike & dStatus, const CSphString& sInde
 	return true;
 }
 
-
+/* commented out as not used
 static bool operator < ( const IteratorDesc_t & tA, const IteratorDesc_t & tB )
 {
 	if ( tA.m_sAttr < tB.m_sAttr )
@@ -8956,7 +8967,7 @@ static bool operator == ( const IteratorDesc_t & tA, const IteratorDesc_t & tB )
 {
 	return tA.m_sAttr==tB.m_sAttr && tA.m_sType==tB.m_sType;
 }
-
+*/
 
 void BuildAgentStatus ( VectorLike &dStatus, const CSphString& sIndexOrAgent )
 {
@@ -10776,6 +10787,7 @@ void sphHandleMysqlCommitRollback ( StmtErrorReporter_i& tOut, Str_t sQuery, boo
 	auto& tAcc = pSession->m_tAcc;
 	auto& sError = pSession->m_sError;
 	auto& tCrashQuery = GlobalCrashQueryGetRef();
+	TRACE_CONN ( "conn", "sphHandleMysqlCommitRollback" );
 
 	MEMORY ( MEM_SQL_COMMIT );
 	pSession->m_bInTransaction = false;
@@ -12116,7 +12128,7 @@ enum ThreadInfoFormat_e
 	THD_FORMAT_SPHINXQL
 };
 
-static std::pair<const char *, int> FormatInfo ( const PublicThreadDesc_t & tThd, ThreadInfoFormat_e eFmt, QuotationEscapedBuilder & tBuf )
+static Str_t FormatInfo ( const PublicThreadDesc_t & tThd, ThreadInfoFormat_e eFmt, QuotationEscapedBuilder & tBuf )
 {
 	if ( tThd.m_pQuery && eFmt==THD_FORMAT_SPHINXQL && tThd.m_eProto!=Proto_e::MYSQL41 )
 	{
@@ -12130,13 +12142,13 @@ static std::pair<const char *, int> FormatInfo ( const PublicThreadDesc_t & tThd
 
 		// query might be removed prior to lock then go to common path
 		if ( bGotQuery )
-			return { tBuf.cstr (), tBuf.GetLength () };
+			return (Str_t)tBuf;
 	}
 
-	if ( tThd.m_sDescription.IsEmpty () && tThd.m_sCommand )
-		return { tThd.m_sCommand, (int)strlen ( tThd.m_sCommand ) };
+	if ( tThd.m_sDescription.IsEmpty () && tThd.m_szCommand )
+		return FromSz ( tThd.m_szCommand );
 	else
-		return { tThd.m_sDescription.cstr (), tThd.m_sDescription.GetLength () };
+		return (Str_t)tThd.m_sDescription;
 }
 
 void HandleMysqlShowThreads ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
@@ -12215,10 +12227,10 @@ void HandleMysqlShowThreads ( RowBuffer_i & tOut, const SqlStmt_t * pStmt )
 
 		if ( bAll )
 			tOut.PutString ( dThd.m_sChain ); // Chain
-		auto tInfo = FormatInfo ( dThd, eFmt, tBuf );
-		if ( iCols >= 0 && iCols < tInfo.second )
-			tInfo.second = iCols;
-		tOut.PutString ( tInfo.first, tInfo.second ); // Info m_pTaskInfo
+		auto sInfo = FormatInfo ( dThd, eFmt, tBuf );
+		if ( iCols >= 0 && iCols < sInfo.second )
+			sInfo.second = iCols;
+		tOut.PutString ( sInfo ); // Info m_pTaskInfo
 		if ( !tOut.Commit () )
 			break;
 	}
@@ -12958,7 +12970,7 @@ void SendMysqlSelectResult ( RowBuffer_i & dRows, const AggrResult_t & tRes, boo
 				{
 					auto dFactors = sphUnpackPtrAttr ((const BYTE *) tMatch.GetAttr ( tLoc ));
 					StringBuilder_c sTmp;
-					if ( !IsNull ( dFactors ))
+					if ( !IsEmpty ( dFactors ))
 						sphFormatFactors ( sTmp, (const unsigned int *)dFactors.first, eAttrType==SPH_ATTR_FACTORS_JSON );
 					dRows.PutArray ( sTmp, false );
 					break;
@@ -13516,7 +13528,7 @@ void HandleMysqlSet ( RowBuffer_i & tOut, SqlStmt_t & tStmt, CSphSessionAccum & 
 
 		if ( tStmt.m_sSetName == "optimize_by_id" )
 		{
-			tSess.SetOptimizeById ( !!tStmt.m_iSetValue );
+			session::SetOptimizeById ( !!tStmt.m_iSetValue );
 			break;
 		}
 
@@ -14239,6 +14251,27 @@ void HandleWaitStatus ( RowBuffer_i& tOutBuf, const DebugCmd::DebugCommand_t& tC
 }
 #endif
 
+void HandleTrace ( RowBuffer_i& tOut, const DebugCmd::DebugCommand_t& tCmd )
+{
+	tOut.HeadTuplet ( "command", "result" );
+#ifdef PERFETTO
+	if ( tCmd.m_sParam.IsEmpty() )
+	{
+		if ( !tCmd.m_iPar1 )
+		{
+			Tracer::Stop();
+		}
+	} else
+	{
+		Tracer::Start ( tCmd.m_sParam, tCmd.m_iPar1 );
+	}
+	tOut.DataTuplet ( "debug trace ...", "SUCCESS" );
+#else
+	tOut.DataTuplet ( "debug trace ...", "FAIL, need to rebuild with Perfetto, look to src/perfetto/README.txt" );
+#endif
+	tOut.Eof();
+}
+
 void HandleToken ( RowBuffer_i & tOut, const CSphString & sParam )
 {
 	auto sSha = strSHA1 ( sParam );
@@ -14374,6 +14407,7 @@ void HandleMysqlDebug ( RowBuffer_i &tOut, Str_t sCommand, const QueryProfile_c 
 	case Cmd_e::WAIT: HandleWait ( tOut, tCmd ); return;
 	case Cmd_e::WAIT_STATUS: HandleWaitStatus ( tOut, tCmd ); return;
 #endif
+	case Cmd_e::TRACE: HandleTrace ( tOut, tCmd );	return;
 	default: break;
 	}
 
@@ -14494,7 +14528,7 @@ void HandleMysqlSelectSysvar ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 
 	auto pVars = session::Info().GetClientSession();
 	const SysVar_t dSysvars[] =
-	{	{ MYSQL_COL_STRING,	nullptr, [] {return "";}}, // stub
+	{	{ MYSQL_COL_STRING,	nullptr, [] {return "<empty>";}}, // stub
 		{ MYSQL_COL_LONG,	"@@session.auto_increment_increment",	[] {return "1";}},
 		{ MYSQL_COL_STRING,	"@@character_set_client", [] {return "utf8";}},
 		{ MYSQL_COL_STRING,	"@@character_set_connection", [] {return "utf8";}},
@@ -14594,7 +14628,7 @@ void HandleMysqlSelectDual ( RowBuffer_i & tOut, const SqlStmt_t & tStmt )
 		case SPH_ATTR_STRINGPTR:
 		{
 			int  iLen = pExpr->StringEval ( tMatch, &pStr );
-			tOut.PutArray ( pStr, iLen );
+			tOut.PutArray ( { pStr, iLen } );
 			FreeDataPtr ( *pExpr, pStr );
 			break;
 		}
@@ -14715,13 +14749,35 @@ void HandleMysqlShowVariables ( RowBuffer_i & dRows, const SqlStmt_t & tStmt )
 	}
 	dTable.MatchTuplet ( "pseudo_sharding", g_bSplit ? "1" : "0" );
 	dTable.MatchTuplet ( "secondary_indexes", GetSecondaryIndexDefault() ? "1" : "0" );
+	dTable.MatchTupletFn ( "threads_ex_effective", [] {
+		StringBuilder_c tBuf;
+		auto x = GetEffectiveBaseDispatcherTemplate();
+		auto y = GetEffectivePseudoShardingDispatcherTemplate();
+		Dispatcher::RenderTemplates ( tBuf, { x, y } );
+		return tBuf;
+	} );
 
 	if ( tStmt.m_iIntParam>=0 ) // that is SHOW GLOBAL VARIABLES
 	{
+		dTable.MatchTupletFn ( "threads_ex", [] {
+			StringBuilder_c tBuf;
+			auto x = Dispatcher::GetGlobalBaseDispatcherTemplate();
+			auto y = Dispatcher::GetGlobalPseudoShardingDispatcherTemplate();
+			Dispatcher::RenderTemplates ( tBuf, { x, y } );
+			return tBuf;
+		} );
 		Uservar_e eType = tStmt.m_iIntParam==0 ? USERVAR_INT_SET : USERVAR_INT_SET_TMP;
 		IterateUservars ( [&dTable, eType] ( const NamedRefVectorPair_t &dVar ) {
 			if ( dVar.second.m_eType==eType )
 				dTable.MatchTupletf ( dVar.first.cstr(), "%d", dVar.second.m_pVal ? dVar.second.m_pVal->GetLength() : 0 );
+		});
+	} else { // that is local (session) variables
+		dTable.MatchTupletFn ( "threads_ex", [] {
+			StringBuilder_c tBuf;
+			auto x = ClientTaskInfo_t::Info().GetBaseDispatcherTemplate();
+			auto y = ClientTaskInfo_t::Info().GetPseudoShardingDispatcherTemplate();
+			Dispatcher::RenderTemplates ( tBuf, { x, y } );
+			return tBuf;
 		});
 	}
 
@@ -15281,7 +15337,7 @@ static void HandleMysqlAlter ( RowBuffer_i & tOut, const SqlStmt_t & tStmt, bool
 		auto tCluster = IsPartOfCluster ( pServed );
 		if ( tCluster )
 		{
-			dErrors.SubmitEx ( sName, nullptr, "is part of cluster %s, can not issue ALTER", tCluster->cstr() );
+			dErrors.SubmitEx ( sName, nullptr, "is part of cluster %s, ALTER is not supported for tables in cluster", tCluster->cstr() );
 			continue;
 		}
 
@@ -16387,7 +16443,10 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 		return true;
 
 	case STMT_SHOW_SETTINGS:
-		HandleMysqlShowSettings ( g_hCfg, tOut );
+		{
+			ScRL_t dRotateConfigMutexRlocked { g_tRotateConfigMutex };
+			HandleMysqlShowSettings ( g_hCfg, tOut );
+		}
 		return true;
 
 	default:
@@ -16421,10 +16480,19 @@ VecTraits_T<int64_t> session::LastIds ()
 	return GetClientSession()->m_dLastIds;
 }
 
+void session::SetOptimizeById ( bool bOptimizeById )
+{
+	GetClientSession()->m_bOptimizeById = bOptimizeById;
+}
+
+bool session::GetOptimizeById()
+{
+	return GetClientSession()->m_bOptimizeById;
+}
+
 bool session::Execute ( Str_t sQuery, RowBuffer_i& tOut )
 {
-	auto& tSess = *Info().GetClientSession();
-	return tSess.Execute ( sQuery, tOut );
+	return GetClientSession()->Execute ( sQuery, tOut );
 }
 
 void session::SetFederatedUser ()
@@ -19312,6 +19380,8 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 #endif
 
 	tzset();
+
+	Tracer::Init();
 
 	CSphString sError;
 	// initialize it before other code to fetch version string for banner

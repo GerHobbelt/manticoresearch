@@ -372,6 +372,7 @@ enum class Option_e : BYTE
 	STORE,
 	PSEUDO_THRESH,
 	MAXMATCH_THRESH,
+	THREADS_EX,
 
 	INVALID_OPTION
 };
@@ -380,12 +381,12 @@ static SmallStringHash_T<Option_e, (BYTE) Option_e::INVALID_OPTION * 2> g_hParse
 
 void InitParserOption()
 {
-	static const char * dOptions[(BYTE) Option_e::INVALID_OPTION] = { "agent_query_timeout", "boolean_simplify",
+	const char * dOptions[(BYTE) Option_e::INVALID_OPTION] = { "agent_query_timeout", "boolean_simplify",
 		"columns", "comment", "cutoff", "debug_no_payload", "expand_keywords", "field_weights", "format", "global_idf",
 		"idf", "ignore_nonexistent_columns", "ignore_nonexistent_indexes", "index_weights", "local_df", "low_priority",
 		"max_matches", "max_predicted_time", "max_query_time", "morphology", "rand_seed", "ranker", "retry_count",
 		"retry_delay", "reverse_scan", "sort_method", "strict", "sync", "threads", "token_filter", "token_filter_options",
-		"not_terms_only_allowed", "store", "pseudo_thresh", "maxmatch_thresh" };
+		"not_terms_only_allowed", "store", "disable_ps_threshold", "max_matches_increase_threshold", "threads_ex" };
 
 	for ( BYTE i = 0u; i<(BYTE) Option_e::INVALID_OPTION; ++i )
 		g_hParseOption.Add ( (Option_e) i, dOptions[i] );
@@ -411,13 +412,14 @@ static bool CheckOption ( SqlStmt_e eStmt, Option_e eOption )
 			Option_e::SORT_METHOD, Option_e::STRICT_, Option_e::THREADS, Option_e::TOKEN_FILTER,
 			Option_e::NOT_ONLY_ALLOWED };
 
-	static Option_e dSelectOptions[] = { Option_e::AGENT_QUERY_TIMEOUT, Option_e::BOOLEAN_SIMPLIFY, Option_e::COMMENT,
-			Option_e::CUTOFF, Option_e::DEBUG_NO_PAYLOAD, Option_e::EXPAND_KEYWORDS, Option_e::FIELD_WEIGHTS,
+	static Option_e dSelectOptions[] = { Option_e::AGENT_QUERY_TIMEOUT, Option_e::BOOLEAN_SIMPLIFY, Option_e::COLUMNS, Option_e::COMMENT,
+			Option_e::CUTOFF, Option_e::DEBUG_NO_PAYLOAD, Option_e::EXPAND_KEYWORDS, Option_e::FIELD_WEIGHTS, Option_e::FORMAT,
 			Option_e::GLOBAL_IDF, Option_e::IDF, Option_e::IGNORE_NONEXISTENT_INDEXES, Option_e::INDEX_WEIGHTS,
 			Option_e::LOCAL_DF, Option_e::LOW_PRIORITY, Option_e::MAX_MATCHES, Option_e::MAX_PREDICTED_TIME,
 			Option_e::MAX_QUERY_TIME, Option_e::MORPHOLOGY, Option_e::RAND_SEED, Option_e::RANKER,
 			Option_e::RETRY_COUNT, Option_e::RETRY_DELAY, Option_e::REVERSE_SCAN, Option_e::SORT_METHOD,
-			Option_e::THREADS, Option_e::TOKEN_FILTER, Option_e::NOT_ONLY_ALLOWED, Option_e::PSEUDO_THRESH, Option_e::MAXMATCH_THRESH };
+			Option_e::THREADS, Option_e::TOKEN_FILTER, Option_e::NOT_ONLY_ALLOWED, Option_e::PSEUDO_THRESH,
+			Option_e::MAXMATCH_THRESH, Option_e::THREADS_EX};
 
 	static Option_e dInsertOptions[] = { Option_e::TOKEN_FILTER_OPTIONS };
 
@@ -550,6 +552,7 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 	case Option_e::LOW_PRIORITY:				tQuery.m_bLowPriority = iValue!=0; break;
 	case Option_e::PSEUDO_THRESH:				tQuery.m_iPseudoThresh = iValue; break;
 	case Option_e::MAXMATCH_THRESH:				tQuery.m_iMaxMatchThresh = iValue; break;
+	case Option_e::THREADS_EX:					tQuery.m_iCouncurrency = (int)iValue; break;
 	default:
 		return AddOption_e::NOT_FOUND;
 	}
@@ -653,6 +656,10 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 	case Option_e::STORE: //} else if ( sOpt=="store" )
 		tQuery.m_sStore = sVal;
 		break;
+
+	case Option_e::THREADS_EX:
+		std::tie ( tQuery.m_tMainDispatcher, tQuery.m_tPseudoShardingDispatcher ) = Dispatcher::ParseTemplates ( sVal.cstr() );
+			break;
 
 	default:
 		return AddOption_e::NOT_FOUND;

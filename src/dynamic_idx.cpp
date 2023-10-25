@@ -262,23 +262,20 @@ public:
 		}
 	}
 
-	void PutArray ( const void * pBlob, int iLen, bool bSendEmpty ) override {}
+	void PutArray ( const ByteBlob_t&, bool ) override {}
 
-	// pack zero-terminated string (or "" if it is zero itself)
-	void PutString ( const char * sMsg, int iLen ) override
+	// pack string
+	void PutString ( Str_t sMsg ) override
 	{
 		if ( !m_pMatch )
 			return;
-
-		if ( !sMsg )
-			sMsg = "";
 
 		auto & tCol = GetNextCol ();
 		auto & tMatch = *m_pMatch;
 
 		BYTE * pData = nullptr;
-		tMatch.SetAttr ( tCol.m_tLocator, (SphAttr_t) sphPackPtrAttr ( iLen, &pData ) );
-		memcpy ( pData, sMsg, iLen );
+		tMatch.SetAttr ( tCol.m_tLocator, (SphAttr_t) sphPackPtrAttr ( sMsg.second, &pData ) );
+		memcpy ( pData, sMsg.first, sMsg.second );
 	}
 
 	void PutMicrosec ( int64_t iUsec ) override
@@ -337,7 +334,7 @@ public:
 
 	void Error ( const char * sStmt, const char * sError, MysqlErrors_e ) override
 	{
-		m_sErrors.Sprintf("%s:%s", sStmt, sError);
+		m_sErrors.Sprintf("%s: %s", sStmt, sError);
 		Eof (false,0);
 	}
 	void Ok ( int, int, const char *, bool, int64_t ) override {}
@@ -461,19 +458,19 @@ public:
 	}
 
 	// match constructing routines (empty for schema only)
-	void PutFloatAsString ( float fVal, const char * sFormat ) override {}
-	void PutDoubleAsString ( double fVal, const char * szFormat ) override {}
-	void PutPercentAsString ( int64_t iVal, int64_t iBase ) override {}
-	void PutNumAsString ( int64_t iVal ) override {}
-	void PutNumAsString ( uint64_t uVal ) override {}
-	void PutNumAsString ( int iVal ) override {}
-	void PutNumAsString ( DWORD uVal ) override {}
-	void PutArray ( const void * pBlob, int iLen, bool bSendEmpty ) override {}
-	void PutString ( const char * sMsg, int iLen ) override {}
-	void PutMicrosec ( int64_t iUsec ) override {}
+	void PutFloatAsString ( float, const char * ) override {}
+	void PutDoubleAsString ( double, const char * ) override {}
+	void PutPercentAsString ( int64_t, int64_t ) override {}
+	void PutNumAsString ( int64_t ) override {}
+	void PutNumAsString ( uint64_t ) override {}
+	void PutNumAsString ( int ) override {}
+	void PutNumAsString ( DWORD ) override {}
+	void PutArray ( const ByteBlob_t&, bool ) override {}
+	void PutString ( Str_t ) override {}
+	void PutMicrosec ( int64_t ) override {}
 	void PutNULL () override {}
 	bool Commit() override { return false;}
-	void Eof ( bool bMoreResults, int iWarns ) override {}
+	void Eof ( bool, int ) override {}
 	void Error ( const char * sStmt, const char * sError, MysqlErrors_e ) override
 	{
 		m_sErrors.Sprintf ( "%s:%s", sStmt, sError );
@@ -652,7 +649,8 @@ bool GenericTableIndex_c::MultiScan ( CSphQueryResult & tResult, const CSphQuery
 	}
 
 	auto& sErrors = GetErrors();
-	if ( !sErrors.IsEmpty() )
+	bool bOk = sErrors.IsEmpty();
+	if ( !bOk )
 		tMeta.m_sError = (CSphString) sErrors;
 
 	SwitchProfile ( pProfiler, SPH_QSTATE_FINALIZE );
@@ -666,7 +664,7 @@ bool GenericTableIndex_c::MultiScan ( CSphQueryResult & tResult, const CSphQuery
 
 	tMeta.m_iQueryTime += ( int ) ( ( sphMicroTimer () - tmQueryStart ) / 1000 );
 
-	return true;
+	return bOk;
 }
 
 ///////////////

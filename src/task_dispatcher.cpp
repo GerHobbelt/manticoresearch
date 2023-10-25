@@ -10,10 +10,32 @@
 
 #include "task_dispatcher.h"
 #include "coroutine.h"
+#include "client_task_info.h"
 
 #include <atomic>
 #include <cassert>
 
+// artificial race right after source creation.
+// That is, quite seldom race between 'make source' and 'clone context' will surely happen in debug build
+#ifndef NDEBUG
+#define MAKE_RACE 1
+#else
+#define MAKE_RACE 0
+#endif
+
+namespace {
+inline int CalcConcurrency ( int iConcurrency )
+{
+	if ( iConcurrency )
+		return iConcurrency;
+
+	iConcurrency = GetEffectiveDistThreads();
+	if ( iConcurrency )
+		return iConcurrency;
+
+	return Threads::NThreads();
+}
+}
 /////////////////////////////////////////////////////////////////////////////
 /// trivial concurrent task dispatcher
 /////////////////////////////////////////////////////////////////////////////
@@ -63,7 +85,7 @@ bool SingleTaskSource_c::FetchTask ( int& iTask )
 
 ConcurrentTaskDispatcher_c::ConcurrentTaskDispatcher_c ( int iJobs, int iConcurrency )
 	: m_iJobs ( iJobs )
-	, m_iConcurrency ( iConcurrency ? iConcurrency : Threads::NThreads() )
+	, m_iConcurrency ( CalcConcurrency ( iConcurrency ) )
 	, m_iCurrentJob { iJobs - 1 }
 {}
 
@@ -74,7 +96,11 @@ int ConcurrentTaskDispatcher_c::GetConcurrency() const
 
 std::unique_ptr<Dispatcher::TaskSource_i> ConcurrentTaskDispatcher_c::MakeSource()
 {
-	return std::make_unique<SingleTaskSource_c> ( *this, m_iJobs );
+	auto pSource = std::make_unique<SingleTaskSource_c> ( *this, m_iJobs );
+#if MAKE_RACE
+	Threads::Coro::Reschedule();
+#endif
+	return pSource;
 }
 
 int ConcurrentTaskDispatcher_c::GetNextConcurrentTask()
@@ -162,7 +188,7 @@ public:
 
 RRTaskDispatcher_c::RRTaskDispatcher_c ( int iJobs, int iConcurrency, int iBatch )
 	: m_iJobs ( iJobs )
-	, m_iConcurrency ( iConcurrency ? iConcurrency : Threads::NThreads() )
+	, m_iConcurrency ( CalcConcurrency ( iConcurrency ) )
 	, m_iBatch ( iBatch )
 {}
 
@@ -174,9 +200,15 @@ int RRTaskDispatcher_c::GetConcurrency() const
 std::unique_ptr<Dispatcher::TaskSource_i> RRTaskDispatcher_c::MakeSource()
 {
 	int iFiber = m_iNextFiber.fetch_add ( 1, std::memory_order_relaxed );
-	if ( iFiber < m_iConcurrency )
-		return std::make_unique<RRTaskSource_c> ( m_iJobs, iFiber, m_iBatch, m_iConcurrency );
-	return std::make_unique<NullTaskSource_c> ();
+	if ( iFiber >= m_iConcurrency )
+		return std::make_unique<NullTaskSource_c>();
+
+	auto pSource = std::make_unique<RRTaskSource_c> ( m_iJobs, iFiber, m_iBatch, m_iConcurrency );
+
+#if MAKE_RACE
+	Threads::Coro::Reschedule();
+#endif
+	return pSource;
 }
 
 namespace Dispatcher {
@@ -265,6 +297,34 @@ void Unify ( Template_t& tBase, const Template_t tNew )
 
 	if ( tNew.batch )
 		tBase.batch = tNew.batch;
+}
+
+CSphString RenderTemplate ( Template_t tTemplate )
+{
+	if ( tTemplate.concurrency && tTemplate.batch )
+		return SphSprintf ("%d/%d", tTemplate.concurrency, tTemplate.batch );
+
+	if ( tTemplate.concurrency )
+		return SphSprintf ( "%d", tTemplate.concurrency );
+
+	if ( tTemplate.batch )
+		return SphSprintf ( "/%d", tTemplate.batch );
+	return "";
+}
+
+void RenderTemplates ( StringBuilder_c& tOut, std::pair<Template_t, Template_t> dTemplates )
+{
+	auto sFirst = RenderTemplate ( dTemplates.first );
+	auto sSecond = RenderTemplate ( dTemplates.second );
+
+	if ( !sFirst.IsEmpty() && !sSecond.IsEmpty() )
+		return (void)tOut.Sprint ( sFirst, '+', sSecond );
+
+	if ( !sFirst.IsEmpty() )
+		return (void)tOut.Sprint ( sFirst );
+
+	if ( !sSecond.IsEmpty() )
+		return (void)tOut.Sprint ( '+', sSecond );
 }
 
 } // namespace Dispatcher

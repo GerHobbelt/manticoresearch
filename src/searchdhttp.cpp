@@ -22,6 +22,7 @@
 #include "accumulator.h"
 #include "networking_daemon.h"
 #include "client_session.h"
+#include "tracer.h"
 
 #define LOG_COMPONENT_HTTP ""
 #define LOG_LEVEL_HTTP false
@@ -184,7 +185,7 @@ public:
 			m_bTerminated = true;
 		}
 
-		return FromBytes ( m_tIn.PopTail ( iChunk ) );
+		return B2S ( m_tIn.PopTail ( iChunk ) );
 	}
 
 	Str_t ReadAll() final
@@ -202,7 +203,7 @@ public:
 
 		m_uOldTerminator = m_tIn.Terminate ( m_iContentLength, '\0' );
 		m_bTerminated = true;
-		return FromBytes ( m_tIn.PopTail ( m_iContentLength ) );
+		return B2S ( m_tIn.PopTail ( m_iContentLength ) );
 	}
 };
 
@@ -1044,6 +1045,7 @@ class HttpSearchHandler_c : public HttpHandler_c
 public:
 	bool Process () final
 	{
+		TRACE_CONN ( "conn", "HttpSearchHandler_c::Process" );
 		CSphString sWarning;
 		std::unique_ptr<QueryParser_i> pQueryParser = PreParseQuery();
 		if ( !pQueryParser )
@@ -1248,18 +1250,15 @@ public:
 		m_dBuf << uVal;
 	}
 
-	void PutArray ( const void * pBlob, int iLen, bool ) override
+	void PutArray ( const ByteBlob_t& dBlob, bool ) override
 	{
 		AddDataColumn();
-		if ( iLen < 0 )
-			m_dBuf.FixupSpacedAndAppendEscaped ( static_cast<const char*> ( pBlob ) );
-		else
-			m_dBuf.FixupSpacedAndAppendEscaped ( static_cast<const char*> ( pBlob ), iLen );
+		m_dBuf.FixupSpacedAndAppendEscaped ( (const char*)dBlob.first, dBlob.second );
 	}
 
-	void PutString ( const char * sMsg, int iLen ) override
+	void PutString ( Str_t sMsg ) override
 	{
-		PutArray( sMsg, iLen, false );
+		PutArray ( S2B ( sMsg ), false );
 	}
 
 	void PutMicrosec ( int64_t iUsec ) override
@@ -1390,6 +1389,7 @@ public:
 
 	bool Process () final
 	{
+		TRACE_CONN ( "conn", "HttpRawSqlHandler_c::Process" );
 		if ( IsEmpty ( m_sQuery ) )
 		{
 			ReportError ( "query missing", SPH_HTTP_STATUS_400 );
@@ -1526,6 +1526,7 @@ public:
 
 	bool Process () final
 	{
+		TRACE_CONN ( "conn", "HttpHandler_JsonInsert_c::Process" );
 		SqlStmt_t tStmt;
 		DocID_t tDocId = 0;
 		CSphString sError;
@@ -1587,6 +1588,7 @@ public:
 
 	bool Process () final
 	{
+		TRACE_CONN ( "conn", "HttpHandler_JsonUpdate_c::Process" );
 		SqlStmt_t tStmt;
 		tStmt.m_bJson = true;
 		tStmt.m_sEndpoint = HttpEndpointToStr ( SPH_HTTP_ENDPOINT_JSON_UPDATE );
@@ -1737,6 +1739,7 @@ public:
 
 	bool Process () final
 	{
+		TRACE_CONN ( "conn", "HttpHandler_JsonBulk_c::Process" );
 		const char* szError = IsNDJson ();
 		if ( szError )
 		{
@@ -1968,6 +1971,8 @@ static std::unique_ptr<HttpHandler_c> CreateHttpHandler ( ESphHttpEndpoint eEndp
 
 static bool ProcessHttpQuery ( ESphHttpEndpoint eEndpoint, CharStream_c& tSource, const OptionsHash_t& tOptions, CSphVector<BYTE> & dResult, bool bNeedHttpResponse, http_method eRequestType, const CSphString& sInvalidEndpoint )
 {
+	TRACE_CONN ( "conn", "ProcessHttpQuery" );
+
 	std::unique_ptr<HttpHandler_c> pHandler = CreateHttpHandler ( eEndpoint, tSource, tOptions, eRequestType );
 	if ( !pHandler )
 	{
@@ -2360,6 +2365,7 @@ bool HttpHandlerPQ_c::Delete ( const CSphString & sIndex, const JsonObj_c & tRoo
 
 bool HttpHandlerPQ_c::Process()
 {
+	TRACE_CONN ( "conn", "HttpHandlerPQ_c::Process" );
 	CSphString * sEndpoint = m_tOptions ( "endpoint" );
 	if ( !sEndpoint || sEndpoint->IsEmpty() )
 	{

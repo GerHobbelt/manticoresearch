@@ -10582,16 +10582,13 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 	int iJobs = iSplit;
 	assert ( iJobs>=1 );
 
-	Threads::ClonableCtx_T<DiskChunkSearcherCtx_t, DiskChunkSearcherCloneCtx_t> tClonableCtx { dSorters, tResult };
-
-	auto iConcurrency = tQuery.m_iCouncurrency;
-	if ( !iConcurrency )
-		iConcurrency = GetEffectiveDistThreads();
-
 	// pseudo-sharding scheduler
 	auto tDispatch = GetEffectivePseudoShardingDispatcherTemplate();
-	auto pDispatcher = Dispatcher::Make ( iJobs, iConcurrency, tDispatch );
+	Dispatcher::Unify ( tDispatch, tQuery.m_tPseudoShardingDispatcher );
+	auto pDispatcher = Dispatcher::Make ( iJobs, 0, tDispatch );
 
+	// the context
+	Threads::ClonableCtx_T<DiskChunkSearcherCtx_t, DiskChunkSearcherCloneCtx_t, Threads::ECONTEXT::ORDERED> tClonableCtx { dSorters, tResult };
 	tClonableCtx.LimitConcurrency ( pDispatcher->GetConcurrency() );
 
 	auto iStart = sphMicroTimer();
@@ -10609,19 +10606,24 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 	Threads::Coro::ExecuteN ( tClonableCtx.Concurrency ( iJobs ), [&]
 	{
 		auto pSource = pDispatcher->MakeSource();
-		int iChunk = -1; // make it consumed
+		int iJob = -1; // make it consumed
 
-		if ( !pSource->FetchTask ( iChunk ) || fnCheckInterrupt() )
+		if ( !pSource->FetchTask ( iJob ) || fnCheckInterrupt() )
+		{
+			sphLogDebug ( "Early finish parallel RunSplitQuery because of empty queue" );
 			return; // already nothing to do, early finish.
+		}
 
-		auto tJobContext = tClonableCtx.CloneNewContext();
+		auto tJobContext = tClonableCtx.CloneNewContext ( !iJob );
 		auto& tCtx = tJobContext.first;
-		tClonableCtx.SetJobOrder ( tJobContext.second, iChunk );
+		sphLogDebug ( "RunSplitQuery cloned context %d", tJobContext.second );
+		tClonableCtx.SetJobOrder ( tJobContext.second, iJob );
 		Threads::Coro::Throttler_c tThrottler ( session::GetThrottlingPeriodMS() );
 		int iTick=1; // num of times coro rescheduled by throttler
 		while ( !fnCheckInterrupt() ) // some earlier job met error; abort.
 		{
-			myinfo::SetTaskInfo ( "%d ch %d:", iTick, iChunk );
+			sphLogDebugv ( "RunSplitQuery %d, job %d", tJobContext.second, iJob );
+			myinfo::SetTaskInfo ( "%d ch %d:", iTick, iJob );
 			auto & dLocalSorters = tCtx.m_dSorters;
 			CSphQueryResultMeta tChunkMeta;
 			CSphQueryResult tChunkResult;
@@ -10630,17 +10632,17 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 			tChunkMeta.m_pProfile = tThMeta.m_pProfile;
 
 			CSphMultiQueryArgs tMultiArgs ( tArgs.m_iIndexWeight );
-			tMultiArgs.m_iTag = tArgs.m_bModifySorterSchemas ? iChunk+1 : tArgs.m_iTag;
+			tMultiArgs.m_iTag = tArgs.m_bModifySorterSchemas ? iJob+1 : tArgs.m_iTag;
 			tMultiArgs.m_uPackedFactorFlags = tArgs.m_uPackedFactorFlags;
 			tMultiArgs.m_pLocalDocs = pLocalDocs;
 			tMultiArgs.m_iTotalDocs = iTotalDocs;
 			tMultiArgs.m_bModifySorterSchemas = false;
 
 			CSphQuery tQueryWithExtraFilter = tQuery;
-			SetupSplitFilter ( tQueryWithExtraFilter.m_dFilters.Add(), iChunk, iJobs );
+			SetupSplitFilter ( tQueryWithExtraFilter.m_dFilters.Add(), iJob, iJobs );
 			bInterrupt.store (!pIndex->MultiQuery ( tChunkResult, tQueryWithExtraFilter, dLocalSorters, tMultiArgs ), std::memory_order_relaxed);
 
-			if ( !iChunk )
+			if ( !iJob )
 				tThMeta.MergeWordStats ( tChunkMeta );
 
 			tThMeta.m_bHasPrediction |= tChunkMeta.m_bHasPrediction;
@@ -10648,7 +10650,7 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 			if ( tThMeta.m_bHasPrediction )
 				tThMeta.m_tStats.Add ( tChunkMeta.m_tStats );
 
-			if ( iChunk < iJobs-1 && sph::TimeExceeded ( tmMaxTimer ) )
+			if ( iJob < iJobs-1 && sph::TimeExceeded ( tmMaxTimer ) )
 			{
 				tThMeta.m_sWarning = "query time exceeded max_query_time";
 				bInterrupt.store ( true, std::memory_order_relaxed );
@@ -10664,8 +10666,8 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 				// FIXME? maybe handle this more gracefully (convert to a warning)?
 				tThMeta.m_sError = tChunkMeta.m_sError;
 
-			iChunk = -1; // mark it consumed
-			if ( !pSource->FetchTask ( iChunk ) || fnCheckInterrupt() )
+			iJob = -1; // mark it consumed
+			if ( !pSource->FetchTask ( iJob ) || fnCheckInterrupt() )
 				return; // all is done
 
 			// yield and reschedule every quant of time. It gives work to other tasks
@@ -10674,7 +10676,7 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 				++iTick;
 		}
 	});
-
+	sphLogDebug ( "RunSplitQuery processed in %d thread(s)", tClonableCtx.NumWorked() );
 	tClonableCtx.Finalize();
 	return !fnCheckInterrupt();
 }
