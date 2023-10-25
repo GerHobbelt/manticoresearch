@@ -2342,16 +2342,13 @@ static bool ParseSearchFilter ( CSphFilterSettings & tFilter, InputBuffer_c & tR
 		}
 		break;
 
+	case SPH_FILTER_USERVAR:
 	case SPH_FILTER_STRING:
 		tFilter.m_dStrings.Add ( tReq.GetString() );
 		break;
 
 	case SPH_FILTER_NULL:
 		tFilter.m_bIsNull = tReq.GetByte()!=0;
-		break;
-
-	case SPH_FILTER_USERVAR:
-		tFilter.m_dStrings.Add ( tReq.GetString() );
 		break;
 
 	case SPH_FILTER_STRING_LIST:
@@ -3051,7 +3048,10 @@ static void FormatIndexHints ( const CSphQuery & tQuery, StringBuilder_c & tBuf 
 
 static void LogQueryJson ( const CSphQuery & q, StringBuilder_c & tBuf )
 {
-	tBuf << " /*" << q.m_sRawQuery << " */";
+	if ( q.m_sRawQuery.IsEmpty() )
+		tBuf << " /*" << "{\"index\":\"" << q.m_sIndexes << "\"}*/ /*" << q.m_sQuery << " */";
+	else
+		tBuf << " /*" << q.m_sRawQuery << " */";
 }
 
 
@@ -14027,7 +14027,7 @@ static bool HandleSetGlobal ( CSphString& sError, const CSphString& sName, int64
 	}
 	if ( sName == "es_compat" )
 	{
-		return !SetLogManagement ( sSetValue, sError );
+		return SetLogManagement ( sSetValue, sError );
 	}
 
 	if ( sName == "net_wait" )
@@ -20364,6 +20364,10 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 
 	ScheduleMallocTrim();
 
+	DetermineNodeItemStackSize();
+	DetermineFilterItemStackSize();
+	DetermineMatchStackSize();
+
 	// initialize timeouts since hook will use them
 	auto iRtFlushPeriodUs = hSearchd.GetUsTime64S ( "rt_flush_period", 36000000000ll ); // 10h
 	SetRtFlushPeriod ( Max ( iRtFlushPeriodUs, 3 * 1000000 ) ); // min 3S
@@ -20395,8 +20399,6 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	// startup
 	///////////
 
-	DetermineNodeItemStackSize();
-	DetermineFilterItemStackSize();
 //	ModifyDaemonPaths ( hSearchd );
 //	sphRTInit ( hSearchd, bTestMode, hConf("common") ? hConf["common"]("common") : nullptr );
 
@@ -20409,7 +20411,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 		auto sLogFormat = hSearchd.GetStr ( "query_log_format", "sphinxql" );
 		if ( sLogFormat=="sphinxql" )
 			g_eLogFormat = LOG_FORMAT_SPHINXQL;
-		else if ( sLogFormat=="plain" )
+		else if ( sLogFormat!="plain" )
 		{
 			StrVec_t dParams;
 			sphSplit ( dParams, sLogFormat.cstr() );

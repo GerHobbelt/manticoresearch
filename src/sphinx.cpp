@@ -7656,7 +7656,7 @@ public:
 		, m_tDeadRowMap	( tDeadRowMap )
 	{}
 
-	inline bool	GetNextRowIdBlock ( RowIdBlock_t & dRowIdBlock );
+	FORCE_INLINE bool GetNextRowIdBlock ( RowIdBlock_t & dRowIdBlock );
 	DWORD		GetNumProcessed() const { return m_tRowID-m_tBoundaries.m_tMinRowID; }
 	bool		WasCutoffHit() const { return false; }
 
@@ -7921,8 +7921,7 @@ bool CSphIndex_VLN::ScanByBlocks ( const CSphQueryContext & tCtx, CSphQueryResul
 			}
 		}
 
-		bool bStop = RunFullscanOnAttrs ( tBlockBoundaries, tCtx, tMeta, dSorters, tMatch, iCutoff, bRandomize, iIndexWeight, tmMaxTimer );
-		if ( bStop || !iCutoff )
+		if ( RunFullscanOnAttrs ( tBlockBoundaries, tCtx, tMeta, dSorters, tMatch, iCutoff, bRandomize, iIndexWeight, tmMaxTimer ) )
 			return true;
 	}
 
@@ -9963,18 +9962,27 @@ static int sphQueryHeightCalc ( const XQNode_t * pNode )
 }
 #if defined( __clang__ )
 #if defined( __x86_64__ )
-#define SPH_EXTNODE_STACK_SIZE ( 0x140 )
+static int SPH_EXTNODE_STACK_SIZE = 0x140;
 #elif defined ( __ARM_ARCH_ISA_A64 )
-#define SPH_EXTNODE_STACK_SIZE ( 0x160 )
+static int SPH_EXTNODE_STACK_SIZE = 0x160;
 #endif
 #elif defined( _WIN32 )
-#define SPH_EXTNODE_STACK_SIZE ( 630 )
+static int SPH_EXTNODE_STACK_SIZE = 630;
 #else
-#define SPH_EXTNODE_STACK_SIZE ( 160 )
+static int SPH_EXTNODE_STACK_SIZE = 160;
 #endif
 
 // extra stack which need despite EXTNODE_STACK_SIZE
-constexpr DWORD SPH_EXTRA_BUDGET = 0x2000;
+static DWORD SPH_EXTRA_BUDGET = 0x2000;
+
+void SetExtNodeStackSize ( int iDelta, int iExtra )
+{
+	if ( iDelta )
+		SPH_EXTNODE_STACK_SIZE = iDelta;// + 0x10;
+
+	if ( iExtra )
+		SPH_EXTRA_BUDGET = iExtra;// + 0x100;
+}
 
 /*
 Why EXTRA_BUDGET?
@@ -10001,7 +10009,7 @@ int ConsiderStack ( const struct XQNode_t * pRoot, CSphString & sError )
 
 	auto iStackNeed = iHeight * SPH_EXTNODE_STACK_SIZE + SPH_EXTRA_BUDGET;
 	int64_t iQueryStack = Threads::GetStackUsed() + iStackNeed;
-//	sphWarning ( "Stack used %d, need %d, sum %d, have %d", (int)Threads::GetStackUsed(), iStackNeed, (int)iQueryStack, Threads::MyStackSize() );
+//	sphWarning ( "Stack used %d, need %d (%d * %d + %d), sum %d, have %d", (int)Threads::GetStackUsed(), iStackNeed, iHeight, SPH_EXTNODE_STACK_SIZE, SPH_EXTRA_BUDGET, (int)iQueryStack, Threads::MyStackSize() );
 	auto iMyStackSize = Threads::MyStackSize ();
 	if ( iMyStackSize>=iQueryStack )
 		return -1;

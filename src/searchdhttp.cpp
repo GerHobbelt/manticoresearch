@@ -1803,6 +1803,7 @@ public:
 		TRACE_CONN ( "conn", "HttpHandler_JsonUpdate_c::Process" );
 		SqlStmt_t tStmt;
 		tStmt.m_bJson = true;
+		tStmt.m_tQuery.m_eQueryType = QUERY_JSON;
 		tStmt.m_sEndpoint = HttpEndpointToStr ( SPH_HTTP_ENDPOINT_JSON_UPDATE );
 
 		DocID_t tDocId = 0;
@@ -2820,7 +2821,7 @@ static bool ParseMetaLine ( const char * sLine, BulkDoc_t & tDoc, CSphString & s
 		if ( tId.IsNum() )
 			tDoc.m_tDocid = tId.IntVal();
 		else if ( tId.IsStr() )
-			tDoc.m_tDocid = strtoll ( tId.SzVal(), NULL, 10 );
+			tDoc.m_tDocid = GetDocID ( tId.SzVal() );
 		else if ( tId.IsNull() )
 			tDoc.m_tDocid = 0;
 		else
@@ -2836,14 +2837,6 @@ static bool ParseMetaLine ( const char * sLine, BulkDoc_t & tDoc, CSphString & s
 static bool AddDocid ( SqlStmt_t & tStmt, DocID_t & tDocId, CSphString & sError )
 {
 	int iDocidPos = tStmt.m_dInsertSchema.GetFirst ( [&] ( const CSphString & sName ) { return sName=="id"; } );
-	
-	// can not set id at the same time via es meta and via document id property
-	if ( iDocidPos!=-1 && tDocId!=0 )
-	{
-		sError = "id has already been specified";
-		return false;
-	}
-
 	if ( iDocidPos!=-1 )
 	{
 		SqlInsert_t & tVal = tStmt.m_dInsertValues[iDocidPos];
@@ -2855,7 +2848,15 @@ static bool AddDocid ( SqlStmt_t & tStmt, DocID_t & tDocId, CSphString & sError 
 			tVal.m_iType = SqlInsert_t::CONST_INT;
 		}
 
-		tDocId = (int64_t)tVal.GetValueUint();
+		DocID_t tSrcDocid = (int64_t)tVal.GetValueUint();
+		// can not set id at the same time via es meta and via document id property
+		if ( tDocId && tDocId!=tSrcDocid )
+		{
+			sError = "id has already been specified";
+			return false;
+		}
+		
+		tDocId = tSrcDocid;
 		return true;
 	}
 
