@@ -316,6 +316,8 @@ static bool ValidateUpdate ( const ReplicationCommand_t & tCmd, CSphString & sEr
 
 static bool DoClusterAlterUpdate ( const CSphString & sCluster, const CSphString & sUpdate, bool bRemoteError, bool bJoinUpdate, CSphString & sError );
 
+static CSphString GetAddr ( const ListenerDesc_t & tListen );
+
 static bool IsInetAddrFree ( DWORD uAddr, int iPort )
 {
 	static struct sockaddr_in iaddr;
@@ -1066,7 +1068,10 @@ static bool ReplicateClusterInit ( ReplicationArgs_t & tArgs, CSphString & sErro
 
 	// set incoming address
 	if ( g_bHasIncoming )
+	{
 		sOptions.Appendf ( "ist.recv_addr=%s", g_sIncomingIP.cstr() );
+		sOptions.Appendf ( "ist.recv_bind=0.0.0.0" );
+	}
 
 	// change default cache size 
 	if ( !tArgs.m_pCluster->m_tOptions.m_hOptions.Exists ( "gcache.size" ) )
@@ -2511,7 +2516,10 @@ static void SetListener ( const VecTraits_T<ListenerDesc_t> & dListeners )
 			else
 				g_sListenReplicationIP = "127.0.0.1";
 
-			sphWarning ( "can not set '0.0.0.0' as Galera IP, '%s' used", g_sListenReplicationIP.cstr() );
+			if ( g_sIncomingIP.IsEmpty() )
+				sphWarning ( "can not set '0.0.0.0' as Galera IP, '%s' used", g_sListenReplicationIP.cstr() );
+			else
+				sphLogDebugRpl ( "set '%s' as Galera IP", g_sListenReplicationIP.cstr() );
 		}
 
 		bGotReplicationPorts = true;
@@ -3149,6 +3157,20 @@ void GetNodes_T ( const CSphString & sNodes, NODE_ITERATOR & tIt )
 	}
 }
 
+CSphString GetAddr ( const ListenerDesc_t & tListen )
+{
+	CSphString sAddr;
+	if ( tListen.m_sAddr.IsEmpty() )
+	{
+		sAddr.Reserve ( SPH_ADDRESS_SIZE );
+		sphFormatIP ( (char *)sAddr.cstr(), sAddr.Length(), tListen.m_uIP );
+	} else
+	{
+		sAddr = tListen.m_sAddr;
+	}
+	return sAddr;
+}
+
 // get nodes functor to collect listener API with external address
 struct AgentDescIterator_t
 {
@@ -3177,12 +3199,9 @@ struct AgentDescIterator_t
 		if ( g_sIncomingProto.Begins ( sListen ) )
 			return true;
 
-		char sAddrBuf [ SPH_ADDRESS_SIZE ];
-		sphFormatIP ( sAddrBuf, sizeof(sAddrBuf), tListen.m_uIP );
-
 		AgentDesc_t * pDesc = new AgentDesc_t;
 		m_dNodes.Add( pDesc );
-		pDesc->m_sAddr = sAddrBuf;
+		pDesc->m_sAddr = GetAddr ( tListen );
 		pDesc->m_uAddr = tListen.m_uIP;
 		pDesc->m_iPort = tListen.m_iPort;
 		pDesc->m_bNeedResolve = false;
@@ -3261,11 +3280,8 @@ public:
 		if ( tListen.m_eProto!=m_eProto )
 			return true;
 
-		char sAddrBuf [ SPH_ADDRESS_SIZE ];
-		sphFormatIP ( sAddrBuf, sizeof(sAddrBuf), tListen.m_uIP );
-
-		CSphString sNode;
-		sNode.SetSprintf ( "%s:%d", sAddrBuf, tListen.m_iPort );
+		CSphString sNode = GetAddr ( tListen );
+		sNode.SetSprintf ( "%s:%d", sNode.cstr(), tListen.m_iPort );
 
 		m_hNodes.Add ( 1, sNode );
 

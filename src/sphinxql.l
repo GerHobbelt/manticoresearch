@@ -154,12 +154,14 @@ FLOAT_CONSTANT      {INT}\.{INT}?{EXP}?|{INT}?\.{INT}{EXP}|{INT}{EXP}
 "NAMES"				{ YYSTOREBOUNDS; return TOK_NAMES; }
 "NO_COLUMNARSCAN"	{ YYSTOREBOUNDS; return TOK_HINT_NO_COLUMNAR; }
 "NO_DOCIDINDEX"		{ YYSTOREBOUNDS; return TOK_HINT_NO_DOCID; }
+"NO_OPTIMIZEFULLTEXTFILTERS" { YYSTOREBOUNDS; return TOK_HINT_NO_FT; }
 "NO_SECONDARYINDEX"	{ YYSTOREBOUNDS; return TOK_HINT_NO_SECONDARY; }
 "NOT"				{ YYSTOREBOUNDS; return TOK_NOT; }
 "NULL"				{ YYSTOREBOUNDS; return TOK_NULL; }
 "OFFSET"			{ YYSTOREBOUNDS; return TOK_OFFSET; }
 "OPTION"			{ YYSTOREBOUNDS; return TOK_OPTION; }
 "OPTIMIZE"			{ YYSTOREBOUNDS; return TOK_OPTIMIZE; }
+"OPTIMIZEFULLTEXTFILTERS" { YYSTOREBOUNDS; return TOK_HINT_FT; }
 "OR"				{ YYSTOREBOUNDS; return TOK_OR; }
 "ORDER"				{ YYSTOREBOUNDS; return TOK_ORDER; }
 "PLAN"				{ YYSTOREBOUNDS; return TOK_PLAN; }
@@ -220,12 +222,12 @@ FLOAT_CONSTANT      {INT}\.{INT}?{EXP}?|{INT}?\.{INT}{EXP}|{INT}{EXP}
 "/*+"				{ YYSTOREBOUNDS; return TOK_HINT_OPEN; }
 "*/"				{ YYSTOREBOUNDS; return TOK_HINT_CLOSE; }
 
-'([^'\\]|\\.|\\\\)*'			{ YYSTOREBOUNDS; pParser->m_pLastTokenStart = yytext; lvalp->m_iValue = ( (SphAttr_t)lvalp->m_iStart<<32 ) | ( lvalp->m_iEnd-lvalp->m_iStart ); return TOK_QUOTED_STRING; }
+'([^'\\]|\\.|\\\\)*'			{ YYSTOREBOUNDS; pParser->m_pLastTokenStart = yytext; lvalp->SetValueInt ( ( (SphAttr_t)lvalp->m_iStart<<32 ) | ( lvalp->m_iEnd-lvalp->m_iStart ) ); return TOK_QUOTED_STRING; }
 
 {FLOAT_CONSTANT}	{ YYSTOREBOUNDS; lvalp->m_fValue = (float)strtod ( yytext, NULL ); return TOK_CONST_FLOAT; }
 \.{INT}{ID}			{ YYSTOREBOUNDS; return TOK_SUBKEY; }
 \.{INT}			    { YYSTOREBOUNDS; return TOK_DOT_NUMBER; }
-{INT}               { YYSTOREBOUNDS; lvalp->m_iValue = (int64_t)strtoull ( yytext, NULL, 10 ); return TOK_CONST_INT; }
+{INT}               { YYSTOREBOUNDS; lvalp->SetValueInt ( strtoull ( yytext, NULL, 10 ), false ); return TOK_CONST_INT; }
 
 "@id"				{ YYSTOREBOUNDS; return TOK_ATIDENT; }
 "@weight"			{ YYSTOREBOUNDS; return TOK_ATIDENT; }

@@ -135,7 +135,7 @@ CSphString FilenameBuilder_c::GetFullPath ( const CSphString & sName ) const
 		sNewValue << sNew;
 	}
 
-	return sNewValue.cstr();
+	return RealPath ( sNewValue.cstr() );
 }
 
 
@@ -739,10 +739,6 @@ static bool SetupConfiglessMode ( const CSphConfig & hConf, const CSphString & s
 		return false;
 
 	g_sDataDir = hSearchd["data_dir"].strval();
-
-#if _WIN32
-	g_sDataDir = AppendWinInstallDir(g_sDataDir);
-#endif
 
 	if ( !sphDirExists ( g_sDataDir.cstr(), &sError ) )
 	{
