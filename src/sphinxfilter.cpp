@@ -1977,11 +1977,24 @@ static std::unique_ptr<ISphFilter> ReorderAndCombine ( CSphVector<FilterInfo_t> 
 }
 
 static int g_iFilterStackSize = 200;
+static int g_iStartFilterStackSize = 6*1024;
 
-void SetFilterStackItemSize ( int iSize )
+void SetFilterStackItemSize ( std::pair<int,int> tSize )
 {
-	if ( iSize>g_iFilterStackSize )
-		g_iFilterStackSize = iSize;
+	if ( tSize.first>g_iFilterStackSize )
+		g_iFilterStackSize = tSize.first;
+	if ( tSize.second > g_iStartFilterStackSize )
+		g_iStartFilterStackSize = tSize.second;
+}
+
+int GetFilterStackItemSize()
+{
+	return g_iFilterStackSize;
+}
+
+int GetStartFilterStackItemSize()
+{
+	return g_iStartFilterStackSize;
 }
 
 bool sphCreateFilters ( CreateFilterContext_t & tCtx, CSphString & sError, CSphString & sWarning )
@@ -1998,9 +2011,7 @@ bool sphCreateFilters ( CreateFilterContext_t & tCtx, CSphString & sError, CSphS
 						   TREE_SIZE_THRESH, iStackNeeded, "filters", sError ) )
 			return false;
 
-		bool bOk = false;
-		Threads::Coro::Continue ( iStackNeeded, [&] { bOk = CreateFilterTree ( tCtx, sError, sWarning ); } );
-		return bOk;
+		return Threads::Coro::ContinueBool ( iStackNeeded, [&] { return CreateFilterTree ( tCtx, sError, sWarning ); } );
 	}
 
 	assert ( tCtx.m_pSchema );

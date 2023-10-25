@@ -455,7 +455,6 @@ struct IndexHint_t
 {
 	CSphString				m_sIndex;
 	SecondaryIndexType_e	m_eType = SecondaryIndexType_e::NONE;
-	bool					m_bFulltext = false;	// force/ignore all attribute iterators in fullscan queries
 	bool					m_bForce = true;
 };
 
@@ -493,8 +492,11 @@ struct CSphQuery
 	DWORD			m_uDebugFlags = 0;
 	QueryOption_e	m_eExpandKeywords = QUERY_OPT_DEFAULT;	///< control automatic query-time keyword expansion
 
-	bool			m_bAccurateAggregation = false;		///< setting via options
+	bool			m_bAccurateAggregation = false;			///< setting via options
 	bool			m_bExplicitAccurateAggregation = false; ///< whether anything was set via options
+
+	int				m_iDistinctThresh = 3500;			///< distinct accuracy thresh
+	bool			m_bExplicitDistinctThresh = false;	///< whether thresh was set via options
 
 	int				m_iMaxMatchThresh = 16384;
 
@@ -864,8 +866,14 @@ struct CSphIndexStatus
 	int64_t			m_iRamUse = 0;
 	int64_t			m_iRamRetired = 0;
 	int64_t			m_iMapped = 0; // total size of mmapped files
-	int64_t			m_iMappedResident = 0; // size of mmaped which are in core
-	int64_t			m_iMappedDocs = 0; // size of mmapped doclists
+	union {
+		int64_t			m_iMappedResident = 0;	// size of mmaped which are in core
+		int64_t			m_iStackNeed;			// for pq - max size of stack for eval node over all index on *this* node
+	};
+	union {
+		int64_t			m_iMappedDocs = 0; // size of mmapped doclists
+		int64_t			m_iStackBase;	   // for pq - base size over necessary
+	};
 	int64_t			m_iMappedResidentDocs = 0; // size of mmaped resident doclists
 	int64_t			m_iMappedHits = 0; // size of mmapped hitlists
 	int64_t			m_iMappedResidentHits = 0; // size of mmaped resident doclists
@@ -1363,6 +1371,7 @@ struct SphQueueSettings_t
 	const CSphFilterSettings *	m_pAggrFilter = nullptr;
 	int							m_iMaxMatches = DEFAULT_MAX_MATCHES;
 	bool						m_bNeedDocids = false;
+	bool						m_bGrouped = false;	// are we going to push already grouped matches to it?
 	std::function<int64_t (const CSphString &)>			m_fnGetCountDistinct;
 	std::function<int64_t (const CSphFilterSettings &)>	m_fnGetCountFilter;
 	std::function<int64_t ()>							m_fnGetCount;

@@ -22,6 +22,7 @@
 #include "indexfiles.h"
 #include "tokenizer/tokenizer.h"
 #include "task_dispatcher.h"
+#include "stackmock.h"
 
 #include <atomic>
 
@@ -43,10 +44,20 @@ struct StoredQuery_t : public StoredQuery_i, public ISphRefcountedMT
 	CSphVector<CSphString>			m_dSuffixes;
 	DictMap_t						m_hDict;
 	std::unique_ptr<XQQuery_t>		m_pXQ;
+	int								m_iStackRequired = 0;
+	static int 						m_iStackBaseRequired; // additional stack which was in use at the moment of measuring
 
 	bool							m_bOnlyTerms = false; // flag of simple query, ie only words and no operators
 	bool							IsFullscan() const { return m_pXQ->m_bEmpty; }
 };
+
+#ifdef NDEBUG
+static constexpr int PQ_BASE_STACK = 24 * 1024;
+#else
+static constexpr int PQ_BASE_STACK = 40 * 1024;
+#endif
+
+int StoredQuery_t::m_iStackBaseRequired = PQ_BASE_STACK;
 
 using StoredQuerySharedPtr_t = SharedPtr_t<StoredQuery_t>;
 using StoredQuerySharedPtrVecSharedPtr_t = SharedPtr_t<CSphVector<StoredQuerySharedPtr_t>>;
@@ -145,7 +156,7 @@ private:
 	bool							m_bIndexDeleted = false;
 
 	StoredQuerySharedPtrVecSharedPtr_t	m_pQueries GUARDED_BY ( m_tLock );
-	OpenHash_T< int, int64_t, HashFunc_Int64_t> m_hQueries GUARDED_BY ( m_tLock ); // QUID -> query
+	OpenHashTable_T<int64_t, int>		m_hQueries GUARDED_BY ( m_tLock ); // QUID -> query
 	int64_t							m_iGeneration GUARDED_BY ( m_tLock ) { 0 }; // eliminate ABA race on insert/delete
 	mutable RwLock_t				m_tLock;
 
@@ -158,6 +169,7 @@ private:
 			const CSphMultiQueryArgs &tArgs ) const;
 	bool CanBeAdded ( PercolateQueryArgs_t& tArgs, CSphString& sError ) const REQUIRES_SHARED ( m_tLock );
 	std::unique_ptr<StoredQuery_i> CreateQuery ( PercolateQueryArgs_t& tArgs, const TokenizerRefPtr_c& pTokenizer, const DictRefPtr_c& pDict, CSphString& sError );
+	static void CalcNecessaryStack ( StoredQuery_t* pStored, CSphString& sError );
 
 public:
 	PercolateMatchContext_t * CreateMatchContext ( const RtSegment_t * pSeg, const SegmentReject_t &tReject );
@@ -1157,7 +1169,7 @@ int FtMatchingCollectingDocs ( const StoredQuery_t * pStored, PercolateMatchCont
 }
 
 // percolate matching
-void MatchingWork ( const StoredQuery_t * pStored, PercolateMatchContext_t & tMatchCtx )
+void MatchingWorkAction ( const StoredQuery_t * pStored, PercolateMatchContext_t & tMatchCtx )
 {
 	int64_t tmQueryStart = ( tMatchCtx.m_bVerbose ? sphMicroTimer() : 0 );
 	tMatchCtx.m_iOnlyTerms += ( pStored->m_bOnlyTerms ? 1 : 0 );
@@ -1170,7 +1182,7 @@ void MatchingWork ( const StoredQuery_t * pStored, PercolateMatchContext_t & tMa
 	const BYTE * pBlobs = pSeg->m_dBlobs.Begin();
 
 	++tMatchCtx.m_iEarlyPassed;
-	tMatchCtx.m_pCtx->ResetFilters();
+	AT_SCOPE_EXIT ( [&tMatchCtx]() { tMatchCtx.m_pCtx->ResetFilters(); } );
 
 	CSphString sError;
 	CSphString sWarning;
@@ -1225,6 +1237,26 @@ void MatchingWork ( const StoredQuery_t * pStored, PercolateMatchContext_t & tMa
 
 	if ( tMatchCtx.m_bVerbose )
 		tMatchCtx.m_dDt.Add ( (int)( sphMicroTimer() - tmQueryStart ) );
+}
+
+void MatchingWork ( const StoredQuery_t* pStored, PercolateMatchContext_t& tMatchCtx )
+{
+	int iStackBase = Threads::GetStackUsed();
+	if ( StoredQuery_t::m_iStackBaseRequired < iStackBase )
+		StoredQuery_t::m_iStackBaseRequired = iStackBase;
+
+	int iQueryStack = Threads::GetStackUsed() + pStored->m_iStackRequired;
+	auto iMyStackSize = Threads::MyStackSize();
+	if ( iMyStackSize >= iQueryStack )
+		return MatchingWorkAction ( pStored, tMatchCtx );
+
+	if ( tMatchCtx.m_iMaxStackSize >= iQueryStack )
+		return Threads::Coro::Continue ( iQueryStack, [&] {
+			MatchingWorkAction ( pStored, tMatchCtx );
+		});
+
+	tMatchCtx.m_dMsg.Err ( "PQ requires %d bytes of stack (%d + %d), but only %d available", iQueryStack, pStored->m_iStackRequired, Threads::GetStackUsed(), (int)tMatchCtx.m_iMaxStackSize);
+	++tMatchCtx.m_iQueriesFailed;
 }
 } // static namespace
 
@@ -1297,6 +1329,9 @@ void PercolateMergeResults ( const VecTraits_T<PQMatchContextResult_t *> & dMatc
 
 	for ( PQMatchContextResult_t * pMatch : dMatches )
 	{
+		tRes.m_iQueriesFailed += pMatch->m_iQueriesFailed;
+		tRes.m_sMessages.AddStringsFrom ( pMatch->m_dMsg );
+
 		if ( pMatch->m_dQueryMatched.IsEmpty() )
 			continue;
 
@@ -1308,7 +1343,6 @@ void PercolateMergeResults ( const VecTraits_T<PQMatchContextResult_t *> & dMatc
 
 		tRes.m_iEarlyOutQueries -= pMatch->m_iEarlyPassed;
 		tRes.m_iOnlyTerms += pMatch->m_iOnlyTerms;
-		tRes.m_iQueriesFailed += pMatch->m_iQueriesFailed;
 	}
 
 	tRes.m_iQueriesMatched = iGotQueries;
@@ -1599,6 +1633,7 @@ void PercolateIndex_c::GetStatus ( CSphIndexStatus * pRes ) const
 	pRes->m_iSavedTID = m_iSavedTID;
 
 	int64_t iRamUse = 0;
+	int 	iMaxStack = 0;
 	{
 		ScRL_t rLock { m_tLock };
 		iRamUse = m_hQueries.GetLengthBytes();
@@ -1606,6 +1641,7 @@ void PercolateIndex_c::GetStatus ( CSphIndexStatus * pRes ) const
 		iRamUse = m_pQueries->GetLengthBytes64 ();
 		for ( auto & pItem : *m_pQueries )
 		{
+			iMaxStack = Max ( iMaxStack, pItem->m_iStackRequired );
 			iRamUse += sizeof ( StoredQuery_t ) + sizeof ( XQQuery_t )
 					+ pItem->m_dRejectTerms.GetLengthBytes64()
 					+ pItem->m_dRejectWilds.GetLengthBytes64()
@@ -1620,6 +1656,8 @@ void PercolateIndex_c::GetStatus ( CSphIndexStatus * pRes ) const
 		}
 	}
 	pRes->m_iRamUse = iRamUse;
+	pRes->m_iStackNeed = iMaxStack;
+	pRes->m_iStackBase = StoredQuery_t::m_iStackBaseRequired;
 }
 
 class XQTreeCompressor_t
@@ -1829,7 +1867,24 @@ std::unique_ptr<StoredQuery_i> PercolateIndex_c::CreateQuery ( PercolateQueryArg
 	if ( pStored->m_pXQ->m_bEmpty && sQuery )
 		pStored->m_pXQ->m_bEmpty = IsEmpty ( FromSz ( sQuery ) );
 
+	CalcNecessaryStack ( pStored.get(), sError );
+
 	return pStored;
+}
+
+void PercolateIndex_c::CalcNecessaryStack ( StoredQuery_t* pStored, CSphString& sError )
+{
+	if ( !pStored )
+		return;
+
+	int iStackForFt = -1;
+	if ( pStored->m_pXQ && pStored->m_pXQ->m_pRoot )
+		iStackForFt = ConsiderStackAbsolute ( pStored->m_pXQ->m_pRoot );
+
+	auto iTreeHeight = pStored->m_dFilterTree.IsEmpty() ? 0 : EvalMaxTreeHeight ( pStored->m_dFilterTree, pStored->m_dFilterTree.GetLength() - 1 );
+	int iStackForFilters = iTreeHeight * GetFilterStackItemSize() + GetStartFilterStackItemSize();
+
+	pStored->m_iStackRequired = Max ( iStackForFt, iStackForFilters );
 }
 
 template<typename READER>
@@ -1889,7 +1944,7 @@ CSphVector<StoredQuerySharedPtr_t> UniqAndWrapQueries ( const VecTraits_T<Stored
 {
 	CSphVector<StoredQuerySharedPtr_t> dNewSharedQueries;
 	dNewSharedQueries.Reserve ( dNewQueries.GetLength() );
-	OpenHash_T<int, int64_t, HashFunc_Int64_t> hQueries;
+	OpenHashTable_T<int64_t, int> hQueries;
 	for ( StoredQuery_i* pQuery : dNewQueries )
 	{
 		int* pIdx = hQueries.Find ( pQuery->m_iQUID );
@@ -1944,7 +1999,7 @@ int PercolateIndex_c::ReplayInsertAndDeleteQueries ( const VecTraits_T<StoredQue
 		}
 
 		// for both deletion and addition we need hash and snapshot
-		OpenHash_T<int, int64_t, HashFunc_Int64_t> hQueries { 0 };
+		OpenHashTable_T<int64_t, int> hQueries { 0 };
 		{
 			ScRL_t rLock ( m_tLock );
 			if ( iLimit<0 )
@@ -2026,7 +2081,7 @@ int PercolateIndex_c::ReplayInsertAndDeleteQueries ( const VecTraits_T<StoredQue
 		if ( bWithFullClone )
 		{
 			m_pQueries = pNewVec;
-			m_hQueries.Swap ( hQueries );
+			m_hQueries = std::move(hQueries);
 			++m_iGeneration;
 		} else {
 			for ( auto& pQuery : dNewSharedQueries )
@@ -2473,9 +2528,8 @@ void PercolateIndex_c::PostSetupUnl()
 	m_pQueries->ReserveGap( m_dLoadedQueries.GetLength () );
 
 	CSphString sError;
-	ARRAY_FOREACH ( i, m_dLoadedQueries )
+	for ( const StoredQueryDesc_t& tQuery : m_dLoadedQueries )
 	{
-		const StoredQueryDesc_t & tQuery = m_dLoadedQueries[i];
 		const TokenizerRefPtr_c& pTok = tQuery.m_bQL ? pTokenizer : pTokenizerJson;
 		PercolateQueryArgs_t tArgs ( tQuery );
 		if ( CanBeAdded ( tArgs, sError ) )
@@ -2490,7 +2544,7 @@ void PercolateIndex_c::PostSetupUnl()
 				continue;
 			}
 		}
-		sphWarning ( "table '%s': %d (id=" INT64_FMT ") query failed to load, ignoring", GetName(), i, tQuery.m_iQUID );
+		sphWarning ( "table '%s': %d (id=" INT64_FMT ") query failed to load, ignoring", GetName(), m_dLoadedQueries.Idx ( &tQuery ), tQuery.m_iQUID );
 	}
 	m_dLoadedQueries.Reset ( 0 );
 
@@ -3200,7 +3254,7 @@ void MergePqResults ( const VecTraits_T<CPqResult *> &dChunks, CPqResult &dRes, 
 		assert ( pDocs );
 	}
 
-	OpenHash_T<int, int64_t, HashFunc_Int64_t> hDocids ( iGotDocids + 1 );
+	OpenHashTable_T<int64_t, int> hDocids ( iGotDocids + 1 );
 	bool bHasDocids = iGotDocids!=0;
 	if ( bHasDocids )
 		hDocids.Add ( iGotDocids, 0 );
@@ -3262,7 +3316,6 @@ void MergePqResults ( const VecTraits_T<CPqResult *> &dChunks, CPqResult &dRes, 
 		int * pIndex = nullptr;
 		while ( nullptr != ( pIndex = hDocids.Iterate ( &i, &iDocid ) ) )
 			dRes.m_dDocids[*pIndex] = iDocid;
-
 	}
 }
 

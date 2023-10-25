@@ -1157,7 +1157,7 @@ bool IndexSegment_c::Update_UpdateAttributes ( const RowsToUpdate_t& dRows, Upda
 class QueryMvaContainer_c
 {
 public:
-	CSphVector<OpenHash_T<CSphVector<int64_t>, int64_t, HashFunc_Int64_t>*> m_tContainer;
+	CSphVector<OpenHashTable_T<int64_t,CSphVector<int64_t>>*> m_tContainer;
 
 	~QueryMvaContainer_c()
 	{
@@ -1376,10 +1376,10 @@ private:
 	bool						Build_SetupBlobBuilder ( std::unique_ptr<BlobRowBuilder_i> & pBuilder ); // fixme! build only
 	bool						Build_SetupColumnar ( std::unique_ptr<columnar::Builder_i> & pBuilder, CSphBitvec & tColumnarAttrs ); // fixme! build only
 
-	void						Build_AddToDocstore ( DocstoreBuilder_i * pDocstoreBuilder, DocID_t tDocID, QueryMvaContainer_c & tMvaContainer, CSphSource & tSource, const CSphBitvec & dStoredFields, const CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreFieldStorage, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage, const CSphVector<std::unique_ptr<OpenHash_T<uint64_t, uint64_t>>> & dJoinedOffsets, CSphReader & tJoinedReader ); // fixme! build only
+	void						Build_AddToDocstore ( DocstoreBuilder_i * pDocstoreBuilder, DocID_t tDocID, QueryMvaContainer_c & tMvaContainer, CSphSource & tSource, const CSphBitvec & dStoredFields, const CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreFieldStorage, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage, const CSphVector<std::unique_ptr<OpenHashTable_T<uint64_t, uint64_t>>> & dJoinedOffsets, CSphReader & tJoinedReader ); // fixme! build only
 	bool						Build_StoreBlobAttrs ( DocID_t tDocId, SphOffset_t & tOffset, BlobRowBuilder_i & tBlobRowBuilderconst, QueryMvaContainer_c & tMvaContainer, AttrSource_i & tSource, bool bForceSource ); // fixme! build only
 	bool						Build_CollectQueryMvas ( const CSphVector<CSphSource*> & dSources, QueryMvaContainer_c & tMvaContainer ); // build only
-	bool						Build_CollectJoinedFields ( const CSphVector<CSphSource*> & dSources, CSphAutofile & tFile, CSphVector<std::unique_ptr<OpenHash_T<uint64_t, uint64_t>>> & dJoinedOffsets );
+	bool						Build_CollectJoinedFields ( const CSphVector<CSphSource*> & dSources, CSphAutofile & tFile, CSphVector<std::unique_ptr<OpenHashTable_T<uint64_t, uint64_t>>> & dJoinedOffsets );
 
 	bool						SpawnReader ( DataReaderFactoryPtr_c & m_pFile, ESphExt eExt, DataReaderFactory_c::Kind_e eKind, int iBuffer, FileAccess_e eAccess );
 	bool						SpawnReaders();
@@ -1388,7 +1388,7 @@ private:
 
 	bool						SplitQuery ( CSphQueryResult & tResult, const CSphQuery & tQuery, const VecTraits_T<ISphMatchSorter *> & dAllSorters, const CSphMultiQueryArgs & tArgs, int64_t tmMaxTimer ) const;
 	RowidIterator_i *			SpawnIterators ( const CSphQuery & tQuery, CSphQueryContext & tCtx, CreateFilterContext_t & tFlx, const ISphSchema & tMaxSorterSchema, CSphQueryResultMeta & tMeta, int iCutoff, int iThreads, CSphVector<CSphFilterSettings> & dModifiedFilters, ISphRanker * pRanker ) const;
-	bool						SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * pRanker, CSphVector<SecondaryIndexInfo_t> & dSIInfo, int iCutoff, int iThreads, CSphString & sWarning ) const;
+	bool						SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * pRanker, CSphVector<SecondaryIndexInfo_t> & dSIInfo, int iCutoff, int iThreads, StrVec_t & dWarnings ) const;
 
 	bool						IsQueryFast ( const CSphQuery & tQuery ) const;
 	bool						CheckEnabledIndexes ( const CSphQuery & tQuery, int iThreads, bool & bFastQuery ) const;
@@ -3070,9 +3070,9 @@ bool CSphIndex_VLN::CheckEnabledIndexes ( const CSphQuery & tQuery, int iThreads
 	float fCost = FLT_MAX;
 	int iCutoff = ApplyImplicitCutoff ( tQuery, {} );
 
-	CSphString sWarning;
+	StrVec_t dWarnings;
 	SelectIteratorCtx_t tCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), iCutoff, m_iDocinfo, iThreads );
-	CSphVector<SecondaryIndexInfo_t> dEnabledIndexes = SelectIterators ( tCtx, fCost, sWarning );
+	CSphVector<SecondaryIndexInfo_t> dEnabledIndexes = SelectIterators ( tCtx, fCost, dWarnings );
 
 	// disable pseudo sharding if any of the queries use secondary indexes/docid lookups
 	if ( dEnabledIndexes.any_of ( []( const SecondaryIndexInfo_t & tSI ){ return tSI.m_eType==SecondaryIndexType_e::INDEX || tSI.m_eType==SecondaryIndexType_e::LOOKUP; } ) )
@@ -4479,7 +4479,7 @@ bool CSphIndex_VLN::Build_CollectQueryMvas ( const CSphVector<CSphSource*> & dSo
 
 			auto * & pHash = tMvaContainer.m_tContainer[i];
 			if ( !pHash )
-				pHash = new OpenHash_T<CSphVector<int64_t>, int64_t, HashFunc_Int64_t>;
+				pHash = new OpenHashTable_T<int64_t, CSphVector<int64_t>>;
 
 			if ( !pSource->IterateMultivaluedStart ( i, m_sLastError ) )
 				return false;
@@ -4500,7 +4500,7 @@ bool CSphIndex_VLN::Build_CollectQueryMvas ( const CSphVector<CSphSource*> & dSo
 }
 
 
-bool CSphIndex_VLN::Build_CollectJoinedFields ( const CSphVector<CSphSource*> & dSources, CSphAutofile & tFile, CSphVector<std::unique_ptr<OpenHash_T<uint64_t, uint64_t>>> & dJoinedOffsets )
+bool CSphIndex_VLN::Build_CollectJoinedFields ( const CSphVector<CSphSource*> & dSources, CSphAutofile & tFile, CSphVector<std::unique_ptr<OpenHashTable_T<uint64_t, uint64_t>>> & dJoinedOffsets )
 {
 	for ( auto & pSource : dSources )
 	{
@@ -5302,7 +5302,7 @@ static uint64_t CreateJoinedKey ( DocID_t tDocID, int iEntry )
 }
 
 
-void CSphIndex_VLN::Build_AddToDocstore ( DocstoreBuilder_i * pDocstoreBuilder, DocID_t tDocID, QueryMvaContainer_c & tMvaContainer, CSphSource & tSource, const CSphBitvec & dStoredFields, const CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreFieldStorage, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage, const CSphVector<std::unique_ptr<OpenHash_T<uint64_t, uint64_t>>> & dJoinedOffsets, CSphReader & tJoinedReader )
+void CSphIndex_VLN::Build_AddToDocstore ( DocstoreBuilder_i * pDocstoreBuilder, DocID_t tDocID, QueryMvaContainer_c & tMvaContainer, CSphSource & tSource, const CSphBitvec & dStoredFields, const CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreFieldStorage, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage, const CSphVector<std::unique_ptr<OpenHashTable_T<uint64_t, uint64_t>>> & dJoinedOffsets, CSphReader & tJoinedReader )
 {
 	if ( !pDocstoreBuilder )
 		return;
@@ -5432,7 +5432,7 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 	}
 
 	CSphAutofile tTmpJoinedFields ( GetFilename ( "tmp3" ), SPH_O_NEW, m_sLastError, true );
-	CSphVector<std::unique_ptr<OpenHash_T<uint64_t, uint64_t>>> dJoinedOffsets;
+	CSphVector<std::unique_ptr<OpenHashTable_T<uint64_t, uint64_t>>> dJoinedOffsets;
 	CSphReader tJoinedReader;
 	if ( bHaveJoined )
 	{
@@ -7746,7 +7746,7 @@ private:
 
 //////////////////////////////////////////////////////////////////////////
 
-template <bool HAS_FILTER_CALC, bool HAS_SORT_CALC, bool HAS_FILTER, bool HAS_RANDOMIZE, bool HAS_MAX_TIMER, bool HAS_CUTOFF, typename ITERATOR, typename TO_STATIC>
+template <bool SINGLE_SORTER, bool HAS_FILTER_CALC, bool HAS_SORT_CALC, bool HAS_FILTER, bool HAS_RANDOMIZE, bool HAS_MAX_TIMER, bool HAS_CUTOFF, typename ITERATOR, typename TO_STATIC>
 bool Fullscan ( ITERATOR & tIterator, TO_STATIC && fnToStatic, const CSphQueryContext & tCtx, CSphQueryResultMeta & tMeta, const VecTraits_T<ISphMatchSorter *> & dSorters, CSphMatch & tMatch, int iCutoff, int iIndexWeight, int64_t tmMaxTimer )
 {
 	auto tScopedStats = AtScopeExit ( [&tMeta, &tIterator]{tMeta.m_tStats.m_iFetchedDocs = (DWORD)tIterator.GetNumProcessed(); } );
@@ -7784,7 +7784,10 @@ bool Fullscan ( ITERATOR & tIterator, TO_STATIC && fnToStatic, const CSphQueryCo
 				tCtx.CalcSort(tMatch);
 
 			bool bNewMatch = false;
-			dSorters.for_each( [&tMatch, &bNewMatch] ( ISphMatchSorter * p ) { bNewMatch |= p->Push ( tMatch ); } );
+			if constexpr  ( SINGLE_SORTER )
+				bNewMatch = dSorters[0]->Push(tMatch);
+			else
+				dSorters.for_each( [&tMatch, &bNewMatch] ( ISphMatchSorter * p ) { bNewMatch |= p->Push ( tMatch ); } );
 
 			// stringptr expressions should be duplicated (or taken over) at this point
 			if constexpr ( HAS_FILTER_CALC )
@@ -7833,12 +7836,13 @@ bool RunFullscan ( ITERATOR & tIterator, TO_STATIC && fnToStatic, const CSphQuer
 	bool bHasFilter = !!tCtx.m_pFilter;
 	bool bHasTimer = tmMaxTimer>0;
 	bool bHasCutoff = iCutoff!=-1;
-	int iIndex = bHasFilterCalc*32 + bHasSortCalc*16 + bHasFilter*8 + bRandomize*4 + bHasTimer*2 + bHasCutoff;
+	bool bSingleSorter = dSorters.GetLength()==1;
+	int iIndex = bSingleSorter*64 + bHasFilterCalc*32 + bHasSortCalc*16 + bHasFilter*8 + bRandomize*4 + bHasTimer*2 + bHasCutoff;
 
 	switch ( iIndex )
 	{
-#define DECL_FNSCAN( _, n, params ) case n: return Fullscan<!!(n&32), !!(n&16), !!(n&8), !!(n&4), !!(n&2), !!(n&1), ITERATOR, TO_STATIC> params;
-	BOOST_PP_REPEAT ( 64, DECL_FNSCAN, ( tIterator, std::forward<TO_STATIC> ( fnToStatic ), tCtx, tMeta, dSorters, tMatch, iCutoff, iIndexWeight, tmMaxTimer ) )
+#define DECL_FNSCAN( _, n, params ) case n: return Fullscan<!!(n&64), !!(n&32), !!(n&16), !!(n&8), !!(n&4), !!(n&2), !!(n&1), ITERATOR, TO_STATIC> params;
+	BOOST_PP_REPEAT ( 128, DECL_FNSCAN, ( tIterator, std::forward<TO_STATIC> ( fnToStatic ), tCtx, tMeta, dSorters, tMatch, iCutoff, iIndexWeight, tmMaxTimer ) )
 #undef DECL_FNSCAN
 		default:
 			assert ( 0 && "Internal error" );
@@ -7991,19 +7995,8 @@ static void RecreateFilters ( const CSphVector<SecondaryIndexInfo_t> & dSIInfo, 
 }
 
 
-bool CSphIndex_VLN::SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * pRanker, CSphVector<SecondaryIndexInfo_t> & dSIInfo, int iCutoff, int iThreads, CSphString & sWarning ) const
+bool CSphIndex_VLN::SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * pRanker, CSphVector<SecondaryIndexInfo_t> & dSIInfo, int iCutoff, int iThreads, StrVec_t & dWarnings ) const
 {
-	bool bForce = false;
-	for ( const auto & tHint : tQuery.m_dIndexHints )
-		if ( tHint.m_bFulltext )
-		{
-			if ( !tHint.m_bForce )
-				return false;
-
-			bForce = true;
-			break;
-		}
-
 	// in fulltext case we do the following:
 	// 1. calculate cost of FT search and number of docs after FT search
 	// 2. calculate cost of filters over the number of docs after FT search
@@ -8014,14 +8007,15 @@ bool CSphIndex_VLN::SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * p
 	SelectIteratorCtx_t tSelectIteratorCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), iCutoff, m_iDocinfo, iThreads );
 	tSelectIteratorCtx.IgnorePushCost();
 	float fBestCost = FLT_MAX;
-	dSIInfo = SelectIterators ( tSelectIteratorCtx, fBestCost, sWarning );
+	dSIInfo = SelectIterators ( tSelectIteratorCtx, fBestCost, dWarnings );
 
 	// check that we have anything non-plain-filter. if not, bail out
 	if ( !dSIInfo.any_of ( []( const auto & tInfo ){ return tInfo.m_eType==SecondaryIndexType_e::LOOKUP || tInfo.m_eType==SecondaryIndexType_e::INDEX || tInfo.m_eType==SecondaryIndexType_e::ANALYZER; } ) )
 		return false;
 
 	// if we are forcing this behavior, there's no point in further calculations
-	if ( bForce )
+	// and we are forcing it if we have any hints specified
+	if ( tQuery.m_dIndexHints.GetLength() )
 		return true;
 
 	CSphVector<SecondaryIndexInfo_t> dSIInfoFilters { dSIInfo.GetLength() };
@@ -8064,6 +8058,7 @@ RowidIterator_i * CSphIndex_VLN::SpawnIterators ( const CSphQuery & tQuery, CSph
 		return nullptr;
 
 	CSphVector<SecondaryIndexInfo_t> dSIInfo;
+	StrVec_t dWarnings;
 
 	if ( !pRanker )
 	{
@@ -8073,11 +8068,17 @@ RowidIterator_i * CSphIndex_VLN::SpawnIterators ( const CSphQuery & tQuery, CSph
 		// For now we use approach b) as it is simpler
 		float fBestCost = FLT_MAX;
 		SelectIteratorCtx_t tSelectIteratorCtx ( tQuery, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), iCutoff, m_iDocinfo, iThreads );
-		dSIInfo = SelectIterators ( tSelectIteratorCtx, fBestCost, tMeta.m_sWarning );
+		dSIInfo = SelectIterators ( tSelectIteratorCtx, fBestCost, dWarnings );
+		if ( dWarnings.GetLength() )
+			tMeta.m_sWarning = ConcatWarnings(dWarnings);
 	}
 	else
 	{
-		if ( !SelectIteratorsFT ( tQuery, pRanker, dSIInfo, iCutoff, iThreads, tMeta.m_sWarning ) )
+		bool bRes = SelectIteratorsFT ( tQuery, pRanker, dSIInfo, iCutoff, iThreads, dWarnings );
+		if ( dWarnings.GetLength() )
+			tMeta.m_sWarning = ConcatWarnings(dWarnings);
+
+		if ( !bRes )
 			return nullptr;
 	}
 
@@ -9978,7 +9979,13 @@ static DWORD SPH_EXTRA_BUDGET = 0x2000;
 void SetExtNodeStackSize ( int iDelta, int iExtra )
 {
 	if ( iDelta )
-		SPH_EXTNODE_STACK_SIZE = iDelta;// + 0x10;
+	{
+		SPH_EXTNODE_STACK_SIZE = iDelta;
+
+#if defined( _WIN32 )
+		SPH_EXTNODE_STACK_SIZE += 0x80;
+#endif
+	}
 
 	if ( iExtra )
 		SPH_EXTRA_BUDGET = iExtra;// + 0x100;
@@ -10001,13 +10008,19 @@ Strictly speaking, we need to mock it - create rt, then query - without any disk
  and also on query leaves - reading docs/hits from disk with extra functions for caching, working with fs, profiling, etc. That is oneshot extra budget over calculated expression stuff.
 */
 
-int ConsiderStack ( const struct XQNode_t * pRoot, CSphString & sError )
+
+int ConsiderStackAbsolute ( const struct XQNode_t* pRoot )
 {
 	int iHeight = 0;
 	if ( pRoot )
 		iHeight = sphQueryHeightCalc ( pRoot );
 
-	auto iStackNeed = iHeight * SPH_EXTNODE_STACK_SIZE + SPH_EXTRA_BUDGET;
+	return iHeight * SPH_EXTNODE_STACK_SIZE + SPH_EXTRA_BUDGET;
+}
+
+int ConsiderStack ( const struct XQNode_t * pRoot, CSphString & sError )
+{
+	auto iStackNeed = ConsiderStackAbsolute ( pRoot );
 	int64_t iQueryStack = Threads::GetStackUsed() + iStackNeed;
 //	sphWarning ( "Stack used %d, need %d (%d * %d + %d), sum %d, have %d", (int)Threads::GetStackUsed(), iStackNeed, iHeight, SPH_EXTNODE_STACK_SIZE, SPH_EXTRA_BUDGET, (int)iQueryStack, Threads::MyStackSize() );
 	auto iMyStackSize = Threads::MyStackSize ();
@@ -10017,7 +10030,7 @@ int ConsiderStack ( const struct XQNode_t * pRoot, CSphString & sError )
 	// align as stack of tree + 8K
 	// (being run in new coro, most probably you'll start near the top of stack, so 32k should be enough)
 	iQueryStack = iStackNeed + 8*1024;
-	if ( Threads::GetMaxCoroStackSize()>=iQueryStack )
+	if ( session::GetMaxStackSize()>=iQueryStack )
 		return (int)iQueryStack;
 
 	sError.SetSprintf ( "query too complex, not enough stack (thread_stack=%dK or higher required)", (int) (( iQueryStack+1024-( iQueryStack % 1024 )) / 1024 ));
@@ -12847,7 +12860,7 @@ bool ParseMorphFields ( const CSphString & sMorphology, const CSphString & sMorp
 	if ( !sFields.Length() )
 		return true;
 
-	OpenHash_T<int, int64_t, HashFunc_Int64_t> hFields;
+	OpenHashTable_T<int64_t, int> hFields;
 	ARRAY_FOREACH ( i, dFields )
 		hFields.Add ( sphFNV64 ( dFields[i].m_sName.cstr() ), i );
 
@@ -13519,7 +13532,7 @@ void SuggestMatchWords ( const ISphWordlistSuggest * pWordlist, const CSphVector
 	const int iMinWordLen = ( tArgs.m_iDeltaLen>0 ? Max ( 0, tRes.m_iCodepoints - tArgs.m_iDeltaLen ) : -1 );
 	const int iMaxWordLen = ( tArgs.m_iDeltaLen>0 ? tRes.m_iCodepoints + tArgs.m_iDeltaLen : INT_MAX );
 
-	OpenHash_T<int, int64_t, HashFunc_Int64_t> dHashTrigrams;
+	OpenHashTable_T<int64_t, int> dHashTrigrams;
 	const char * sBuf = tRes.m_dTrigrams.Begin ();
 	const char * sEnd = sBuf + tRes.m_dTrigrams.GetLength();
 	while ( sBuf<sEnd )

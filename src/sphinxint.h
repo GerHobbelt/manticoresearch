@@ -874,6 +874,7 @@ void			SetExtNodeStackSize ( int iDelta, int iExtra );
 // returns -1: query might be run on current frame
 // other positive: necessary free size of stack
 int				ConsiderStack ( const struct XQNode_t * pRoot, CSphString & sError );
+int				ConsiderStackAbsolute ( const struct XQNode_t* pRoot );
 void			sphTransformExtendedQuery ( XQNode_t ** ppNode, const CSphIndexSettings & tSettings, bool bHasBooleanOptimization, const ISphKeywordsStat * pKeywords );
 void			TransformAotFilter ( XQNode_t * pNode, const CSphWordforms * pWordforms, const CSphIndexSettings& tSettings );
 bool			sphMerge ( const CSphIndex * pDst, const CSphIndex * pSrc, VecTraits_T<CSphFilterSettings> dFilters, CSphIndexProgress & tProgress, CSphString& sError );
@@ -1398,7 +1399,7 @@ struct SchemaItemVariant_t
 };
 
 
-using SchemaItemHash_c = OpenHash_T<SchemaItemVariant_t, uint64_t, HashFunc_Int64_t>;
+using SchemaItemHash_c = OpenHashTable_T<uint64_t, SchemaItemVariant_t>;
 
 template <typename T>
 BYTE PrereadMapping ( const char * sIndexName, const char * sFor, bool bMlock, bool bOnDisk, CSphBufferTrait<T> & tBuf )

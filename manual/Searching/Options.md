@@ -11,7 +11,7 @@ The SQL [SELECT](../Searching/Full_text_matching/Basic_usage.md#SQL) clause and 
 **SQL**:
 
 ```sql
-SELECT ... [OPTION <optionname>=<value> [ , ... ]] [/*+ [NO_][ColumnarScan|DocidIndex|SecondaryIndex|OptimizeFulltextFilters(<attribute>[,...])]] /*]
+SELECT ... [OPTION <optionname>=<value> [ , ... ]] [/*+ [NO_][ColumnarScan|DocidIndex|SecondaryIndex(<attribute>[,...])]] /*]
 ```
 
 **HTTP**:
@@ -129,6 +129,17 @@ Integer. Max found matches threshold. The value is selected automatically if not
 * not set: Manticore will decide automatically what the value should be.
 
 In case Manticore cannot calculate the exact matching documents count, you will see `total_relation: gte` in the query [meta information](../Node_info_and_management/SHOW_META.md#SHOW-META), which means that the actual count is **Greater Than or Equal** to the total (`total_found` in `SHOW META` via SQL, `hits.total` in JSON via HTTP). If the total value is precise, you'll get `total_relation: eq`.
+
+### distinct_precision_threshold
+Integer. Default is `3500`. This option sets the threshold below which counts returned by `count distinct` are guaranteed to be exact within a plain index.
+
+Accepted values range from `500` to `15500`. Values outside this range will be clamped.
+
+When this option is set to `0`, it enables a legacy algorithm that ensures exact counts. This algorithm collects `{group; value}` pairs, sorts them, and periodically eliminates duplicates. The result is precise counts within a plain index. However, this approach is not suitable for high-cardinality datasets due to its high memory consumption and slow query execution.
+
+When `distinct_precision_threshold` is set to a value greater than `0`, Manticore employs a different algorithm. It loads counts into a hash table and returns the size of the table. If the hash table becomes too large, its contents are moved into a `HyperLogLog` data structure. At this point, the counts become approximate because HyperLogLog is a probabilistic algorithm. This approach maintains a fixed maximum memory usage per group, but there is a tradeoff in count accuracy.
+
+The accuracy of the `HyperLogLog` and the threshold for converting from the hash table to HyperLogLog are derived from the `distinct_precision_threshold` setting. It's important to use this option with caution since doubling its value will also double the maximum memory required to calculate counts. The maximum memory usage can be roughly estimated using this formula: `4 * max_matches * 2^(log2(distinct_precision_threshold) + 4)`, although in practice, count calculations often use less memory than the worst-case scenario.
 
 ### expand_keywords
 `0` or `1` (`0` by default). Expands keywords with exact forms and/or stars when possible. Refer to [expand_keywords](../Creating_a_table/NLP_and_tokenization/Wildcard_searching_settings.md#expand_keywords) for more details.
@@ -268,7 +279,8 @@ In rare cases, Manticore's built-in query analyzer may be incorrect in understan
 * `/*+ DocidIndex(id) */`  to force the use of a docid index, `/*+ NO_DocidIndex(id) */` to tell the optimizer to ignore it
 * `/*+ SecondaryIndex(<attr_name1>[, <attr_nameN>]) */` to force the use of a secondary index (if available), `/*+ NO_SecondaryIndex(id) */`  to tell the optimizer to ignore it
 * `/*+ ColumnarScan(<attr_name1>[, <attr_nameN>]) */`  to force the use of a columnar scan (if the attribute is columnar), `/*+ NO_ColumnarScan(id) */` to tell the optimizer to ignore it
-* `/*+ OptimizeFulltextFilters */` to force intersection of full-text tree results with filter results (as opposed to standard match-then-filter scheme), `/*+ NO_OptimizeFulltextFilters */`  to use standard full-text matching. Note that other hints can be used to control what entities are used to calculate filter results.
+
+Note that when executing a full-text query with filters, the query optimizer decides between intersecting the results of the full-text tree with the filter results or using a standard match-then-filter approach. Specifying *any* hint will force the daemon to use the code path that performs the intersection of the full-text tree results with the filter results.
 
 For more information on how the query optimizer works, refer to the [Cost based optimizer](../Searching/Cost_based_optimizer.md) page.
 
