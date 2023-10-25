@@ -2063,7 +2063,35 @@ static bool DetectNonClonableSorters ( const CSphQuery & tQuery )
 }
 
 
-bool CSphIndex::MustRunInSingleThread ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, bool & bForceSingleThread ) const
+static bool DetectPrecalcSorters ( const CSphQuery & tQuery, bool bHasSI )
+{
+	if ( !bHasSI )
+		return false;
+
+	if ( tQuery.m_dItems.any_of ( []( auto & tItem ){ return tItem.m_eAggrFunc!=SPH_AGGR_NONE; } ) )
+		return false;
+
+	if ( !HasImplicitGrouping(tQuery) )
+		return false;
+
+	if ( !tQuery.m_sQuery.IsEmpty() )
+		return false;
+
+	bool bDistinct = !tQuery.m_sGroupDistinct.IsEmpty();
+
+	// check for count distinct precalc
+	if ( bDistinct && tQuery.m_dFilters.IsEmpty() )
+		return true;
+
+	// check for count(*) precalc
+	if ( !bDistinct && tQuery.m_dFilters.GetLength()==1 )
+		return true;
+
+	return false;
+}
+
+
+bool CSphIndex::MustRunInSingleThread ( const VecTraits_T<const CSphQuery> & dQueries, bool bHasSI, const VecTraits_T<int64_t> & dMaxCountDistinct, bool & bForceSingleThread ) const
 {
 	ARRAY_FOREACH ( i, dQueries )
 	{
@@ -2071,6 +2099,9 @@ bool CSphIndex::MustRunInSingleThread ( const VecTraits_T<const CSphQuery> & dQu
 
 		// check for potential non-clonable sorters (we don't have actual sorters at this stage)
 		if ( DetectNonClonableSorters(tQuery) )
+			return true;
+
+		if ( DetectPrecalcSorters ( tQuery, bHasSI ) )
 			return true;
 
 		// at this point we are trying to decide how many threads this index gets
@@ -2116,7 +2147,7 @@ bool CSphIndex::MustRunInSingleThread ( const VecTraits_T<const CSphQuery> & dQu
 
 int64_t CSphIndex::GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, int iThreads, bool & bForceSingleThread ) const
 {
-	if ( MustRunInSingleThread ( dQueries, dMaxCountDistinct, bForceSingleThread ) )
+	if ( MustRunInSingleThread ( dQueries, false, dMaxCountDistinct, bForceSingleThread ) )
 		return -1;
 
 	int64_t iTotalDocs = GetStats().m_iTotalDocuments;
@@ -3054,7 +3085,7 @@ bool CSphIndex_VLN::CheckEnabledIndexes ( const CSphQuery & tQuery, int iThreads
 
 int64_t CSphIndex_VLN::GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, int iThreads, bool & bForceSingleThread ) const
 {
-	if ( MustRunInSingleThread ( dQueries, dMaxCountDistinct, bForceSingleThread ) )
+	if ( MustRunInSingleThread ( dQueries, !!m_pSIdx, dMaxCountDistinct, bForceSingleThread ) )
 		return -1;
 
 	bool bAllFast = true;
@@ -3113,7 +3144,7 @@ int64_t CSphIndex_VLN::GetCount ( const CSphFilterSettings & tFilter ) const
 
 	uint32_t uCount = 0;
 	std::string sError;
-	if ( !m_pSIdx.get()->CalcCount ( uCount, tColumnarFilter, sError ) )
+	if ( !m_pSIdx.get()->CalcCount ( uCount, tColumnarFilter, m_iDocinfo, sError ) )
 		return -1;
 
 	return uCount;
@@ -8002,6 +8033,7 @@ bool CSphIndex_VLN::SelectIteratorsFT ( const CSphQuery & tQuery, ISphRanker * p
 			i.m_iRsetEstimate *= fRatio;
 
 		tSelectIteratorCtx.m_iTotalDocs = tEstimate.m_iDocs;
+		tSelectIteratorCtx.m_bFromIterator = true;
 		std::unique_ptr<CostEstimate_i> pCostEstimate ( CreateCostEstimate ( dSIInfoFilters, tSelectIteratorCtx ) );
 		fCostOfFilters = pCostEstimate->CalcQueryCost();
 	}
@@ -8190,7 +8222,9 @@ bool CSphIndex_VLN::MultiScan ( CSphQueryResult & tResult, const CSphQuery & tQu
 	// try to spawn an iterator from a secondary index
 	CSphVector<CSphFilterSettings> dModifiedFilters; // holds filter settings if they were modified. filters hold pointers to those settings
 	std::unique_ptr<RowidIterator_i> pIterator;
-	if ( !bAllPrecalc )
+	if ( bAllPrecalc )
+		tCtx.m_pFilter.reset();
+	else
 		pIterator = std::unique_ptr<RowidIterator_i> ( SpawnIterators ( tQuery, tCtx, tFlx, tMaxSorterSchema, tMeta, iCutoff, tArgs.m_iTotalThreads, dModifiedFilters, nullptr ) );
 	
 	SwitchProfile ( tMeta.m_pProfile, SPH_QSTATE_FULLSCAN );
@@ -8467,15 +8501,23 @@ const CSphMatch & QwordScan_c::GetNextDoc()
 		return m_tDoc;
 	}
 
-	if ( m_tDoc.m_tRowID==INVALID_ROWID )
-		m_tDoc.m_tRowID = 0;
-	else
-		m_tDoc.m_tRowID++;
-
-	if ( m_tDoc.m_tRowID>=m_iRowsCount )
+	// at the RT index some rows could be killed at any segment
+	while ( true )
 	{
-		m_bDone = true;
-		m_tDoc.m_tRowID = INVALID_ROWID;
+		if ( m_tDoc.m_tRowID==INVALID_ROWID )
+			m_tDoc.m_tRowID = 0;
+		else
+			m_tDoc.m_tRowID++;
+
+		if ( m_tDoc.m_tRowID>=m_iRowsCount )
+		{
+			m_bDone = true;
+			m_tDoc.m_tRowID = INVALID_ROWID;
+			break;
+		}
+
+		if ( IsAliveRow ( m_tDoc.m_tRowID ) )
+			break;
 	}
 
 	return m_tDoc;

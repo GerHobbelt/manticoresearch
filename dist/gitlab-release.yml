@@ -21,7 +21,7 @@ variables:
   needs: [ ]
   tags:
     - docker
-  image: registry.gitlab.com/manticoresearch/dev/external_toolchain:clang15_cmake3243
+  image: registry.gitlab.com/manticoresearch/dev/external_toolchain:clang15_cmake3263
   variables:
     CACHEB: "../cache"
     arch: x86_64
@@ -119,6 +119,7 @@ windows:
   extends: [ .build ]
   variables:
     arch: x64
+    sysroot: roots_apr12
     DISTR: windows
 
 # windows build with native clang flavour

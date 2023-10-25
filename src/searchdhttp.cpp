@@ -1120,8 +1120,14 @@ std::unique_ptr<PubSearchHandler_c> CreateMsearchHandler ( std::unique_ptr<Query
 
 		tQuery.m_sGroupBy = tBucket.m_sCol;
 		tQuery.m_sFacetBy = tBucket.m_sCol;
-		tQuery.m_sGroupSortBy = "@groupby desc";
 		tQuery.m_sOrderBy = "@weight desc";
+		if ( tBucket.m_sSort.IsEmpty() )
+		{
+			tQuery.m_sGroupSortBy = "@groupby desc";
+		} else
+		{
+			tQuery.m_sGroupSortBy = tBucket.m_sSort;
+		}
 
 		// aggregate and main query could have different sizes
 		if ( tBucket.m_iSize )
@@ -1976,7 +1982,7 @@ public:
 				eStatus = bResult ? SPH_HTTP_STATUS_200 : SPH_HTTP_STATUS_500;
 			BuildReply ( tRoot.AsString(), eStatus );
 			HTTPINFO << "inserted  " << iCurLine;
-			return !bResult;
+			return bResult;
 		};
 
 		auto AddResult = [&tResults] ( const char* szStmt, JsonObj_c& tResult ) {
