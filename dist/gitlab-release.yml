@@ -14,6 +14,10 @@ variables:
 .build:
   stage: build
   interruptible: true
+  rules:
+    - if: $CI_MERGE_REQUEST_ID
+      when: manual
+    - if: $CI_MERGE_REQUEST_ID == null
   needs: [ ]
   tags:
     - docker
@@ -96,7 +100,6 @@ variables:
 
 osx:
   extends: [ .build ]
-  rules:
   variables:
     DISTR: macos
 
@@ -114,7 +117,6 @@ collect_osx:
 
 windows:
   extends: [ .build ]
-  rules:
   variables:
     arch: x64
     DISTR: windows
@@ -133,7 +135,6 @@ collect_windows:
 
 rhel7:
   extends: [ .build_rhel ]
-  rules:
   variables:
     DISTR: rhel7
 
@@ -153,7 +154,6 @@ collect_rhel7:
 
 rhel8:
   extends: [ .build_rhel ]
-  rules:
   variables:
     DISTR: rhel8
 
@@ -173,7 +173,6 @@ collect_rhel8:
 
 rhel9:
   extends: [ .build_rhel ]
-  rules:
   variables:
     DISTR: rhel9
 
@@ -194,7 +193,6 @@ collect_rhel9:
 
 bionic:
   extends: [ .build ]
-  rules:
   variables:
     DISTR: bionic
 
@@ -214,7 +212,6 @@ collect_bionic:
 
 focal:
   extends: [ .build ]
-  rules:
   variables:
     DISTR: focal
 
@@ -234,7 +231,6 @@ collect_focal:
 
 buster:
   extends: [ .build ]
-  rules:
   variables:
     DISTR: buster
 
@@ -254,7 +250,6 @@ collect_buster:
 
 bullseye:
   extends: [ .build ]
-  rules:
   variables:
     DISTR: bullseye
 
@@ -274,7 +269,6 @@ collect_bullseye:
 
 jammy:
   extends: [ .build ]
-  rules:
   variables:
     DISTR: jammy
 
@@ -294,7 +288,6 @@ collect_jammy:
 
 bookworm:
   extends: [ .build ]
-  rules:
   variables:
     DISTR: bookworm
 

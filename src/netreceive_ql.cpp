@@ -124,6 +124,8 @@ struct MYSQL_FLAG
 	static constexpr WORD MORE_RESULTS = 8;		// mysql.h: SERVER_MORE_RESULTS_EXISTS
 };
 
+constexpr int MAX_PACKET_LEN = 0x00FFFFFFL; // 16777215 bytes, max low level packet size. Notice, also used as mask.
+
 struct MYSQL_CHARSET
 {
 	static constexpr BYTE utf8_general_ci = 0x21;
@@ -529,8 +531,16 @@ public:
 	// sends collected data, then reset
 	bool Commit() override
 	{
-		m_tOut.SendLSBDword ( ((m_uPacketID++)<<24) + ( GetLength() ) );
-		m_tOut.SendBytes ( *this );
+		int iLeft = GetLength();
+		const BYTE * pBuf = Begin();
+		while ( iLeft )
+		{
+			int iSize = Min ( iLeft, MAX_PACKET_LEN );
+			m_tOut.SendLSBDword ( ((m_uPacketID++)<<24) + iSize );
+			m_tOut.SendBytes ( pBuf, iSize );
+			pBuf += iSize;
+			iLeft -= iSize;
+		}
 		Resize(0);
 		return true;
 	}
@@ -927,9 +937,6 @@ DEFINE_RENDER( QlCompressedInfo_t )
 	}
 }
 
-
-constexpr int MAX_PACKET_LEN = 0x00FFFFFFL; // 16777215 bytes, max low level packet size. Notice, also used as mask.
-
 // main sphinxql server
 void SqlServe ( std::unique_ptr<AsyncNetBuffer_c> pBuf )
 {
@@ -1009,10 +1016,19 @@ void SqlServe ( std::unique_ptr<AsyncNetBuffer_c> pBuf )
 			// inlined AsyncReadMySQLPacketHeader
 			if ( !pIn->ReadFrom ( iPacketLen+4 ))
 			{
+				auto iErr = sphSockPeekErrno ();
+				// if there was eof, we're done from
+				// comment from the SyncSockRead
+				// while we wait the start of the packet - is ok to quit but right way is to send MYSQL_COM_QUERY
+				bool bNotError = ( iErr==ECONNRESET && !iPacketLen );
 				sError.SetSprintf ( "bailing on failed MySQL header, %s", ( pIn->GetError() ? pIn->GetErrorMessage().cstr() : sphSockError() ) );
-				LogNetError ( sError.cstr() );
-				SendMysqlErrorPacket ( *pOut, uPacketID, nullptr, FromStr ( sError ), MYSQL_ERR_UNKNOWN_COM_ERROR );
-				pOut->Flush ();
+				// still want to log this even into logdebugv along with all other net events
+				LogNetError ( sError.cstr(), bNotError );
+				if ( !bNotError )
+				{
+					SendMysqlErrorPacket ( *pOut, uPacketID, nullptr, FromStr ( sError ), MYSQL_ERR_UNKNOWN_COM_ERROR );
+					pOut->Flush ();
+				}
 				return;
 			}
 			pIn->SetBufferPos ( iStartPacketPos + iPacketLen ); // will read at the end of the buffer
