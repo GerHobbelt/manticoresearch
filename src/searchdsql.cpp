@@ -370,6 +370,8 @@ enum class Option_e : BYTE
 	TOKEN_FILTER_OPTIONS,
 	NOT_ONLY_ALLOWED,
 	STORE,
+	PSEUDO_THRESH,
+	MAXMATCH_THRESH,
 
 	INVALID_OPTION
 };
@@ -383,7 +385,7 @@ void InitParserOption()
 		"idf", "ignore_nonexistent_columns", "ignore_nonexistent_indexes", "index_weights", "local_df", "low_priority",
 		"max_matches", "max_predicted_time", "max_query_time", "morphology", "rand_seed", "ranker", "retry_count",
 		"retry_delay", "reverse_scan", "sort_method", "strict", "sync", "threads", "token_filter", "token_filter_options",
-		"not_terms_only_allowed", "store" };
+		"not_terms_only_allowed", "store", "pseudo_thresh", "maxmatch_thresh" };
 
 	for ( BYTE i = 0u; i<(BYTE) Option_e::INVALID_OPTION; ++i )
 		g_hParseOption.Add ( (Option_e) i, dOptions[i] );
@@ -415,7 +417,7 @@ static bool CheckOption ( SqlStmt_e eStmt, Option_e eOption )
 			Option_e::LOCAL_DF, Option_e::LOW_PRIORITY, Option_e::MAX_MATCHES, Option_e::MAX_PREDICTED_TIME,
 			Option_e::MAX_QUERY_TIME, Option_e::MORPHOLOGY, Option_e::RAND_SEED, Option_e::RANKER,
 			Option_e::RETRY_COUNT, Option_e::RETRY_DELAY, Option_e::REVERSE_SCAN, Option_e::SORT_METHOD,
-			Option_e::THREADS, Option_e::TOKEN_FILTER, Option_e::NOT_ONLY_ALLOWED };
+			Option_e::THREADS, Option_e::TOKEN_FILTER, Option_e::NOT_ONLY_ALLOWED, Option_e::PSEUDO_THRESH, Option_e::MAXMATCH_THRESH };
 
 	static Option_e dInsertOptions[] = { Option_e::TOKEN_FILTER_OPTIONS };
 
@@ -472,15 +474,29 @@ bool SqlParser_c::CheckOption ( Option_e eOption ) const
 	return ::CheckOption ( GetSecondaryStmt(), eOption );
 }
 
+static auto fnFailer ( CSphString& sError )
+{
+	return [&sError] ( const char* sTemplate, ... ) {
+		va_list ap;
+		va_start ( ap, sTemplate );
+		sError.SetSprintfVa ( sTemplate, ap );
+		va_end ( ap );
+		return AddOption_e::FAILED;
+	};
+}
+
+#ifdef FAILED
+#undef FAILED
+#endif
+
 
 AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphString & sValue, int64_t iValue, SqlStmt_e eStmt, CSphString & sError )
 {
+	auto FAILED = fnFailer (sError);
+
 	auto eOpt = ParseOption ( sOpt );
 	if ( !CheckOption ( eStmt, eOpt ) )
-	{
-		sError.SetSprintf ( "unknown option '%s'", sOpt.cstr () );
-		return AddOption_e::FAILED;
-	}
+		return FAILED ( "unknown option '%s'", sOpt.cstr () );
 
 	const Option_e dIntegerOptions[] =
 	{	
@@ -488,12 +504,11 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 		Option_e::RETRY_DELAY, Option_e::IGNORE_NONEXISTENT_COLUMNS, Option_e::AGENT_QUERY_TIMEOUT, Option_e::MAX_PREDICTED_TIME,
 		Option_e::BOOLEAN_SIMPLIFY, Option_e::GLOBAL_IDF, Option_e::LOCAL_DF, Option_e::IGNORE_NONEXISTENT_INDEXES,
 		Option_e::STRICT_, Option_e::COLUMNS, Option_e::RAND_SEED, Option_e::SYNC, Option_e::EXPAND_KEYWORDS,
-		Option_e::THREADS, Option_e::NOT_ONLY_ALLOWED, Option_e::LOW_PRIORITY, Option_e::DEBUG_NO_PAYLOAD
+		Option_e::THREADS, Option_e::NOT_ONLY_ALLOWED, Option_e::LOW_PRIORITY, Option_e::DEBUG_NO_PAYLOAD,
+		Option_e::PSEUDO_THRESH, Option_e::MAXMATCH_THRESH
 	};
 
-	bool bFound = false;
-	for ( auto i : dIntegerOptions )
-		bFound |= i==eOpt;
+	bool bFound = ::any_of ( dIntegerOptions, [eOpt] ( auto i ) { return i == eOpt; } );
 
 	if ( !bFound )
 		return AddOption_e::NOT_FOUND;
@@ -533,6 +548,8 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 	case Option_e::NOT_ONLY_ALLOWED:			tQuery.m_bNotOnlyAllowed = iValue!=0; break;
 	case Option_e::RAND_SEED:					tQuery.m_iRandSeed = int64_t(DWORD(iValue)); break;
 	case Option_e::LOW_PRIORITY:				tQuery.m_bLowPriority = iValue!=0; break;
+	case Option_e::PSEUDO_THRESH:				tQuery.m_iPseudoThresh = iValue; break;
+	case Option_e::MAXMATCH_THRESH:				tQuery.m_iMaxMatchThresh = iValue; break;
 	default:
 		return AddOption_e::NOT_FOUND;
 	}
@@ -543,12 +560,11 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 
 AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphString & sVal, const std::function<CSphString ()> & fnGetUnescaped, SqlStmt_e eStmt, CSphString & sError )
 {
+	auto FAILED = fnFailer ( sError );
+
 	auto eOpt = ParseOption ( sOpt );
 	if ( !::CheckOption ( eStmt, eOpt ) )
-	{
-		sError.SetSprintf ( "unknown option '%s'", sOpt.cstr () );
-		return AddOption_e::FAILED;
-	}
+		return FAILED ( "unknown option '%s'", sOpt.cstr () );
 
 	// OPTIMIZE? hash possible sOpt choices?
 	switch ( eOpt )
@@ -565,17 +581,14 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 		if ( tQuery.m_eRanker==SPH_RANK_TOTAL )
 		{
 			if ( sVal==sphGetRankerName ( SPH_RANK_EXPR ) || sVal==sphGetRankerName ( SPH_RANK_EXPORT ) )
-			{
-				sError.SetSprintf ( "missing ranker expression (use OPTION ranker=expr('1+2') for example)" );
-				return AddOption_e::FAILED;
-			} else if ( sphPluginExists ( PLUGIN_RANKER, sVal.cstr() ) )
+				return FAILED ( "missing ranker expression (use OPTION ranker=expr('1+2') for example)" );
+			else if ( sphPluginExists ( PLUGIN_RANKER, sVal.cstr() ) )
 			{
 				tQuery.m_eRanker = SPH_RANK_PLUGIN;
 				tQuery.m_sUDRanker = sVal;
 			}
 
-			sError.SetSprintf ( "unknown ranker '%s'", sVal.cstr() );
-			return AddOption_e::FAILED;
+			return FAILED ( "unknown ranker '%s'", sVal.cstr() );
 		}
 		break;
 
@@ -586,10 +599,7 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 			return AddOption_e::FAILED;
 
 		if ( !dParams.GetLength() )
-		{
-			sError.SetSprintf ( "missing token filter spec string" );
-			return AddOption_e::FAILED;
-		}
+			return FAILED ( "missing token filter spec string" );
 
 		tQuery.m_sQueryTokenFilterLib = dParams[0];
 		tQuery.m_sQueryTokenFilterName = dParams[1];
@@ -598,8 +608,7 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 	break;
 
 	case Option_e::REVERSE_SCAN: //} else if ( sOpt=="reverse_scan" )
-		sError = "reverse_scan is deprecated";
-		return AddOption_e::FAILED;
+		return FAILED ( "reverse_scan is deprecated" );
 
 	case Option_e::COMMENT: //} else if ( sOpt=="comment" )
 		tQuery.m_sComment = fnGetUnescaped();
@@ -609,10 +618,7 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 		if ( sVal=="pq" )			tQuery.m_bSortKbuffer = false;
 		else if ( sVal=="kbuffer" )	tQuery.m_bSortKbuffer = true;
 		else
-		{
-			sError.SetSprintf ( "unknown sort_method=%s (known values are pq, kbuffer)", sVal.cstr() );
-			return AddOption_e::FAILED;
-		}
+			return FAILED ( "unknown sort_method=%s (known values are pq, kbuffer)", sVal.cstr() );
 		break;
 
 	case Option_e::IDF: //} else if ( sOpt=="idf" )
@@ -631,10 +637,7 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 			else if ( dOpts[i]=="tfidf_unnormalized" )
 				tQuery.m_bNormalizedTFIDF = false;
 			else
-			{
-				sError.SetSprintf ( "unknown flag %s in idf=%s (known values are plain, normalized, tfidf_normalized, tfidf_unnormalized)", dOpts[i].cstr(), sVal.cstr() );
-				return AddOption_e::FAILED;
-			}
+				return FAILED ( "unknown flag %s in idf=%s (known values are plain, normalized, tfidf_normalized, tfidf_unnormalized)", dOpts[i].cstr(), sVal.cstr() );
 		}
 	}
 	break;
@@ -644,10 +647,7 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 		if ( sVal=="none" )
 			tQuery.m_eExpandKeywords = QUERY_OPT_MORPH_NONE;
 		else
-		{
-			sError.SetSprintf ( "morphology could be only disabled with option none, got %s", sVal.cstr() );
-			return AddOption_e::FAILED;
-		}
+			return FAILED ( "morphology could be only disabled with option none, got %s", sVal.cstr() );
 		break;
 
 	case Option_e::STORE: //} else if ( sOpt=="store" )
@@ -664,12 +664,10 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, const CSphS
 
 AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, CSphVector<CSphNamedInt> & dNamed, SqlStmt_e eStmt, CSphString & sError )
 {
+	auto FAILED = fnFailer ( sError );
 	auto eOpt = ParseOption ( sOpt );
 	if ( !::CheckOption ( eStmt, eOpt ) )
-	{
-		sError.SetSprintf ( "unknown option '%s'", sOpt.cstr () );
-		return AddOption_e::FAILED;
-	}
+		return FAILED ( "unknown option '%s'", sOpt.cstr () );
 
 	switch ( eOpt )
 	{
@@ -685,12 +683,10 @@ AddOption_e AddOption ( CSphQuery & tQuery, const CSphString & sOpt, CSphVector<
 
 AddOption_e AddOptionRanker ( CSphQuery & tQuery, const CSphString & sOpt, const CSphString & sVal, const std::function<CSphString ()> & fnGetUnescaped, SqlStmt_e eStmt, CSphString & sError )
 {
+	auto FAILED = fnFailer ( sError );
 	auto eOpt = ParseOption ( sOpt );
 	if ( !::CheckOption ( eStmt, eOpt ) )
-	{
-		sError.SetSprintf ( "unknown option '%s'", sOpt.cstr () );
-		return AddOption_e::FAILED;
-	}
+		return FAILED ( "unknown option '%s'", sOpt.cstr () );
 
 	if ( eOpt==Option_e::RANKER )
 	{

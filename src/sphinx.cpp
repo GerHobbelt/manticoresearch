@@ -47,6 +47,7 @@
 #include "chunksearchctx.h"
 #include "std/lrucache.h"
 #include "indexfiles.h"
+#include "task_dispatcher.h"
 
 #include "secondarylib.h"
 
@@ -1134,8 +1135,9 @@ public:
 
 	int					Build ( const CSphVector<CSphSource*> & dSources, int iMemoryLimit, int iWriteBuffer, CSphIndexProgress & tProgress ) final; // fixme! build only
 
-	bool				LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath, CSphEmbeddedFiles & tEmbeddedFiles, FilenameBuilder_i * pFilenameBuilder, CSphString & sWarning );
-	bool				LoadHeader ( const char * sHeaderName, bool bStripPath, CSphEmbeddedFiles & tEmbeddedFiles, FilenameBuilder_i * pFilenameBuilder, CSphString & sWarning );
+	enum class LOAD_E { ParseError_e, GeneralError_e, Ok_e };
+	LOAD_E				LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath, CSphEmbeddedFiles & tEmbeddedFiles, FilenameBuilder_i * pFilenameBuilder, CSphString & sWarning );
+	LOAD_E				LoadHeader ( const char * sHeaderName, bool bStripPath, CSphEmbeddedFiles & tEmbeddedFiles, FilenameBuilder_i * pFilenameBuilder, CSphString & sWarning );
 
 	void				DebugDumpHeader ( FILE * fp, const char * sHeaderName, bool bConfig ) final;
 	void				DebugDumpDocids ( FILE * fp ) final;
@@ -1303,8 +1305,6 @@ private:
 
 	bool						SortDocidLookup ( int iFD, int nBlocks, int iMemoryLimit, int nLookupsInBlock, int nLookupsInLastBlock, CSphIndexProgress& tProgress ); // build only
 
-	bool						CollectQueryMvas ( const CSphVector<CSphSource*> & dSources, QueryMvaContainer_c & tMvaContainer ); // build only
-
 private:
 	bool						JuggleFile ( ESphExt eExt, CSphString & sError, bool bNeedSrc=true, bool bNeedDst=true ) const;
 	XQNode_t *					ExpandPrefix ( XQNode_t * pNode, CSphQueryResultMeta & tMeta, CSphScopedPayload * pPayloads, DWORD uQueryDebugFlags ) const;
@@ -1322,12 +1322,14 @@ private:
 	bool						AddRemoveFromDocstore ( const CSphSchema & tOldSchema, const CSphSchema & tNewSchema, CSphString & sError );
 
 	bool						Build_SetupInplace ( SphOffset_t & iHitsGap, int iHitsMax, int iFdHits ) const; // fixme! build only
-	bool						Build_SetupDocstore ( std::unique_ptr<DocstoreBuilder_i> & pDocstore, CSphBitvec & dStoredFields, CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage ); // fixme! build only
+	bool						Build_SetupDocstore ( std::unique_ptr<DocstoreBuilder_i> & pDocstore, CSphBitvec & dStoredFields, CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreFieldStorage, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage ); // fixme! build only
 	bool						Build_SetupBlobBuilder ( std::unique_ptr<BlobRowBuilder_i> & pBuilder ); // fixme! build only
 	bool						Build_SetupColumnar ( std::unique_ptr<columnar::Builder_i> & pBuilder, CSphBitvec & tColumnarAttrs ); // fixme! build only
 
-	void						Build_AddToDocstore ( DocstoreBuilder_i * pDocstoreBuilder, DocID_t tDocID, QueryMvaContainer_c & tMvaContainer, CSphSource & tSource, const CSphBitvec & dStoredFields, const CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage ); // fixme! build only
+	void						Build_AddToDocstore ( DocstoreBuilder_i * pDocstoreBuilder, DocID_t tDocID, QueryMvaContainer_c & tMvaContainer, CSphSource & tSource, const CSphBitvec & dStoredFields, const CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreFieldStorage, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage, const CSphVector<std::unique_ptr<OpenHash_T<uint64_t, uint64_t>>> & dJoinedOffsets, CSphReader & tJoinedReader ); // fixme! build only
 	bool						Build_StoreBlobAttrs ( DocID_t tDocId, SphOffset_t & tOffset, BlobRowBuilder_i & tBlobRowBuilderconst, QueryMvaContainer_c & tMvaContainer, AttrSource_i & tSource, bool bForceSource ); // fixme! build only
+	bool						Build_CollectQueryMvas ( const CSphVector<CSphSource*> & dSources, QueryMvaContainer_c & tMvaContainer ); // build only
+	bool						Build_CollectJoinedFields ( const CSphVector<CSphSource*> & dSources, CSphAutofile & tFile, CSphVector<std::unique_ptr<OpenHash_T<uint64_t, uint64_t>>> & dJoinedOffsets );
 
 	bool						SpawnReader ( DataReaderFactoryPtr_c & m_pFile, ESphExt eExt, DataReaderFactory_c::Kind_e eKind, int iBuffer, FileAccess_e eAccess );
 	bool						SpawnReaders();
@@ -2947,8 +2949,9 @@ int64_t CSphIndex_VLN::GetPseudoShardingMetric ( const VecTraits_T<const CSphQue
 		if ( m_pSIdx.get() && !i.m_sGroupBy.IsEmpty() )
 		{
 			const int TOOMANY_MAXMATCHES = 65536;
+			int iTooMany = i.m_iPseudoThresh ? i.m_iPseudoThresh : TOOMANY_MAXMATCHES;
 			int iCountDistinct = m_pSIdx.get()->GetCountDistinct ( i.m_sGroupBy.cstr() );
-			if ( iCountDistinct>=TOOMANY_MAXMATCHES )
+			if ( iCountDistinct>=iTooMany )
 				return -1;
 
 			// fixme! maybe let the index know it is running under pseudo_sharding so that it can apply the *1.5 boost for max_matches
@@ -4310,7 +4313,7 @@ private:
 };
 
 
-bool CSphIndex_VLN::CollectQueryMvas ( const CSphVector<CSphSource*> & dSources, QueryMvaContainer_c & tMvaContainer )
+bool CSphIndex_VLN::Build_CollectQueryMvas ( const CSphVector<CSphSource*> & dSources, QueryMvaContainer_c & tMvaContainer )
 {
 	CSphBitvec dQueryMvas ( m_tSchema.GetAttrsCount() );
 	for ( int i=0; i<m_tSchema.GetAttrsCount(); i++ )
@@ -4360,6 +4363,25 @@ bool CSphIndex_VLN::CollectQueryMvas ( const CSphVector<CSphSource*> & dSources,
 
 	return true;
 }
+
+
+bool CSphIndex_VLN::Build_CollectJoinedFields ( const CSphVector<CSphSource*> & dSources, CSphAutofile & tFile, CSphVector<std::unique_ptr<OpenHash_T<uint64_t, uint64_t>>> & dJoinedOffsets )
+{
+	for ( auto & pSource : dSources )
+	{
+		assert ( pSource );
+		if ( !pSource->Connect ( m_sLastError ) )
+			return false;
+
+		if ( !pSource->FetchJoinedFields ( tFile, dJoinedOffsets, m_sLastError ) )
+			return false;
+
+		pSource->Disconnect();
+	}
+
+	return true;
+}
+
 
 struct Mva32Uniq_fn
 {
@@ -5015,7 +5037,7 @@ bool CheckStoredFields ( const CSphSchema & tSchema, const CSphIndexSettings & t
 }
 
 
-bool CSphIndex_VLN::Build_SetupDocstore ( std::unique_ptr<DocstoreBuilder_i> & pDocstore, CSphBitvec & dStoredFields, CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage )
+bool CSphIndex_VLN::Build_SetupDocstore ( std::unique_ptr<DocstoreBuilder_i> & pDocstore, CSphBitvec & dStoredFields, CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreFieldStorage, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage )
 {
 	if ( !m_tSchema.HasStoredFields() && !m_tSchema.HasStoredAttrs() )
 		return true;
@@ -5037,6 +5059,7 @@ bool CSphIndex_VLN::Build_SetupDocstore ( std::unique_ptr<DocstoreBuilder_i> & p
 		if ( pBuilder->GetFieldId ( m_tSchema.GetAttr(i).m_sName, DOCSTORE_ATTR )!=-1 )
 			dStoredAttrs.BitSet(i);
 
+	dTmpDocstoreFieldStorage.Resize ( m_tSchema.GetFieldsCount() );
 	dTmpDocstoreAttrStorage.Resize ( m_tSchema.GetAttrsCount() );
 
 	pDocstore = std::move ( pBuilder );
@@ -5136,7 +5159,14 @@ static VecTraits_T<const BYTE> GetAttrForDocstore ( DocID_t tDocID, int iAttr, c
 }
 
 
-void CSphIndex_VLN::Build_AddToDocstore ( DocstoreBuilder_i * pDocstoreBuilder, DocID_t tDocID, QueryMvaContainer_c & tMvaContainer, CSphSource & tSource, const CSphBitvec & dStoredFields, const CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage )
+static uint64_t CreateJoinedKey ( DocID_t tDocID, int iEntry )
+{
+	uint64_t uRes = sphFNV64 ( &tDocID, sizeof(tDocID) );
+	return sphFNV64 ( &iEntry, sizeof(iEntry), uRes );
+}
+
+
+void CSphIndex_VLN::Build_AddToDocstore ( DocstoreBuilder_i * pDocstoreBuilder, DocID_t tDocID, QueryMvaContainer_c & tMvaContainer, CSphSource & tSource, const CSphBitvec & dStoredFields, const CSphBitvec & dStoredAttrs, CSphVector<CSphVector<BYTE>> & dTmpDocstoreFieldStorage, CSphVector<CSphVector<BYTE>> & dTmpDocstoreAttrStorage, const CSphVector<std::unique_ptr<OpenHash_T<uint64_t, uint64_t>>> & dJoinedOffsets, CSphReader & tJoinedReader )
 {
 	if ( !pDocstoreBuilder )
 		return;
@@ -5153,7 +5183,40 @@ void CSphIndex_VLN::Build_AddToDocstore ( DocstoreBuilder_i * pDocstoreBuilder, 
 		if ( !dStoredFields.BitGet(i) )
 			tDoc.m_dFields.Remove(iField);
 		else
+		{
+			// override with joined fields that were already prefetched
+			if ( dJoinedOffsets.GetLength() && dJoinedOffsets[i] )
+			{
+				uint64_t * pOffset;
+				int iEntry = 0;
+				auto & dTmp = dTmpDocstoreFieldStorage[i];
+				dTmp.Resize(0);
+				while ( ( pOffset = dJoinedOffsets[i]->Find ( CreateJoinedKey ( tDocID, iEntry ) ) ) != nullptr )
+				{
+					tJoinedReader.SeekTo ( *pOffset, 0 );
+
+					tJoinedReader.UnzipOffset();	// docid
+					tJoinedReader.UnzipInt();		// joined field id
+					if ( m_tSchema.GetField(i).m_bPayload )
+						tJoinedReader.UnzipInt();	// payload
+
+					DWORD uLength = tJoinedReader.UnzipInt();
+					DWORD uOldFieldLength = dTmp.GetLength();
+					DWORD uSpaceOffset = uOldFieldLength ? 1 : 0;
+					DWORD uNewFieldLength = uOldFieldLength + uLength + uSpaceOffset;
+					dTmp.Resize(uNewFieldLength);
+					tJoinedReader.GetBytes ( &dTmp[uOldFieldLength+uSpaceOffset], uLength );
+					if ( uSpaceOffset )
+						dTmp[uOldFieldLength] = ' ';
+
+					iEntry++;
+				}
+
+				tDoc.m_dFields[iField] = dTmp;
+			}
+
 			iField++;
+		}
 	}
 
 	VecTraits_T<BYTE> * pAddedAttrs = tDoc.m_dFields.AddN ( dStoredAttrs.BitCount() );
@@ -5205,6 +5268,9 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 	if ( !CheckStoredFields ( m_tSchema, m_tSettings, m_sLastError ) )
 		return 0;
 
+
+	bool bHaveJoined = pSource0->HasJoinedFields();
+
 	bool bHaveQueryMVAs = false;
 	for ( int i=0; i<m_tSchema.GetAttrsCount(); i++ )
 	{
@@ -5225,10 +5291,21 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 
 		// temporary storage for MVAs that we fetch from queries
 		// we might want to dump that to file later
-		if ( !CollectQueryMvas ( dSources, tQueryMvaContainer ) )
+		if ( !Build_CollectQueryMvas ( dSources, tQueryMvaContainer ) )
 			return 0;
 	}
 
+	CSphAutofile tTmpJoinedFields ( GetIndexFileName("tmp3"), SPH_O_NEW, m_sLastError, true );
+	CSphVector<std::unique_ptr<OpenHash_T<uint64_t, uint64_t>>> dJoinedOffsets;
+	CSphReader tJoinedReader;
+	if ( bHaveJoined )
+	{
+		pSource0->Disconnect();
+		if ( !Build_CollectJoinedFields ( dSources, tTmpJoinedFields, dJoinedOffsets ) )
+			return 0;
+
+		tJoinedReader.SetFile(tTmpJoinedFields);
+	}
 
 	int iFieldLens = m_tSchema.GetAttrId_FirstFieldLen();
 
@@ -5327,8 +5404,8 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 
 	std::unique_ptr<DocstoreBuilder_i> pDocstoreBuilder;
 	CSphBitvec dStoredFields, dStoredAttrs;
-	CSphVector<CSphVector<BYTE>> dTmpDocstoreAttrStorage;
-	if ( !Build_SetupDocstore ( pDocstoreBuilder, dStoredFields, dStoredAttrs, dTmpDocstoreAttrStorage ) )
+	CSphVector<CSphVector<BYTE>> dTmpDocstoreFieldStorage, dTmpDocstoreAttrStorage;
+	if ( !Build_SetupDocstore ( pDocstoreBuilder, dStoredFields, dStoredAttrs, dTmpDocstoreFieldStorage, dTmpDocstoreAttrStorage ) )
 		return 0;
 
 	std::unique_ptr<HistogramContainer_c> pHistogramContainer;
@@ -5360,8 +5437,7 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 	{
 		// connect and check schema
 		CSphSource * pSource = dSources[iSource];
-
-		bool bNeedToConnect = iSource>0 || bHaveQueryMVAs;
+		bool bNeedToConnect = iSource>0 || bHaveQueryMVAs || bHaveJoined;
 		if ( bNeedToConnect )
 		{
 			if ( !pSource->Connect ( m_sLastError )
@@ -5372,9 +5448,6 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 				return 0;
 			}
 		}
-
-		// joined filter
-		bool bGotJoined = pSource->HasJoinedFields();
 
 		// fallback blob source (for string and json )
 		if ( bGotPrevIndex )
@@ -5517,7 +5590,7 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 				nDocidLookupBlocks++;
 			}
 
-			Build_AddToDocstore ( pDocstoreBuilder.get(), tDocID, tQueryMvaContainer, *pSource, dStoredFields, dStoredAttrs, dTmpDocstoreAttrStorage );
+			Build_AddToDocstore ( pDocstoreBuilder.get(), tDocID, tQueryMvaContainer, *pSource, dStoredFields, dStoredAttrs, dTmpDocstoreFieldStorage, dTmpDocstoreAttrStorage, dJoinedOffsets, tJoinedReader );
 
 			// go on, loop next document
 		}
@@ -5532,7 +5605,7 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 			return 0;
 
 		// fetch joined fields
-		if ( bGotJoined )
+		if ( bHaveJoined )
 		{
 			// flush tail of regular hits
 			int iHits = int ( pHits - dHits.Begin() );
@@ -5548,10 +5621,12 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 				m_pDict->HitblockReset ();
 			}
 
+			tJoinedReader.SeekTo(0,0);
+
 			while (true)
 			{
 				// get next doc, and handle errors
-				ISphHits * pJoinedHits = pSource->IterateJoinedHits ( m_sLastError );
+				ISphHits * pJoinedHits = pSource->IterateJoinedHits ( tJoinedReader, m_sLastError );
 				if ( !pJoinedHits )
 					return 0;
 
@@ -8572,7 +8647,7 @@ void LoadIndexSettingsJson ( bson::Bson_c tNode, CSphIndexSettings & tSettings )
 }
 
 
-bool CSphIndex_VLN::LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath, CSphEmbeddedFiles & tEmbeddedFiles, FilenameBuilder_i * pFilenameBuilder, CSphString & sWarning )
+CSphIndex_VLN::LOAD_E CSphIndex_VLN::LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath, CSphEmbeddedFiles & tEmbeddedFiles, FilenameBuilder_i * pFilenameBuilder, CSphString & sWarning )
 {
 	const int MAX_HEADER_SIZE = 32768;
 	CSphFixedVector<BYTE> dCacheInfo ( MAX_HEADER_SIZE );
@@ -8581,14 +8656,14 @@ bool CSphIndex_VLN::LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath
 
 	CSphAutoreader rdInfo ( dCacheInfo.Begin(), MAX_HEADER_SIZE ); // to avoid mallocs
 	if ( !rdInfo.Open ( sHeaderName, m_sLastError ) )
-		return false;
+		return LOAD_E::GeneralError_e;
 
 	// magic header
 	const char* sFmt = CheckFmtMagic ( rdInfo.GetDword () );
 	if ( sFmt )
 	{
 		m_sLastError.SetSprintf ( sFmt, sHeaderName );
-		return false;
+		return LOAD_E::GeneralError_e;
 	}
 
 	// version
@@ -8596,7 +8671,7 @@ bool CSphIndex_VLN::LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath
 	if ( m_uVersion<=1 || m_uVersion>INDEX_FORMAT_VERSION )
 	{
 		m_sLastError.SetSprintf ( "%s is v.%u, binary is v.%u", sHeaderName, m_uVersion, INDEX_FORMAT_VERSION );
-		return false;
+		return LOAD_E::GeneralError_e;
 	}
 
 	// we don't support anything prior to v54
@@ -8604,7 +8679,7 @@ bool CSphIndex_VLN::LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath
 	if ( m_uVersion<uMinFormatVer )
 	{
 		m_sLastError.SetSprintf ( "indexes prior to v.%u are no longer supported (use index_converter tool); %s is v.%u", uMinFormatVer, sHeaderName, m_uVersion );
-		return false;
+		return LOAD_E::GeneralError_e;
 	}
 
 	// schema
@@ -8638,7 +8713,7 @@ bool CSphIndex_VLN::LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath
 
 	// tokenizer stuff
 	if ( !tTokSettings.Load ( pFilenameBuilder, rdInfo, tEmbeddedFiles, m_sLastError ) )
-		return false;
+		return LOAD_E::GeneralError_e;
 
 	if ( bStripPath )
 		StripPath ( tTokSettings.m_sSynonymsFile );
@@ -8646,7 +8721,7 @@ bool CSphIndex_VLN::LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath
 	StrVec_t dWarnings;
 	TokenizerRefPtr_c pTokenizer = Tokenizer::Create ( tTokSettings, &tEmbeddedFiles, pFilenameBuilder, dWarnings, m_sLastError );
 	if ( !pTokenizer )
-		return false;
+		return LOAD_E::GeneralError_e;
 
 	// dictionary stuff
 	CSphDictSettings tDictSettings;
@@ -8663,7 +8738,7 @@ bool CSphIndex_VLN::LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath
 		: sphCreateDictionaryCRC ( tDictSettings, &tEmbeddedFiles, pTokenizer, m_sIndexName.cstr(), bStripPath, m_tSettings.m_iSkiplistBlockSize, pFilenameBuilder, m_sLastError )};
 
 	if ( !pDict )
-		return false;
+		return LOAD_E::GeneralError_e;
 
 	if ( tDictSettings.m_sMorphFingerprint!=pDict->GetMorphDataFingerprint() )
 		sWarning.SetSprintf ( "different lemmatizer dictionaries (index='%s', current='%s')",
@@ -8690,7 +8765,7 @@ bool CSphIndex_VLN::LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath
 		pFieldFilter = sphCreateRegexpFilter ( tFieldFilterSettings, m_sLastError );
 
 	if ( !sphSpawnFilterICU ( pFieldFilter, m_tSettings, tTokSettings, sHeaderName, m_sLastError ) )
-		return false;
+		return LOAD_E::GeneralError_e;
 
 	SetFieldFilter ( std::move ( pFieldFilter ) );
 
@@ -8713,22 +8788,22 @@ bool CSphIndex_VLN::LoadHeaderLegacy ( const char * sHeaderName, bool bStripPath
 	if ( rdInfo.GetErrorFlag() )
 		m_sLastError.SetSprintf ( "%s: failed to parse header (unexpected eof)", sHeaderName );
 
-	return !rdInfo.GetErrorFlag();
+	return rdInfo.GetErrorFlag() ? LOAD_E::GeneralError_e : LOAD_E::Ok_e;
 }
 
-bool CSphIndex_VLN::LoadHeader ( const char* sHeaderName, bool bStripPath, CSphEmbeddedFiles & tEmbeddedFiles, FilenameBuilder_i * pFilenameBuilder, CSphString & sWarning )
+CSphIndex_VLN::LOAD_E CSphIndex_VLN::LoadHeader ( const char* sHeaderName, bool bStripPath, CSphEmbeddedFiles & tEmbeddedFiles, FilenameBuilder_i * pFilenameBuilder, CSphString & sWarning )
 {
 	using namespace bson;
 
 	CSphVector<BYTE> dData;
 	if ( !sphJsonParse ( dData, sHeaderName, m_sLastError ) )
-		return false;
+		return LOAD_E::ParseError_e;
 
 	Bson_c tBson ( dData );
 	if ( tBson.IsEmpty() || !tBson.IsAssoc() )
 	{
 		m_sLastError = "Something wrong read from json header - it is either empty, either not root object.";
-		return false;
+		return LOAD_E::ParseError_e;
 	}
 
 	// version
@@ -8736,7 +8811,7 @@ bool CSphIndex_VLN::LoadHeader ( const char* sHeaderName, bool bStripPath, CSphE
 	if ( m_uVersion<=1 || m_uVersion>INDEX_FORMAT_VERSION )
 	{
 		m_sLastError.SetSprintf ( "%s is v.%u, binary is v.%u", sHeaderName, m_uVersion, INDEX_FORMAT_VERSION );
-		return false;
+		return LOAD_E::GeneralError_e;
 	}
 
 	// we don't support anything prior to v54
@@ -8744,7 +8819,7 @@ bool CSphIndex_VLN::LoadHeader ( const char* sHeaderName, bool bStripPath, CSphE
 	if ( m_uVersion<uMinFormatVer )
 	{
 		m_sLastError.SetSprintf ( "indexes prior to v.%u are no longer supported (use index_converter tool); %s is v.%u", uMinFormatVer, sHeaderName, m_uVersion );
-		return false;
+		return LOAD_E::GeneralError_e;
 	}
 
 	// index stats
@@ -8769,7 +8844,7 @@ bool CSphIndex_VLN::LoadHeader ( const char* sHeaderName, bool bStripPath, CSphE
 	CSphTokenizerSettings tTokSettings;
 	// tokenizer stuff
 	if ( !tTokSettings.Load ( pFilenameBuilder, tBson.ChildByName ( "tokenizer_settings" ), tEmbeddedFiles, m_sLastError ) )
-		return false;
+		return LOAD_E::GeneralError_e;
 
 	// dictionary stuff
 	CSphDictSettings tDictSettings;
@@ -8794,14 +8869,14 @@ bool CSphIndex_VLN::LoadHeader ( const char* sHeaderName, bool bStripPath, CSphE
 	StrVec_t dWarnings;
 	TokenizerRefPtr_c pTokenizer = Tokenizer::Create ( tTokSettings, &tEmbeddedFiles, pFilenameBuilder, dWarnings, m_sLastError );
 	if ( !pTokenizer )
-		return false;
+		return LOAD_E::GeneralError_e;
 
 	DictRefPtr_c pDict { tDictSettings.m_bWordDict
 		? sphCreateDictionaryKeywords ( tDictSettings, &tEmbeddedFiles, pTokenizer, m_sIndexName.cstr(), bStripPath, m_tSettings.m_iSkiplistBlockSize, pFilenameBuilder, m_sLastError )
 		: sphCreateDictionaryCRC ( tDictSettings, &tEmbeddedFiles, pTokenizer, m_sIndexName.cstr(), bStripPath, m_tSettings.m_iSkiplistBlockSize, pFilenameBuilder, m_sLastError )};
 
 	if ( !pDict )
-		return false;
+		return LOAD_E::GeneralError_e;
 
 	if ( tDictSettings.m_sMorphFingerprint!=pDict->GetMorphDataFingerprint() )
 		sWarning.SetSprintf ( "different lemmatizer dictionaries (index='%s', current='%s')",
@@ -8835,7 +8910,7 @@ bool CSphIndex_VLN::LoadHeader ( const char* sHeaderName, bool bStripPath, CSphE
 	}
 
 	if ( !sphSpawnFilterICU ( pFieldFilter, m_tSettings, tTokSettings, sHeaderName, m_sLastError ) )
-		return false;
+		return LOAD_E::GeneralError_e;
 
 	SetFieldFilter ( std::move ( pFieldFilter ) );
 
@@ -8861,7 +8936,7 @@ bool CSphIndex_VLN::LoadHeader ( const char* sHeaderName, bool bStripPath, CSphE
 		s.m_dBigramWords.Sort();
 	}
 
-	return true;
+	return LOAD_E::Ok_e;
 }
 
 
@@ -8873,13 +8948,17 @@ void CSphIndex_VLN::DebugDumpHeader ( FILE * fp, const char * sHeaderName, bool 
 
 	CSphEmbeddedFiles tEmbeddedFiles;
 	CSphString sWarning;
-	if ( !LoadHeader ( sHeaderName, false, tEmbeddedFiles, pFilenameBuilder.get(), sWarning ) )
+	auto eRes = LoadHeader ( sHeaderName, false, tEmbeddedFiles, pFilenameBuilder.get(), sWarning );
+	if ( eRes == LOAD_E::ParseError_e )
 	{
-		fprintf ( fp, "\nIndex header format is not json, will try it as binary...\n" );
-		if ( !LoadHeaderLegacy ( sHeaderName, false, tEmbeddedFiles, pFilenameBuilder.get(), sWarning ) )
+		eRes = LoadHeaderLegacy ( sHeaderName, false, tEmbeddedFiles, pFilenameBuilder.get(), sWarning );
+		if ( eRes == LOAD_E::ParseError_e )
 			sphDie ( "failed to load header: %s", m_sLastError.cstr() );
 	}
+	if ( eRes == LOAD_E::GeneralError_e )
+		sphDie ( "failed to load header: %s", m_sLastError.cstr() );
 
+	assert ( eRes == LOAD_E::Ok_e );
 	if ( !sWarning.IsEmpty () )
 		fprintf ( fp, "WARNING: %s\n", sWarning.cstr () );
 
@@ -9297,15 +9376,24 @@ bool CSphIndex_VLN::Prealloc ( bool bStripPath, FilenameBuilder_i * pFilenameBui
 	CSphEmbeddedFiles tEmbeddedFiles;
 
 	// preload schema
-	if ( !LoadHeader ( GetIndexFileName ( SPH_EXT_SPH ).cstr(), bStripPath, tEmbeddedFiles, pFilenameBuilder, m_sLastWarning ) )
+	auto eRes = LoadHeader ( GetIndexFileName ( SPH_EXT_SPH ).cstr(), bStripPath, tEmbeddedFiles, pFilenameBuilder, m_sLastWarning ) ;
+	if ( eRes == LOAD_E::ParseError_e )
 	{
 		sphInfo ( "Index header format is not json, will try it as binary..." );
-		if ( !LoadHeaderLegacy ( GetIndexFileName ( SPH_EXT_SPH ).cstr(), bStripPath, tEmbeddedFiles, pFilenameBuilder, m_sLastWarning ) )
+		eRes = LoadHeaderLegacy ( GetIndexFileName ( SPH_EXT_SPH ).cstr(), bStripPath, tEmbeddedFiles, pFilenameBuilder, m_sLastWarning );
+		if ( eRes == LOAD_E::ParseError_e )
 		{
-			sphWarning ( "Unable to load header.." );
+			sphWarning ( "Unable to parse header... Error %s", m_sLastError.cstr() );
 			return false;
 		}
 	}
+	if ( eRes == LOAD_E::GeneralError_e )
+	{
+		sphWarning ( "Unable to load header... Error %s", m_sLastError.cstr() );
+		return false;
+	}
+
+	assert ( eRes == LOAD_E::Ok_e );
 
 	m_bIsEmpty = !m_iDocinfo;
 
@@ -10500,7 +10588,11 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 	if ( !iConcurrency )
 		iConcurrency = GetEffectiveDistThreads();
 
-	tClonableCtx.LimitConcurrency ( iConcurrency );
+	// pseudo-sharding scheduler
+	auto tDispatch = GetEffectivePseudoShardingDispatcherTemplate();
+	auto pDispatcher = Dispatcher::Make ( iJobs, iConcurrency, tDispatch );
+
+	tClonableCtx.LimitConcurrency ( pDispatcher->GetConcurrency() );
 
 	auto iStart = sphMicroTimer();
 	sphLogDebugv ( "Started: " INT64_FMT, sphMicroTimer()-iStart );
@@ -10508,18 +10600,26 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 	// because disk chunk search within the loop will switch the profiler state
 	SwitchProfile ( pProfiler, SPH_QSTATE_INIT );
 
+	if ( pProfiler )
+		pProfiler->m_iPseudoShards = iSplit;
+
 	std::atomic<bool> bInterrupt {false};
-	std::atomic<int32_t> iCurChunk { 0 };
+	auto fnCheckInterrupt = [&bInterrupt]() { return bInterrupt.load ( std::memory_order_relaxed ); };
+
 	Threads::Coro::ExecuteN ( tClonableCtx.Concurrency ( iJobs ), [&]
 	{
-		auto iChunk = iCurChunk.fetch_add ( 1, std::memory_order_acq_rel );
-		if ( iChunk>=iJobs || bInterrupt )
+		auto pSource = pDispatcher->MakeSource();
+		int iChunk = -1; // make it consumed
+
+		if ( !pSource->FetchTask ( iChunk ) || fnCheckInterrupt() )
 			return; // already nothing to do, early finish.
 
-		auto tCtx = tClonableCtx.CloneNewContext ( &iChunk );
+		auto tJobContext = tClonableCtx.CloneNewContext();
+		auto& tCtx = tJobContext.first;
+		tClonableCtx.SetJobOrder ( tJobContext.second, iChunk );
 		Threads::Coro::Throttler_c tThrottler ( session::GetThrottlingPeriodMS() );
 		int iTick=1; // num of times coro rescheduled by throttler
-		while ( !bInterrupt ) // some earlier job met error; abort.
+		while ( !fnCheckInterrupt() ) // some earlier job met error; abort.
 		{
 			myinfo::SetTaskInfo ( "%d ch %d:", iTick, iChunk );
 			auto & dLocalSorters = tCtx.m_dSorters;
@@ -10538,7 +10638,7 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 
 			CSphQuery tQueryWithExtraFilter = tQuery;
 			SetupSplitFilter ( tQueryWithExtraFilter.m_dFilters.Add(), iChunk, iJobs );
-			bInterrupt = !pIndex->MultiQuery ( tChunkResult, tQueryWithExtraFilter, dLocalSorters, tMultiArgs );
+			bInterrupt.store (!pIndex->MultiQuery ( tChunkResult, tQueryWithExtraFilter, dLocalSorters, tMultiArgs ), std::memory_order_relaxed);
 
 			if ( !iChunk )
 				tThMeta.MergeWordStats ( tChunkMeta );
@@ -10551,7 +10651,7 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 			if ( iChunk < iJobs-1 && sph::TimeExceeded ( tmMaxTimer ) )
 			{
 				tThMeta.m_sWarning = "query time exceeded max_query_time";
-				bInterrupt = true;
+				bInterrupt.store ( true, std::memory_order_relaxed );
 			}
 
 			if ( tThMeta.m_sWarning.IsEmpty() && !tChunkMeta.m_sWarning.IsEmpty() )
@@ -10560,12 +10660,12 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 			tThMeta.m_bTotalMatchesApprox |= tChunkMeta.m_bTotalMatchesApprox;
 			tThMeta.m_tIteratorStats.Merge ( tChunkMeta.m_tIteratorStats );
 
-			if ( bInterrupt && !tChunkMeta.m_sError.IsEmpty() )
+			if ( fnCheckInterrupt() && !tChunkMeta.m_sError.IsEmpty() )
 				// FIXME? maybe handle this more gracefully (convert to a warning)?
 				tThMeta.m_sError = tChunkMeta.m_sError;
 
-			iChunk = iCurChunk.fetch_add ( 1, std::memory_order_acq_rel );
-			if ( iChunk>=iJobs || bInterrupt )
+			iChunk = -1; // mark it consumed
+			if ( !pSource->FetchTask ( iChunk ) || fnCheckInterrupt() )
 				return; // all is done
 
 			// yield and reschedule every quant of time. It gives work to other tasks
@@ -10576,7 +10676,7 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 	});
 
 	tClonableCtx.Finalize();
-	return !bInterrupt;
+	return !fnCheckInterrupt();
 }
 
 
