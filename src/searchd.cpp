@@ -5956,7 +5956,9 @@ void SearchHandler_c::CalcThreadsPerIndex ( int iConcurrency )
 			assert ( tMetric.first>=0 );
 
 			tSplitData.m_iMetric = tMetric.first;
-			tSplitData.m_iThreadCap = tMetric.second;
+
+			bool bExplicitConcurrency = m_dNQueries.any_of ( []( auto & tQuery ){ return tQuery.m_iConcurrency>0; } );		
+			tSplitData.m_iThreadCap = bExplicitConcurrency ? 0 : tMetric.second;	// ignore thread cap if concurrency is explicitly specified
 		}
 		else
 		{
@@ -6155,7 +6157,7 @@ void SearchHandler_c::RunLocalSearches ()
 
 	// the context
 	ClonableCtx_T<LocalSearchRef_t, LocalSearchClone_t, Threads::ECONTEXT::UNORDERED> dCtx { m_tHook, pMainExtra, m_dNFailuresSet, m_dNAggrResults, m_dNResults };
-	auto pDispatcher = Dispatcher::Make ( iNumLocals, m_dNQueries.First().m_iCouncurrency, tDispatch, dCtx.IsSingle() );
+	auto pDispatcher = Dispatcher::Make ( iNumLocals, m_dNQueries.First().m_iConcurrency, tDispatch, dCtx.IsSingle() );
 	dCtx.LimitConcurrency ( pDispatcher->GetConcurrency() );
 
 	bool bSingle = pDispatcher->GetConcurrency()==1;
@@ -16730,7 +16732,7 @@ bool ClientSession_c::Execute ( Str_t sQuery, RowBuffer_i & tOut )
 				tStmt.m_tQuery.m_bExplicitMaxMatches = true;
 			}
 
-			tStmt.m_tQuery.m_iCouncurrency = 1;
+			tStmt.m_tQuery.m_iConcurrency = 1;
 		}
 	}
 
@@ -17900,7 +17902,7 @@ public:
 
 		// all went fine; swap them
 		sphLogDebug ( "all went fine; swap them" );
-		Binlog::NotifyIndexFlush ( m_szIndex, pIdx->m_iTID, false );
+		Binlog::NotifyIndexFlush ( pIdx->m_iTID, { m_szIndex, pIdx->GetIndexId() }, false, false );
 		g_pLocalIndexes->AddOrReplace ( pNewServed, m_szIndex );
 		sphInfo ( "rotating table '%s': success", m_szIndex );
 
@@ -17990,7 +17992,7 @@ bool RotateIndexMT ( ServedIndexRefPtr_c& pNewServed, const CSphString & sIndex,
 
 	// all went fine; swap them
 	sphLogDebug ( "all went fine; swap them" );
-	Binlog::NotifyIndexFlush ( sIndex.cstr(), pNewIndex->m_iTID, false );
+	Binlog::NotifyIndexFlush ( pNewIndex->m_iTID, { sIndex.cstr(), pNewIndex->GetIndexId() }, false, false );
 	g_pLocalIndexes->AddOrReplace ( pNewServed, sIndex );
 	sphInfo ( "rotating table '%s': success", sIndex.cstr() );
 	return true;
@@ -20013,6 +20015,7 @@ static void ConfigureAndPreloadOnStartup ( const CSphConfig & hConf, const StrVe
 
 	InitPersistentPool();
 
+	int64_t iIndexId = -1;
 	ServedSnap_t hLocal = g_pLocalIndexes->GetHash();
 	for ( const auto& tIt : *hLocal )
 	{
@@ -20026,8 +20029,14 @@ static void ConfigureAndPreloadOnStartup ( const CSphConfig & hConf, const StrVe
 
 			if ( sWarning.Length() )
 				sphWarning ( "%s", sWarning.cstr() );
+
+			iIndexId = Max ( iIndexId, pIdx->GetIndexId() );
 		}
 	}
+
+	// set index_id to max of existed indexes after all indexes were loaded
+	if ( iIndexId!=-1 )
+		SetIndexId ( iIndexId + 1 );
 
 	// set index cluster name for check
 	for ( const ClusterDesc_t & tClusterDesc : GetClustersInt() )
@@ -20834,7 +20843,7 @@ int WINAPI ServiceMain ( int argc, char **argv ) EXCLUDES (MainThread)
 	if ( bOptPIDFile && !bWatched )
 		sphLockUn ( g_iPidFD );
 
-	Binlog::Configure ( hSearchd, bTestMode, uReplayFlags );
+	Binlog::Configure ( hSearchd, bTestMode, uReplayFlags, IsConfigless() );
 	SetUidShort ( bTestMode );
 	InitDocstore ( g_iDocstoreCache );
 	InitSkipCache ( g_iSkipCache );
