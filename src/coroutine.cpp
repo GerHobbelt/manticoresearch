@@ -539,12 +539,27 @@ public:
 	inline void SetTimePeriodUS ( int64_t tmTimePointPeriodUS )
 	{
 		m_tmRuntimePeriodUS = tmTimePointPeriodUS;
-		CheckEngageTimer( TimePoint_e::fromresume );
+		CheckEngageTimer ( TimePoint_e::fromresume );
+	}
+
+	inline int64_t GetTimePeriodUS() const noexcept
+	{
+		return m_tmRuntimePeriodUS;
 	}
 
 	inline bool RuntimeExceeded() const
 	{
 		return sph::TimeExceeded ( m_tmNextTimePointUS );
+	}
+
+	inline const int64_t& GetNextTimePointUS() const noexcept
+	{
+		return m_tmNextTimePointUS;
+	}
+
+	inline int64_t GetRestPeriodUS() const noexcept
+	{
+		return m_tmNextTimePointUS - sph::MicroTimer();
 	}
 
 	inline void RestartRuntime() noexcept
@@ -638,6 +653,11 @@ int ID() noexcept
 bool RuntimeExceeded() noexcept
 {
 	return Worker()->RuntimeExceeded();
+}
+
+const int64_t& GetNextTimePointUS() noexcept
+{
+	return Worker()->GetNextTimePointUS();
 }
 
 void RestartRuntime() noexcept
@@ -853,7 +873,7 @@ void ExecuteN ( int iConcurrency, Threads::Handler&& fnWorker )
 	WaitForDeffered ( std::move ( dWaiter ));
 }
 
-int tmThrotleTimeQuantumMs; // how long task may work before rescheduling (in milliseconds)
+int tmThrotleTimeQuantumMs = tmDefaultThrotleTimeQuantumMs; // how long task may work before rescheduling (in milliseconds)
 
 void SetDefaultThrottlingPeriodMS ( int tmPeriodMs )
 {
@@ -865,6 +885,11 @@ void SetThrottlingPeriod ( int tmPeriodMs )
 	if ( tmPeriodMs < 0 )
 		tmPeriodMs = tmThrotleTimeQuantumMs;
 	Worker()->SetTimePeriodUS ( tmPeriodMs * 1000 );
+}
+
+int64_t GetThrottlingPeriodUS ()
+{
+	return Worker()->GetTimePeriodUS ();
 }
 
 void RescheduleAndKeepCrashQuery()

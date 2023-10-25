@@ -161,6 +161,7 @@ protected:
 	CSphVector<ExtHit_t>	m_dHits;
 	bool					m_bQPosReverse {false};
 	int						m_iAtomPos {0};		///< we now need it on this level for tricks like expanded keywords within phrases
+	const int64_t&			m_iCheckTimePoint { Threads::Coro::GetNextTimePointUS() };
 
 	virtual void			CollectHits ( const ExtDoc_t * pDocs ) = 0;
 
@@ -1657,7 +1658,7 @@ const ExtDoc_t * ExtPayload_T<USE_BM25>::GetDocsChunk()
 	}
 
 	// interrupt by sitgerm
-	if ( Threads::Coro::RuntimeExceeded() )
+	if ( sph::TimeExceeded ( m_iCheckTimePoint ) )
 	{
 		if ( g_bInterruptNow )
 		{
@@ -2010,10 +2011,10 @@ const ExtDoc_t * ExtTerm_T<USE_BM25>::GetDocsChunk()
 	{
 		if ( m_pWarning )
 			*m_pWarning = "predicted query time exceeded max_predicted_time";
-		return NULL;
+		return nullptr;
 	}
 
-	if ( Threads::Coro::RuntimeExceeded() )
+	if ( sph::TimeExceeded ( m_iCheckTimePoint ) )
 	{
 		// interrupt by sitgerm
 		if ( g_bInterruptNow )
@@ -3036,24 +3037,24 @@ const ExtDoc_t * ExtMultiAnd_T<USE_BM25,TEST_FIELDS>::GetDocsChunk()
 	{
 		if ( m_pWarning )
 			*m_pWarning = "predicted query time exceeded max_predicted_time";
-		return NULL;
+		return nullptr;
 	}
 
-	if ( Threads::Coro::RuntimeExceeded() )
+	if ( sph::TimeExceeded ( m_iCheckTimePoint ) )
 	{
 		// interrupt by sitgerm
 		if ( g_bInterruptNow )
 		{
 			if ( m_pWarning )
 				*m_pWarning = "Server shutdown in progress";
-			return NULL;
+			return nullptr;
 		}
 
 		if ( session::GetKilled() )
 		{
 			if ( m_pWarning )
 				*m_pWarning = "query was killed";
-			return NULL;
+			return nullptr;
 		}
 		Threads::Coro::RescheduleAndKeepCrashQuery();
 	}
@@ -5894,10 +5895,10 @@ const ExtDoc_t * ExtNodeCached_c::GetDocsChunk()
 	{
 		if ( m_pWarning )
 			*m_pWarning = "query time exceeded max_query_time";
-		return NULL;
+		return nullptr;
 	}
 
-	if ( Threads::Coro::RuntimeExceeded() )
+	if ( sph::TimeExceeded ( m_iCheckTimePoint ) )
 	{
 		if ( session::GetKilled() )
 		{

@@ -2,7 +2,7 @@
 
 ### SQL commands
 ##### Schema management
-* [CREATE TABLE IF NOT EXISTS](Creating_an_index/Local_indexes/Plain_and_real-time_index_settings.md#General-syntax-of-CREATE-TABLE) - Creates new table
+* [CREATE TABLE](Creating_an_index/Local_indexes/Plain_and_real-time_index_settings.md#General-syntax-of-CREATE-TABLE) - Creates new table
 * [CREATE TABLE LIKE](Creating_an_index/Local_indexes/Plain_and_real-time_index_settings.md#Creating-a-real-time-index-online-via-CREATE-TABLE) - Creates table using another one as a template
 * [DESCRIBE](Listing_indexes.md#DESCRIBE) - Prints out table's field list and their types
 * [ALTER TABLE](Updating_table_schema_and_settings.md) - Changes table schema / settings
@@ -502,6 +502,7 @@ indextool <command> [options]
 * [--dumpdict](Miscellaneous_tools.md#indextool) - Dumps index dictionary
 * [--dumpdocids](Miscellaneous_tools.md#indextool) - Dumps document IDs by index name
 * [--dumphitlist](Miscellaneous_tools.md#indextool) - Dumps all occurrences of the given keyword/id in the given index
+* [--docextract](Miscellaneous_tools.md#indextool) - Runs index check pass of whole dictionary/docs/hits, and collects all the words and hits belonging to requested document
 * [--fold](Miscellaneous_tools.md#indextool) - Tests tokenization based on index's settings
 * [--htmlstrip](Miscellaneous_tools.md#indextool) - Filters STDIN using HTML stripper settings for the given index
 * [--mergeidf](Miscellaneous_tools.md#indextool) - Merges several .idf files into a single one
