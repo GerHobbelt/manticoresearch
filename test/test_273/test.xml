@@ -3,7 +3,7 @@
   <Name>SphinxQL: additional stuff over rt index</Name>
 	<requires>
 		<force-rt/>
-		<non-columnar/>
+		<columnar/>
 	</requires>
 	<skip_indexer/>
 <Config>
@@ -20,6 +20,7 @@ index indexrt
 	rt_attr_uint	= gid
 	rt_field		= text
 	stored_fields = text
+	columnar_attrs 	= id
 }
 
 </Config>

@@ -1490,7 +1490,8 @@ class SphinxConfig
 	private $_subtest;
 	private $_subtestcount;
 	private $_results;
-	private $_results_model;
+	public $_results_model;
+    public $_shadow_results_model;
 	private $_prereqs;
 	private $_config;				///< config DOM node
 	private $_indexdata;			///< data for use "insert into" instead of run indexer
@@ -1515,6 +1516,7 @@ class SphinxConfig
 		$this->_sphqueries		= array ();
 		$this->_results			= array ();
 		$this->_results_model	= array ();
+        $this->_shadow_results_model	= array ();
 		$this->_query_attributes = array ();
 		$this->_indexer_runs	= array ();
 		$this->_db_create		= array ();
@@ -1618,6 +1620,7 @@ class SphinxConfig
 
 		if ( IsModelGenMode () )
 			array_push ( $this->_results_model, $failed );
+        array_push ( $this->_shadow_results_model, $failed );
 	}
 
 	
@@ -2264,12 +2267,14 @@ class SphinxConfig
                 [
                     '/error when sending data: WSA error 10057/', // windows
                     '/connect and query timed out/', // also windows
-                    '/receiving failure .*$/' // linux (errno 111) and mac (errno 64)
+                    '/receiving failure .*$/', // linux (errno 111) and mac (errno 64)
+                    '/end of file/', // fresh bison from homebrew emits 'end of file' instead of '$end'
                 ],
                 [
                     "receiving failure (refused or timedout, substituted)",
                     "receiving failure (refused or timedout, substituted)",
-                    "receiving failure (refused or timedout, substituted)"
+                    "receiving failure (refused or timedout, substituted)",
+                    "\$end",
                 ], $s );
 		return $s;
 	}
@@ -2286,8 +2291,12 @@ class SphinxConfig
 	function PickResult ( $query_result )
     {
         array_push($this->_results, $query_result);
-        if (IsModelGenMode() && !result_must_be_skipped($query_result))
-            $this->_results_model[$this->SubtestNo()][] = $query_result;
+        if ( !result_must_be_skipped($query_result))
+        {
+            if (IsModelGenMode())
+                $this->_results_model[$this->SubtestNo()][] = $query_result;
+            $this->_shadow_results_model[$this->SubtestNo()][] = $query_result;
+        }
     }
 
 	function PickResults( $query_results )
@@ -2295,6 +2304,7 @@ class SphinxConfig
         $this->_results = $query_results;
         if ( IsModelGenMode () )
             array_push ( $this->_results_model, $query_results );
+        array_push ( $this->_shadow_results_model, $query_results );
     }
 
 	function FixupJsonTimeAndFloats ( &$query_result, &$error, $keep_json_ctrls=false )
@@ -3157,12 +3167,23 @@ class SphinxConfig
 		return 1;
 	}
 
+    function FixupErrorMessageInResult($result)
+    {
+        if ( @is_array($result) && @array_key_exists ( "error", $result ) && $result["error"] ) {
+            $origerror = $result["error"];
+            $fixup = $this->FixupErrorMessage(1064,$origerror);
+            if ( $fixup!=$origerror )
+                $result["error"] = $fixup;
+        }
+        return $result;
+    }
+
 	function ImportantResults()
     {
         $_results			= array ();
         foreach ( $this->_results as $result )
             if ( !result_must_be_skipped ($result) )
-                $_results[] = $result;
+                $_results[] = $this->FixupErrorMessageInResult($result);
         return $_results;
     }
 
@@ -3806,8 +3827,10 @@ class SphinxConfig
 					foreach ($sql_file_fields as $ff)
 					{
 						$index = $insert_schema[$ff]; // FIXME? what if it does not exist?
-						for ($i=0; $i<count($insert_values); $i++)
-							$insert_values[$i][$index] = @file_get_contents($insert_values[$i][$index]); // FIXME? handle errors
+						for ($i=0; $i<count($insert_values); $i++) {
+                            if ( $insert_values[$i][$index]!='' )
+                                $insert_values[$i][$index] = @file_get_contents($insert_values[$i][$index]); // FIXME? handle errors
+                        }
 					}
 
 
@@ -4079,29 +4102,26 @@ class SphinxConfig
 	}
 
 
-	function WriteModel ( $filename )
+	function WriteModel ( $filename, $model )
 	{
-		if ( IsModelGenMode () )
-				{
-					$result = serialize ( $this->_results_model );
-					if (PHP_INT_SIZE>4)
-					{
-						$keys = array();
-						$this->FixSerialize64 ( $this->_results_model, $keys );
-						if ( sizeof($keys)>0 )
-						{
-							$findes=array();
-							$replaces=array();
-							foreach ($keys as $key)
-							{
-								$findes[]="i:$key";
-								$replaces[]="s:".strlen($key).":\"$key\"";
-							}
-							$result = str_replace ( $findes, $replaces, $result );
-						}
-					}
-					file_put_contents ( $filename, $result );
-				}
+        $result = serialize ( $model );
+        if (PHP_INT_SIZE>4)
+        {
+            $keys = array();
+            $this->FixSerialize64 ( $model, $keys );
+            if ( sizeof($keys)>0 )
+            {
+                $findes=array();
+                $replaces=array();
+                foreach ($keys as $key)
+                {
+                    $findes[]="i:$key";
+                    $replaces[]="s:".strlen($key).":\"$key\"";
+                }
+                $result = str_replace ( $findes, $replaces, $result );
+            }
+        }
+        file_put_contents ( $filename, $result );
 	}
 
 
@@ -4525,6 +4545,7 @@ function RunTest ( $test_dir, $skipdemo, $usemarks )
 	$report_path = "$res_path/report";
 	$report_file = "$report_path.txt";
 	$report = fopen ( $report_file, "w" );
+    $shadow_model_file = "$report_path.bin";
 
 	$example_file = scriptdir("examples.txt");
 	$examples = [];
@@ -4736,6 +4757,8 @@ function RunTest ( $test_dir, $skipdemo, $usemarks )
 			$config->WriteReferenceResultsDiff ( $report );
 		}
 
+        $config->WriteModel($shadow_model_file, $config->_shadow_results_model);
+
 		$config->SubtestFinished ();
 	}
 	while ( $config->CreateNextConfig () );
@@ -4757,7 +4780,7 @@ function RunTest ( $test_dir, $skipdemo, $usemarks )
 		$variant = $config->CheckVariants ( $report_path."_variant.txt" );
 		if ($variant===false)
 		{
-			$config->WriteModel ( $model_file );
+			$config->WriteModel ( $model_file, $config->_results_model );
 			printf ( "$prefix done; %d/%d subtests run\n", $config->SubtestNo(), $nsubtests );
 		} else
 		{
