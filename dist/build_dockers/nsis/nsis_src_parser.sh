@@ -26,7 +26,7 @@ fi
 
 DEPS_PATH="deps.txt"
 BUDDY_COMMIT_SHA=$(cat $DEPS_PATH | grep buddy | cut -d" " -f4)
-EXECUTOR_COMMIT_SHA=$(cat $DEPS_PATH | grep executor | cut -d" " -f4)
+EXECUTOR_COMMIT_SHA=$(cat $DEPS_PATH | grep executor-win | cut -d" " -f4)
 MCL_COMMIT_SHA=$(cat $DEPS_PATH | grep mcl | cut -d" " -f4)
 
 for DESTINATION in "${DESTINATION_REPOS[@]}"; do

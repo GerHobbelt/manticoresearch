@@ -5654,7 +5654,7 @@ static StrVec_t GetDefaultSchema ( const CSphIndex* pIndex )
 SphQueueSettings_t SearchHandler_c::MakeQueueSettings ( const CSphIndex * pIndex, int iMaxMatches, bool bForceSingleThread, ISphExprHook * pHook ) const
 {
 	auto& tSess = session::Info();
-	SphQueueSettings_t tQS ( pIndex->GetMatchSchema (), m_pProfile, tSess.m_pSqlRowBuffer, &tSess.m_pSessionOpaque );
+	SphQueueSettings_t tQS ( pIndex->GetMatchSchema (), m_pProfile, tSess.m_pSqlRowBuffer, &tSess.m_pSessionOpaque1, &tSess.m_pSessionOpaque2 );
 	tQS.m_bComputeItems = true;
 	tQS.m_pCollection = m_pCollectedDocs;
 	tQS.m_pHook = pHook;
@@ -5927,14 +5927,16 @@ void SearchHandler_c::CalcThreadsPerIndex ( int iConcurrency )
 	if ( !iConcurrency )
 		iConcurrency = g_iThreads;
 
+	int iBusyWorkers = Max ( GlobalWorkPool()->CurTasks() - 1, 0 ); // ignore current task
+	int iAvailableWorkers = Max ( iConcurrency-iBusyWorkers, 1 );
+
 	CSphVector<CSphVector<int64_t>> dCountDistinct;
 	PopulateCountDistinct ( dCountDistinct );
 
-	int iMaxThreadsPerIndex = CalcMaxThreadsPerIndex ( iConcurrency );
+	int iMaxThreadsPerIndex = CalcMaxThreadsPerIndex ( iAvailableWorkers );
 
 	CSphVector<SplitData_t> dSplitData ( m_dLocal.GetLength() );
-
-	// FIXME! what about PQ?
+	
 	int iEnabledIndexes = 0;
 	ARRAY_FOREACH ( iLocal, m_dLocal )
 	{
@@ -5965,10 +5967,10 @@ void SearchHandler_c::CalcThreadsPerIndex ( int iConcurrency )
 		}
 	}
 
-	if ( iConcurrency>iEnabledIndexes )
+	if ( iAvailableWorkers>iEnabledIndexes )
 	{
 		IntVec_t dThreads;
-		DistributeThreadsOverIndexes ( dThreads, dSplitData, iConcurrency );
+		DistributeThreadsOverIndexes ( dThreads, dSplitData, iAvailableWorkers );
 		ARRAY_FOREACH ( i, dThreads )
 			m_dPSInfo[i].m_iThreads = dThreads[i];
 	}
@@ -10051,7 +10053,8 @@ static void SendMysqlPercolateReply ( RowBuffer_i & tOut, const CPqResult & tRes
 			tOut.PutString ( tDesc.m_sFilters );
 		}
 
-		tOut.Commit ();
+		if ( !tOut.Commit() )
+			return;
 	}
 
 	tOut.Eof ( false, iWarns );
@@ -11379,7 +11382,8 @@ void HandleMysqlCallSnippets ( RowBuffer_i & tOut, SqlStmt_t & tStmt )
 	{
 		FixupResultTail ( i.m_dResult );
 		tOut.PutArray ( i.m_dResult );
-		tOut.Commit();
+		if ( !tOut.Commit() )
+			break;
 	}
 
 	tOut.Eof();
@@ -11580,7 +11584,8 @@ void HandleMysqlCallKeywords ( RowBuffer_i & tOut, SqlStmt_t & tStmt, CSphString
 			snprintf ( sBuf, sizeof(sBuf), "%d", dKeywords[i].m_iHits );
 			tOut.PutString ( sBuf );
 		}
-		tOut.Commit();
+		if ( !tOut.Commit() )
+			break;
 	}
 
 	// put network errors and warnings to meta as warning
@@ -11798,7 +11803,8 @@ void HandleMysqlCallSuggest ( RowBuffer_i & tOut, SqlStmt_t & tStmt, bool bQuery
 			sBuf << (const char*) tRes.m_dBuf.Begin() + dMatched.m_iNameOff;
 		tOut.PutString ( "suggests" );
 		tOut.PutString ( sBuf.cstr() );
-		tOut.Commit();
+		if ( !tOut.Commit() )
+			return;
 
 		if ( tArgs.m_bResultStats )
 		{
@@ -11808,15 +11814,16 @@ void HandleMysqlCallSuggest ( RowBuffer_i & tOut, SqlStmt_t & tStmt, bool bQuery
 				sBuf.Appendf ( "%d", dMatched.m_iDistance );
 			tOut.PutString ( "distance" );
 			tOut.PutString ( sBuf.cstr () );
-			tOut.Commit ();
-
+			if ( !tOut.Commit() )
+				return;
 			sBuf.Clear ();
 			sBuf.StartBlock ( "," );
 			for ( auto &dMatched : tRes.m_dMatched )
 				sBuf.Appendf ( "%d", dMatched.m_iDocs );
 			tOut.PutString ( "docs" );
 			tOut.PutString ( sBuf );
-			tOut.Commit ();
+			if ( !tOut.Commit() )
+				return;
 		}
 	} else
 	{
@@ -11849,7 +11856,8 @@ void HandleMysqlCallSuggest ( RowBuffer_i & tOut, SqlStmt_t & tStmt, bool bQuery
 				tOut.PutNumAsString ( tWord.m_iDistance );
 				tOut.PutNumAsString ( tWord.m_iDocs );
 			}
-			tOut.Commit();
+			if ( !tOut.Commit() )
+				return;
 		}
 	}
 
@@ -12398,7 +12406,8 @@ void HandleMysqlShowPlugins ( RowBuffer_i & tOut, SqlStmt_t & )
 		tOut.PutString ( p.m_sLib );
 		tOut.PutNumAsString ( p.m_iUsers );
 		tOut.PutString ( p.m_sExtra );
-		tOut.Commit();
+		if ( !tOut.Commit() )
+		return;
 	}
 	tOut.Eof();
 }
@@ -13351,7 +13360,8 @@ void SendMysqlSelectResult ( RowBuffer_i & dRows, const AggrResult_t & tRes, boo
 			dRows.PutString ( *pQueryColumn );
 		}
 
-		dRows.Commit();
+		if ( !dRows.Commit() )
+			return;
 	}
 
 	if ( bReturnZeroCount )
@@ -15790,7 +15800,7 @@ void HandleMysqlShowProfile ( RowBuffer_i & tOut, const QueryProfile_c & p, bool
 	}
 
 	char sTime[32];
-	for ( int i=0; i<SPH_QSTATE_TOTAL; i++ )
+	for ( int i=0; i<SPH_QSTATE_TOTAL; ++i )
 	{
 		if ( p.m_dSwitches[i]<=0 )
 			continue;
@@ -15802,7 +15812,8 @@ void HandleMysqlShowProfile ( RowBuffer_i & tOut, const QueryProfile_c & p, bool
 			tOut.PutFloatAsString ( 100.0f * p.m_tmTotal[i]/tmTotal, "%.2f" );
 		else
 			tOut.PutString ( "INF" );
-		tOut.Commit();
+		if ( !tOut.Commit() )
+			return;
 	}
 	snprintf ( sTime, sizeof(sTime), "%d.%06d", int(tmTotal/1000000), int(tmTotal%1000000) );
 	tOut.PutString ( "total" );
@@ -16537,7 +16548,13 @@ void HandleMysqlFreezeIndexes ( RowBuffer_i& tOut, const CSphString& sIndexes, C
 	tOut.HeadColumn ( "normalized" );
 	tOut.HeadEnd();
 
-	dIndexFiles.for_each ( [&] ( const auto& sFile ) { tOut.PutString (sFile); tOut.PutString (RealPath (sFile)); tOut.Commit(); } );
+	for ( const auto& sFile : dIndexFiles )
+	{
+		tOut.PutString ( sFile );
+		tOut.PutString ( RealPath ( sFile ) );
+		if ( !tOut.Commit() )
+			return;
+	};
 	tOut.Eof ( false, iWarnings );
 }
 
@@ -19843,7 +19860,8 @@ static void DumpSettingsSection ( const CSphConfigSection & hNode, const char * 
 			else
 				tOut.PutString ( pVal->strval() );
 
-			tOut.Commit();
+			if ( !tOut.Commit() )
+				return;
 
 			pVal = pVal->m_pNext;
 		} while ( pVal );

@@ -58,7 +58,8 @@ public:
 	Profile_e			m_eProfile { Profile_e::NONE };
 	bool m_bPersistent = false;
 	RowBuffer_i * 		m_pSqlRowBuffer = nullptr;
-	void*				m_pSessionOpaque = nullptr;
+	void*				m_pSessionOpaque1 = nullptr;
+	void*				m_pSessionOpaque2 = nullptr;
 	static std::atomic<int> m_iClients;
 	static std::atomic<int> m_iVips;
 
@@ -181,6 +182,7 @@ namespace session {
 	inline bool GetReadOnly() { return ClientTaskInfo_t::Info().GetReadOnly(); }
 
 	inline bool GetKilled() { return ClientTaskInfo_t::Info().GetKilled(); }
+	inline void SetKilled ( bool bKilled ) { ClientTaskInfo_t::Info().SetKilled(bKilled); }
 
 	inline void SetThrottlingPeriodMS ( int iThrottlingPeriodMS ) { ClientTaskInfo_t::Info().SetThrottlingPeriodMS ( iThrottlingPeriodMS ); }
 	inline int GetThrottlingPeriodMS () { return ClientTaskInfo_t::Info().GetThrottlingPeriodMS(); }
