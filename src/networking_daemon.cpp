@@ -162,11 +162,12 @@ private:
 
 	void TerminateSessions() REQUIRES ( NetPoollingThread ) NO_THREAD_SAFETY_ANALYSIS
 	{
-		sphLogDebug ( "TerminateSessions() (%p) invoked", this );
+		sphLogDebugv ( "TerminateSessions() (%p) invoked", this );
 		assert ( m_dWorkInternal.IsEmpty () );
 
 		m_pPoll->ProcessAll( [this] ( NetPollEvent_t * pWork ) NO_THREAD_SAFETY_ANALYSIS
 		{
+			SafeAddRef ( pWork );
 			m_dWorkExternal.Add ( (ISphNetAction*) pWork );
 		});
 
@@ -175,7 +176,6 @@ private:
 		{
 			// deal with closed sockets which lives exclusively in m_pPoll (and so, would be removed immediately on RemoveEvent() )
 			CSphRefcountedPtr<ISphNetAction> pWorkKeeper { pWork };
-			SafeAddRef ( pWork );
 
 			m_pPoll->RemoveEvent ( pWork );
 			pWork->NetLoopDestroying();
@@ -207,6 +207,7 @@ private:
 		m_dWorkInternal.for_each ( [&] ( ISphNetAction* pWork ) REQUIRES ( NetPoollingThread ) {
 			assert ( pWork );
 			m_pPoll->SetupEvent ( pWork );
+			pWork->Release();
 		} );
 		m_dWorkInternal.Resize ( 0 );
 		m_tPrf.EndTask();
@@ -324,14 +325,14 @@ private:
 
 	void StopNetLoop () // doesn't require NetPoollingThread
 	{
-		sphLogDebug ( "StopNetLoop()" );
+		sphLogDebugv ( "StopNetLoop()" );
 		Kick ();
 		m_tWorkerFinished.WaitEvent ();
 
 		// it is safe to call terminations here, since netpool is stopped. So, declare that we're 'netpool' now.
 		ScopedRole_c thPoll ( NetPoollingThread );
 		TerminateSessions();
-		sphLogDebug ( "StopNetLoop() succeeded" );
+		sphLogDebugv ( "StopNetLoop() succeeded" );
 	}
 
 	bool AddAction ( ISphNetAction * pElem ) EXCLUDES ( NetPoollingThread )
@@ -341,6 +342,7 @@ private:
 			return false;
 		{
 			sph::Spinlock_lock tExtLock { m_tExtLock };
+			SafeAddRef ( pElem );
 			m_dWorkExternal.Add ( pElem );
 		}
 		Kick();
@@ -349,7 +351,7 @@ private:
 
 	void RemoveEvent ( NetPollEvent_t * pEvent ) REQUIRES ( NetPoollingThread )
 	{
-		sphLogDebug ( "RemoveEvent()" );
+		sphLogDebugv ( "RemoveEvent()" );
 		m_pPoll->RemoveEvent ( pEvent );
 	}
 };
@@ -490,12 +492,12 @@ SockWrapper_c::Impl_c::~Impl_c ()
 // Netpool is already stopped, so it is th-safe here.
 void SockWrapper_c::Impl_c::NetLoopDestroying () REQUIRES ( NetPoollingThread )
 {
-	sphLogDebug ( "SockWrapper_c::Impl_c::NetLoopDestroying ()" );
+	sphLogDebugv ( "SockWrapper_c::Impl_c::NetLoopDestroying ()" );
 
 	// if we're not finished - setting m_pNetLoop to null will just switch us to classic blocking polling.
 	m_pNetLoop = nullptr;
 
-	sphLogDebug ( "SockWrapper_c::Impl_c::NetLoopDestroying () will resume sleeping job" );
+	sphLogDebugv ( "SockWrapper_c::Impl_c::NetLoopDestroying () will resume sleeping job" );
 	// if we're in state of waiting - forcibly set awake reason to 'timeout', then wake up.
 	FinallyAbort();
 }
@@ -697,7 +699,7 @@ int64_t SockWrapper_c::GetTotalReceived () const
 static bool SyncSend ( SockWrapper_c* pSock, const char * pBuffer, int64_t iLen)
 {
 	if ( sphInterrupted () )
-		sphLogDebug ( "SIGTERM in SockWrapper_c::Send" );
+		sphLogDebugv ( "SIGTERM in SockWrapper_c::Send" );
 
 	if ( iLen<=0 )
 		return false;
@@ -804,7 +806,7 @@ static int SyncSockRead ( SockWrapper_c * pSock, BYTE* pBuf, int iLen, int iSpac
 			{
 				if ( !( sphInterrupted () && bIntr ))
 					continue;
-				sphLogDebug( "SyncSockRead: select got SIGTERM, exit -1" );
+				sphLogDebugv( "SyncSockRead: select got SIGTERM, exit -1" );
 			}
 			return -1;
 		}
@@ -819,7 +821,7 @@ static int SyncSockRead ( SockWrapper_c * pSock, BYTE* pBuf, int iLen, int iSpac
 				// got that SIGTERM
 				if ( sphInterrupted() )
 				{
-					sphLogDebug ( "SyncSockRead: got SIGTERM emulation on Windows, exit -1" );
+					sphLogDebugv ( "SyncSockRead: got SIGTERM emulation on Windows, exit -1" );
 					sphSockSetErrno ( EINTR );
 					return -1;
 				}
@@ -855,7 +857,7 @@ static int SyncSockRead ( SockWrapper_c * pSock, BYTE* pBuf, int iLen, int iSpac
 			{
 				if ( !( sphInterrupted () && bIntr ))
 					continue;
-				sphLogDebug( "SyncSockRead: select got SIGTERM, exit -1" );
+				sphLogDebugv( "SyncSockRead: select got SIGTERM, exit -1" );
 			}
 			return -1;
 		}
@@ -978,7 +980,7 @@ int AsyncNetInputBuffer_c::AppendData ( int iNeed, int iSpace, bool bIntr )
 	int iGot = ReadFromBackend ( iNeed, iSpace, bIntr );
 	if ( sphInterrupted () && bIntr )
 	{
-		sphLogDebug ( "AsyncNetInputBuffer_c::AppendData: got SIGTERM, return -1" );
+		sphLogDebugv ( "AsyncNetInputBuffer_c::AppendData: got SIGTERM, return -1" );
 		m_bError = true;
 		m_bIntr = true;
 		return -1;

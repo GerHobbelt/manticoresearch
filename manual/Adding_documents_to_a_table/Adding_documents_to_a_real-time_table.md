@@ -3,7 +3,8 @@
 > If you are looking for information about adding documents to a plain table please read section about [adding data from external storages](../Adding_data_from_external_storages/Plain_tables_creation.md).
 
 <!-- example insert -->
-Adding documents in a real-time manner is only supported for [Real-Time](../Creating_a_table/Local_tables/Real-time_table.md) and [percolate](../Creating_a_table/Local_tables/Percolate_table.md) tables. Corresponding SQL command or HTTP endpoint or a client's functions inserts new rows (documents) into an existing table with provided field values.
+Adding documents in a real-time manner is only supported for [Real-Time](../Creating_a_table/Local_tables/Real-time_table.md) and [percolate](../Creating_a_table/Local_tables/Percolate_table.md) tables. Corresponding SQL command or HTTP endpoint or a client's functions inserts new rows (documents) into a table with provided field values. Note that it is not necessary for a table to already exist before adding documents to it. If the table does not exist, Manticore will attempt to create it automatically. For more information, see [Auto schema](../../Adding_documents_to_a_table/Adding_documents_to_a_real-time_table.md#Auto-schema).
+
 
 You can insert a single or [multiple documents](../../Adding_documents_to_a_table/Adding_documents_to_a_real-time_table.md#Bulk-adding-documents) with values for all fields of the table or only part of them. In this case the other fields will be filled with their default values (0 for scalar types, empty string for text types).
 
@@ -167,6 +168,103 @@ HashMap<String,Object> doc = new HashMap<String,Object>(){{
 newdoc.index("products").id(0L).setDoc(doc);
 sqlresult = indexApi.insert(newdoc);
 
+```
+
+<!-- end -->
+
+## Auto schema
+
+Manticore has a mechanism for automatically creating tables when a specified table in the `INSERT` statement does not yet exist. This mechanism is enabled by default. To disable it, set `auto_schema = 0` in the [Searchd](../Server_settings/Searchd.md#auto_schema) section of your Manticore config file.
+
+<!-- example auto-schema -->
+
+By default, all text values in the `VALUES` clause are considered to be of the `text` type, with the exception of values that represent valid email addresses, which are treated as the `string` type.
+
+If you try to INSERT multiple rows with different, incompatible value types for the same field, auto table creation will be canceled and an error message will be returned. However, if the different value types are compatible, the resulting field type will be the one that accommodates all the values. Some automatic data type conversions that may occur include:
+* mva -> mva64
+* uint -> bigint -> float
+* string -> text
+
+<!-- intro -->
+##### SQL:
+
+<!-- request SQL -->
+
+```sql
+MySQL [(none)]> drop table if exists t; insert into t(i,f,t,s,j,b,m,mb) values(123,1.2,'text here','test@mail.com','{"a": 123}',1099511627776,(1,2),(1099511627776,1099511627777)); desc t; select * from t;
+```
+
+<!-- response SQL -->
+
+```sql
+--------------
+drop table if exists t
+--------------
+
+Query OK, 0 rows affected (0.42 sec)
+
+--------------
+insert into t(i,f,t,j,b,m,mb) values(123,1.2,'text here','{"a": 123}',1099511627776,(1,2),(1099511627776,1099511627777))
+--------------
+
+Query OK, 1 row affected (0.00 sec)
+
+--------------
+desc t
+--------------
+
++-------+--------+----------------+
+| Field | Type   | Properties     |
++-------+--------+----------------+
+| id    | bigint |                |
+| t     | text   | indexed stored |
+| s     | string |                |
+| j     | json   |                |
+| i     | uint   |                |
+| b     | bigint |                |
+| f     | float  |                |
+| m     | mva    |                |
+| mb    | mva64  |                |
++-------+--------+----------------+
+8 rows in set (0.00 sec)
+
+--------------
+select * from t
+--------------
+
++---------------------+------+---------------+----------+------+-----------------------------+-----------+---------------+------------+
+| id                  | i    | b             | f        | m    | mb                          | t         | s             | j          |
++---------------------+------+---------------+----------+------+-----------------------------+-----------+---------------+------------+
+| 5045949922868723723 |  123 | 1099511627776 | 1.200000 | 1,2  | 1099511627776,1099511627777 | text here | test@mail.com | {"a": 123} |
++---------------------+------+---------------+----------+------+-----------------------------+-----------+---------------+------------+
+1 row in set (0.00 sec)
+```
+
+<!-- request HTTP -->
+
+```json
+POST /insert  -d
+{
+ "index":"t",
+ "id": 2,
+ "doc":
+ {
+   "i" : 123,
+   "f" : 1.23,
+   "t": "text here",
+   "s": "test@mail.com",
+   "j": {"a": 123},
+   "b": 1099511627776,
+   "m": [1,2],
+   "mb": [1099511627776,1099511627777]
+ }
+}
+```
+
+<!-- response HTTP -->
+
+```json
+{"_index":"t","_id":2,"created":true,"result":"created","status":201}
 ```
 
 <!-- end -->

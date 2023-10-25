@@ -128,6 +128,10 @@ static int 			g_iReadUnhinted 		= DEFAULT_READ_UNHINTED;
 
 static int			g_iSplitThresh			= 8192;
 
+static bool LOG_LEVEL_SPLIT_QUERY = val_from_env ( "MANTICORE_LOG_SPLIT_QUERY", false ); // verbose logging split query events, ruled by this env variable
+#define LOG_COMPONENT_QUERYINFO __LINE__ << " "
+#define QUERYINFO LOGINFO ( SPLIT_QUERY, QUERYINFO )
+
 // quick hack for indexer crash reporting
 // one day, these might turn into a callback or something
 int64_t		g_iIndexerCurrentDocID		= 0;
@@ -3050,6 +3054,13 @@ int64_t CSphIndex_VLN::GetPseudoShardingMetric ( const VecTraits_T<const CSphQue
 	ARRAY_FOREACH ( i, dQueries )
 	{
 		auto & tQuery = dQueries[i];
+
+		// only process fullscan queries
+		if ( !tQuery.m_sQuery.IsEmpty() )
+		{
+			bAllFast = false;
+			continue;
+		}
 
 		if ( !CheckQueryFilters ( tQuery, m_tSchema ) )
 			continue;
@@ -9186,7 +9197,7 @@ bool CSphIndex_VLN::PreallocSecondaryIndex()
 			if ( GetSecondaryIndexDefault()==SIDefault_e::FORCE )
 				m_sLastError.SetSprintf ( "missing secondary index %s", sFile.cstr() );
 			else
-				sphWarning ( "missing %s; secondary index(es) disabled, consider use ALTER REBUILD SECONDARY to enable secondary index", sFile.cstr() );
+				sphWarning ( "missing %s; secondary index(es) disabled, consider using ALTER REBUILD SECONDARY to recover the index", sFile.cstr() );
 		}
 		return ( GetSecondaryIndexDefault()!=SIDefault_e::FORCE );
 	}
@@ -9198,7 +9209,7 @@ bool CSphIndex_VLN::PreallocSecondaryIndex()
 	{
 		if ( GetSecondaryIndexDefault()!=SIDefault_e::FORCE )
 		{
-			sphWarning ( "'%s' secondary index not loaded, %s; secondary index(es) disabled, consider use ALTER REBUILD SECONDARY to enable secondary index", GetName(), m_sLastError.cstr() );
+			sphWarning ( "'%s' secondary index not loaded, %s; secondary index(es) disabled, consider using ALTER REBUILD SECONDARY to recover the index", GetName(), m_sLastError.cstr() );
 			m_sLastError = "";
 		}
 		if ( GetSecondaryIndexDefault()==SIDefault_e::FORCE )
@@ -10428,7 +10439,7 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 	tClonableCtx.LimitConcurrency ( pDispatcher->GetConcurrency() );
 
 	auto iStart = sphMicroTimer();
-	sphLogDebugv ( "Started: " INT64_FMT, sphMicroTimer()-iStart );
+	QUERYINFO << "Started: " << ( sphMicroTimer()-iStart );
 
 	// because disk chunk search within the loop will switch the profiler state
 	SwitchProfile ( pProfiler, SPH_QSTATE_INIT );
@@ -10446,7 +10457,7 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 
 		if ( !pSource->FetchTask ( iJob ) || CheckInterrupt() )
 		{
-			sphLogDebug ( "Early finish parallel RunSplitQuery because of empty queue" );
+			QUERYINFO << "Early finish parallel RunSplitQuery because of empty queue";
 			return; // already nothing to do, early finish.
 		}
 
@@ -10456,12 +10467,12 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 			tCtx.m_tMeta.m_sWarning = szReason;
 			bInterrupt.store ( true, std::memory_order_relaxed );
 		};
-		sphLogDebug ( "RunSplitQuery cloned context %d", tJobContext.second );
+		QUERYINFO << "RunSplitQuery cloned context " << tJobContext.second;
 		tClonableCtx.SetJobOrder ( tJobContext.second, iJob );
 		Threads::Coro::SetThrottlingPeriod ( session::GetThrottlingPeriodMS() );
 		while ( !CheckInterrupt() ) // some earlier job met error; abort.
 		{
-			sphLogDebugv ( "RunSplitQuery %d, job %d", tJobContext.second, iJob );
+			QUERYINFO << "RunSplitQuery " << tJobContext.second << ", job " << iJob;
 			myinfo::SetTaskInfo ( "%d ch %d:", Threads::Coro::NumOfRestarts(), iJob );
 			auto & dLocalSorters = tCtx.m_dSorters;
 			CSphQueryResultMeta tChunkMeta;
@@ -10517,7 +10528,7 @@ static bool RunSplitQuery ( const CSphIndex * pIndex, const CSphQuery & tQuery, 
 			}
 		}
 	});
-	sphLogDebug ( "RunSplitQuery processed in %d thread(s)", tClonableCtx.NumWorked() );
+	QUERYINFO << "RunSplitQuery processed in " << tClonableCtx.NumWorked() << " thread(s)";
 	tClonableCtx.Finalize();
 	return !CheckInterrupt();
 }
