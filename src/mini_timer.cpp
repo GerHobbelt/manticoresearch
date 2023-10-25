@@ -76,7 +76,7 @@ class TinyTimer_c
 
 	// management
 	OneshotEvent_c m_tSignal;
-	volatile bool m_bInterrupted = true;
+	std::atomic<bool> m_bInterrupted { true };
 
 	// thread
 	SphThread_t m_tCounterThread;
@@ -85,7 +85,7 @@ class TinyTimer_c
 private:
 	inline bool IsInterrupted() const
 	{
-		return m_bInterrupted || sphInterrupted(); // aliased, as we can override it in tests while mocking
+		return m_bInterrupted.load(std::memory_order_relaxed) || sphInterrupted(); // aliased, as we can override it in tests while mocking
 	}
 
 	inline int64_t MicroTimer()
@@ -103,9 +103,7 @@ private:
 			if ( !tTask.m_tLink.is_linked() )
 				m_tStagingQueue.push_back ( tTask );
 		}
-		// optimization: we anyway enqueue the task, however if next scheduled time to awake came earlier than our schedule - we don't need to kick the thread.
-		if ( ( tTask.m_iTimeoutTimeUS < m_iNextTimeoutUS ) | !m_iNextTimeoutUS ) // | instead of || to avoid branching
-			Kick();
+		Kick();
 	}
 
 	MiniTimer_c* PopStagingTask() REQUIRES ( TimerThread ) EXCLUDES ( m_tStagingGuard )
@@ -203,7 +201,7 @@ public:
 	TinyTimer_c()
 	{
 		MicroTimer();
-		m_bInterrupted = false;
+		m_bInterrupted.store ( false, std::memory_order_release );
 		IsTinyTimerCreated() = true;
 		Threads::RegisterIterator ( [this] ( Threads::ThreadFN& fnHandler ) {
 			fnHandler ( m_pCounterThread.load ( std::memory_order_relaxed ) );
@@ -219,7 +217,7 @@ public:
 
 	void Stop()
 	{
-		m_bInterrupted = true;
+		m_bInterrupted.store ( true, std::memory_order_release );
 		if ( !IsTinyTimerCreated() )
 			return;
 		Kick();

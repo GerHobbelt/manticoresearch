@@ -174,23 +174,23 @@ class ExtRowIdRange_c : public ExtNode_c
 {
 public:
 						ExtRowIdRange_c ( ExtNode_i * pNode, const RowIdBoundaries_t & tBoundaries );
-						~ExtRowIdRange_c() { SafeDelete(m_pNode); } 
+						~ExtRowIdRange_c() = default;
 
 	const ExtDoc_t *	GetDocsChunk() override;
-	const ExtHit_t *	GetHits ( const ExtDoc_t * pDocs ) final { return m_pNode->GetHits(pDocs); }
+	const ExtHit_t *	GetHits ( const ExtDoc_t * pDocs ) final { return m_pNotOwnedNode->GetHits(pDocs); }
 	void				Reset ( const ISphQwordSetup & tSetup ) final;
-	void				HintRowID ( RowID_t tRowID ) final				{ m_pNode->HintRowID(tRowID); }
-	int					GetQwords ( ExtQwordsHash_t & hQwords ) final	{ return m_pNode->GetQwords(hQwords); }
-	void				SetQwordsIDF ( const ExtQwordsHash_t & hQwords ) final { m_pNode->SetQwordsIDF(hQwords); }
-	void				GetTerms ( const ExtQwordsHash_t & hQwords, CSphVector<TermPos_t> & dTermDupes ) const final { m_pNode->GetTerms ( hQwords, dTermDupes ); }
-	bool				GotHitless() final								{ return m_pNode->GotHitless(); }
-	uint64_t			GetWordID() const final							{ return m_pNode->GetWordID(); }
+	void				HintRowID ( RowID_t tRowID ) final				{ m_pNotOwnedNode->HintRowID(tRowID); }
+	int					GetQwords ( ExtQwordsHash_t & hQwords ) final	{ return m_pNotOwnedNode->GetQwords(hQwords); }
+	void				SetQwordsIDF ( const ExtQwordsHash_t & hQwords ) final { m_pNotOwnedNode->SetQwordsIDF(hQwords); }
+	void				GetTerms ( const ExtQwordsHash_t & hQwords, CSphVector<TermPos_t> & dTermDupes ) const final { m_pNotOwnedNode->GetTerms ( hQwords, dTermDupes ); }
+	bool				GotHitless() final								{ return m_pNotOwnedNode->GotHitless(); }
+	uint64_t			GetWordID() const final							{ return m_pNotOwnedNode->GetWordID(); }
 
 protected:
 	void				CollectHits ( const ExtDoc_t * pDocs ) final	{ assert ( 0 && "ExtRowIdRange_c doesn't collect hits" ); }
 
 private:
-	ExtNode_i *			m_pNode = nullptr;
+	ExtNode_i *			m_pNotOwnedNode; // not owned; should not delete!
 	RowIdBoundaries_t	m_tBoundaries;
 
 	inline const ExtDoc_t * FilterHead ( const ExtDoc_t * pDocStart );
@@ -199,17 +199,17 @@ private:
 
 
 ExtRowIdRange_c::ExtRowIdRange_c ( ExtNode_i * pNode, const RowIdBoundaries_t & tBoundaries )
-	: m_pNode ( pNode )
+	: m_pNotOwnedNode ( pNode )
 	, m_tBoundaries ( tBoundaries )
 {
-	assert(pNode);
+	assert ( m_pNotOwnedNode );
 	pNode->HintRowID ( m_tBoundaries.m_tMinRowID );
 }
 
 
 const ExtDoc_t * ExtRowIdRange_c::GetDocsChunk()
 {
-	const ExtDoc_t * pDocs = m_pNode->GetDocsChunk();
+	const ExtDoc_t * pDocs = m_pNotOwnedNode->GetDocsChunk();
 	if ( !pDocs )
 		return nullptr;
 
@@ -222,11 +222,11 @@ const ExtDoc_t * ExtRowIdRange_c::GetDocsChunk()
 
 void ExtRowIdRange_c::Reset ( const ISphQwordSetup & tSetup )
 {
-	m_pNode->Reset(tSetup);
+	m_pNotOwnedNode->Reset ( tSetup );
 
 	// this node is stored as the original root node in the ranker and restored on Reset
 	// so no mem leak here
-	m_pNode = nullptr;
+	m_pNotOwnedNode = nullptr;
 }
 
 
@@ -243,7 +243,7 @@ const ExtDoc_t * ExtRowIdRange_c::FilterHead ( const ExtDoc_t * pDocStart )
 		if ( pDoc->m_tRowID!=INVALID_ROWID )
 			break;
 
-		pDoc = m_pNode->GetDocsChunk();
+		pDoc = m_pNotOwnedNode->GetDocsChunk();
 		if ( !pDoc )
 			return nullptr;
 	}
@@ -1779,11 +1779,11 @@ ExtNode_i * ExtNode_i::Create ( const XQNode_t * pNode, const ISphQwordSetup & t
 				CSphVector<ExtNode_i*> dTerms;
 				dTerms.Reserve ( iQuorumCount );
 
-				ARRAY_FOREACH ( i, pNode->m_dWords )
-					dTerms.Add ( Create ( pNode->m_dWords[i], pNode, tSetup, bUseBM25 ) );
+				for ( const XQKeyword_t& tWord: pNode->m_dWords )
+					dTerms.Add ( Create ( tWord, pNode, tSetup, bUseBM25 ) );
 
-				ARRAY_FOREACH ( i, pNode->m_dChildren )
-					dTerms.Add ( Create ( pNode->m_dChildren[i], tSetup, bUseBM25 ) );
+				for ( const XQNode_t* tNode: pNode->m_dChildren )
+					dTerms.Add ( Create ( tNode, tSetup, bUseBM25 ) );
 
 				// make not simple, but optimized AND node.
 				dTerms.Sort ( ExtNodeTF_fn() );
@@ -6024,9 +6024,9 @@ ExtNode_i * CSphQueryNodeCache::CreateProxy ( ExtNode_i * pChild, const XQNode_t
 
 //////////////////////////////////////////////////////////////////////////
 
-ExtNode_i * CreateRowIdFilterNode ( ExtNode_i * pNode, const RowIdBoundaries_t & tBoundaries )
+std::unique_ptr<ExtNode_i> CreateRowIdFilterNode ( ExtNode_i * pNode, const RowIdBoundaries_t & tBoundaries )
 {
-	return new ExtRowIdRange_c ( pNode, tBoundaries );
+	return std::make_unique<ExtRowIdRange_c> ( pNode, tBoundaries );
 }
 
 /// Immediately interrupt current operation

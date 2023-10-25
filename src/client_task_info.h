@@ -36,6 +36,7 @@ private:
 	TaskState_e m_eTaskState = TaskState_e::UNKNOWN;
 	Proto_e m_eProto = Proto_e::UNKNOWN;
 	int m_iConnID = -1;
+	int m_iSocket = -1;
 	CSphString m_sClientName; // set once before info is published and never changes. So, assume always mt-safe
 	bool m_bSsl = false;
 	bool m_bVip = false;
@@ -72,6 +73,9 @@ public:
 
 	void SetConnID ( int iConnID ) { m_iConnID = iConnID; }
 	int GetConnID() const { return m_iConnID; }
+
+	void SetSocket ( int iSocket ) { m_iSocket = iSocket; }
+	int GetSocket() const { return m_iSocket; }
 
 	void SetClientName ( const char* szName ) { m_sClientName = szName; }
 	const char* szClientName() const { return m_sClientName.cstr(); }
@@ -200,7 +204,7 @@ namespace myinfo {
 	// num of real tasks (that is mini-info + client-info)
 	inline int CountTasks()
 	{
-		return Count ( MiniTaskInfo_t::m_eTask ) + Count ( ClientTaskInfo_t::m_eTask );
+		return Count ( MiniTaskInfo_t::Task() ) + Count ( ClientTaskInfo_t::Task() );
 	}
 
 } // namespace myinfo

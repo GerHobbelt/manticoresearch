@@ -487,11 +487,13 @@ public:
 		if ( iLen>0 )
 		{
 			if ( bUnescape )
-				m_sVal = SqlUnescape ( sVal, iLen );
-			else
+				std::tie ( m_sVal, m_iLen ) = SqlUnescapeN ( sVal, iLen );
+			else {
 				m_sVal.SetBinary ( sVal, iLen );
-		}
-		m_iLen = m_sVal.Length();
+				m_iLen = iLen;
+			}
+		} else
+			m_iLen = m_sVal.Length();
 	}
 
 	int StringEval ( const CSphMatch &, const BYTE ** ppStr ) const final
@@ -6594,7 +6596,7 @@ public:
 
 	ISphExpr * Clone () const final
 	{
-		return new Expr_Levenshtein_c<PATTERN_STRING> ( SafeClone ( m_pFirst.Ptr() ), SafeClone ( m_pSecond.Ptr() ), m_tOpts );
+		return new Expr_Levenshtein_c ( *this );
 	}
 
 private:
@@ -6602,7 +6604,12 @@ private:
 	CSphString				m_sPattern;
 	int						m_iPattersLen = 0;
 
-	Expr_Levenshtein_c ( const Expr_Levenshtein_c& ) = default;
+	Expr_Levenshtein_c ( const Expr_Levenshtein_c& rhs )
+		: Expr_Binary_c ( rhs )
+		, m_tOpts ( rhs.m_tOpts )
+		, m_sPattern ( rhs.m_sPattern )
+		, m_iPattersLen ( rhs.m_iPattersLen )
+	{}
 
 	std::pair<int, int> GetDistance ( const CSphMatch & tMatch ) const
 	{
@@ -7521,8 +7528,8 @@ public:
 				auto iLen = GetConstStrLength ( iVal );
 				if ( iOfs>0 && iLen>0 && iOfs+iLen<=iExprLen )
 				{
-					auto sRes = SqlUnescape ( szExpr + iOfs, iLen );
-					m_dHashes.Add ( sphFNV64 ( sRes.cstr(), sRes.Length() ) );
+					auto tRes = SqlUnescapeN ( szExpr + iOfs, iLen );
+					m_dHashes.Add ( sphFNV64 ( tRes.first.cstr(), tRes.second ) );
 				}
 			}
 			m_dHashes.Sort();

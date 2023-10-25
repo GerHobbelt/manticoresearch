@@ -63,7 +63,6 @@
 #include "taskpreread.h"
 #include "coroutine.h"
 #include "dynamic_idx.h"
-#include "netreceive_ql.h"
 
 extern "C"
 {
@@ -1128,7 +1127,7 @@ LONG WINAPI CrashLogger::HandleCrash ( EXCEPTION_POINTERS * pExc )
 			auto pSrc = (ClientTaskInfo_t *) pThread->m_pTaskInfo.load ( std::memory_order_relaxed );
 			if ( pSrc ) ++iAllThd;
 			for ( ; pSrc; pSrc = (ClientTaskInfo_t *) pSrc->m_pPrev.load ( std::memory_order_relaxed ) )
-				if ( pSrc->m_eType==ClientTaskInfo_t::m_eTask )
+				if ( pSrc->m_eType==ClientTaskInfo_t::Task() )
 				{
 					sphSafeInfo ( g_iLogFile, "thd %d (%s), proto %s, state %s, command %s", iThd,
 							pThread->m_sThreadName.cstr(),
@@ -5944,10 +5943,10 @@ void SearchHandler_c::RunLocalSearches ()
 
 	auto tDispatch = GetEffectiveBaseDispatcherTemplate();
 	Dispatcher::Unify ( tDispatch, m_dNQueries.First().m_tMainDispatcher );
-	auto pDispatcher = Dispatcher::Make ( iNumLocals, m_dNQueries.First().m_iCouncurrency, tDispatch );
 
 	// the context
 	ClonableCtx_T<LocalSearchRef_t, LocalSearchClone_t, Threads::ECONTEXT::UNORDERED> dCtx { m_tHook, pMainExtra, m_dNFailuresSet, m_dNAggrResults, m_dNResults };
+	auto pDispatcher = Dispatcher::Make ( iNumLocals, m_dNQueries.First().m_iCouncurrency, tDispatch, dCtx.IsSingle() );
 	dCtx.LimitConcurrency ( pDispatcher->GetConcurrency() );
 
 	bool bSingle = pDispatcher->GetConcurrency()==1;
@@ -7854,11 +7853,9 @@ static void MakeSnippetsCoro ( const VecTraits_T<int>& dTasks, CSphVector<Excerp
 	CSphVector<int> dStubFields;
 	dStubFields.Add ( 0 );
 
-	auto tDispatch = GetEffectiveBaseDispatcherTemplate();
-	auto pDispatcher = Dispatcher::Make ( iJobs, 0, tDispatch );
-
 	// the context
 	ClonableCtx_T<SnippedBuilderCtxRef_t, SnippedBuilderCtxClone_t, Threads::ECONTEXT::UNORDERED> dCtx { pBuilder };
+	auto pDispatcher = Dispatcher::Make ( iJobs, 0, GetEffectiveBaseDispatcherTemplate(), dCtx.IsSingle() );
 	dCtx.LimitConcurrency ( pDispatcher->GetConcurrency() );
 
 	Coro::ExecuteN ( dCtx.Concurrency ( iJobs ), [&]
@@ -14131,11 +14128,9 @@ void HandleMysqlfiles ( RowBuffer_i & tOut, const DebugCmd::DebugCommand_t & tCm
 
 void HandleMysqlclose ( RowBuffer_i & tOut )
 {
-	tOut.HeadTuplet ( "command", "result" );
-	tOut.DataTuplet ( "Close", "SUCCESS" );
-	tOut.Eof ();
-
-	DebugClose();
+	auto iSocket = session::Info().GetSocket();
+	if ( iSocket >= 0 )
+		sphSockClose ( iSocket );
 }
 
 // same for select ... from index.files
