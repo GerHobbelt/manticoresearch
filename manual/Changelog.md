@@ -6,6 +6,8 @@
 * [Commit be6b](https://github.com/manticoresoftware/manticoresearch/commit/be6b2ea20b0cb720db645e63f208ca3d7be6c276) Fixed full path to external files was not being displayed correctly in SHOW CREATE TABLE
 * [Issue #1052](https://github.com/manticoresoftware/manticoresearch/issues/1052) rt_attr_json column won't work with columnar storage
 * [gl #3287] Crash on possibly out of space disk
+* [gl #3363] Updated export ranker output to match `packedfactors()`
+* [Commit 2196](https://github.com/manticoresoftware/manticoresearch/commit/21966fbf) fixed wildcards at query to not be affected by ignore_chars
 
 ### Major new features
 * Query optimizer now works for fulltext queries
@@ -17,33 +19,36 @@
 * Field and attribute order is now consistent between `SHOW CREATE TABLE` and `DESC`.
 * When executing `INSERT` queries and running out of disk space to write binlog entries, new `INSERT` queries will fail until there's enough free disk space available.
 * [Issue #1062](https://github.com/manticoresoftware/manticoresearch/issues/1062) The `/bulk` endpoint reports information regarding the number of processed and non-processed strings (documents) in case of an error.
-* The `/bulk` endpoint processes empty lines as a [commit](../Data_creation_and_modification/Transactions.md#BEGIN,-COMMIT,-and-ROLLBACK) command. 
+* The `/bulk` endpoint processes empty lines as a [commit](../Data_creation_and_modification/Transactions.md#BEGIN,-COMMIT,-and-ROLLBACK) command.
 
 ### Behaviour changes
 * **⚠️ BREAKING CHANGE** Document IDs are now treated as unsigned 64-bit integers on indexing and INSERT.
 * **⚠️ BREAKING CHANGE** Query optimizer hints now have a new syntax (e.g. /*+ SecondaryIndex(uid) */). Old syntax is no longer supported.
 
 # Version 6.0.4
+Released: March 15 2023
 
-Released: soon
+### New features
+* Improved integration with Logstash, Beats etc. including:
+  - Support for Logstash versions >= 7.13.
+  - Auto-schema support.
+  - Added handling of bulk requests in Elasticsearch-like format.
+* [Buddy commit ce90](https://github.com/manticoresoftware/manticoresearch-buddy/commit/ce907ea) Log Buddy version on Manticore start.
 
 ### Bugfixes
-* [Issue #588](https://github.com/manticoresoftware/manticoresearch/issues/588), [Issue #942](https://github.com/manticoresoftware/manticoresearch/issues/942) fixed bad character at the search meta and call keywords for bigram index
-* [Issue #1056](https://github.com/manticoresoftware/manticoresearch/issues/1056) Question mark unexpected behavior
-* [Issue #1027](https://github.com/manticoresoftware/manticoresearch/issues/1027) Lowercase HTTP headers are rejected  
-* [Commit 59bb](https://github.com/manticoresoftware/manticoresearch/commit/59bb54c) Fixed bulk writes processing in the JSON interface for documents with id explicitly set to null
-* [Commit 7b6b](https://github.com/manticoresoftware/manticoresearch/commit/7b6b25f) Fixed term statistics in CALL KEYWORDS for multiple same terms
-* [Issue #1039](https://github.com/manticoresoftware/manticoresearch/issues/1039) Fixed memory leak at daemon on reading output of the Buddy console
+* [Issue #588](https://github.com/manticoresoftware/manticoresearch/issues/588), [Issue #942](https://github.com/manticoresoftware/manticoresearch/issues/942) Fixed bad character at the search meta and call keywords for bigram index.
+* [Issue #1027](https://github.com/manticoresoftware/manticoresearch/issues/1027) Lowercase HTTP headers are rejected.
+* ❗[Issue #1039](https://github.com/manticoresoftware/manticoresearch/issues/1039) Fixed memory leak at daemon on reading output of the Buddy console.
+* [Issue #1056](https://github.com/manticoresoftware/manticoresearch/issues/1056) Fixed unexpected behavior of question mark.
+* [Issue #1064](https://github.com/manticoresoftware/manticoresearch/issues/1064) - Fixed race condition in tokenizer lowercase tables causing a crash.
+* [Commit 59bb](https://github.com/manticoresoftware/manticoresearch/commit/59bb54c) Fixed bulk writes processing in the JSON interface for documents with id explicitly set to null.
+* [Commit 7b6b](https://github.com/manticoresoftware/manticoresearch/commit/7b6b25f) Fixed term statistics in CALL KEYWORDS for multiple same terms.
 * [Commit f381](https://github.com/manticoresoftware/manticoresearch/commit/f381ad2) Default config is now created by Windows installer; paths are no longer substituted in runtime.
-* [Commit 6940](https://github.com/manticoresoftware/manticoresearch/commit/6940e95) [Commit cc5a](https://github.com/manticoresoftware/manticoresearch/commit/cc5a480) Fixed replication issues for cluster with nodes in multiple networks
-* [Commit 20d2](https://github.com/manticoresoftware/manticoresearch/commit/20d246c) Fixed compat mode bulk request to pass into buddy on error
-* [Commit aa0c](https://github.com/manticoresoftware/manticoresearch/commit/aa0cdfb) Fixed daemon to log messages from buddy console into daemon log line by line
-* [Commit 4972](https://github.com/manticoresoftware/manticoresearch/commit/49722ab) Fixed /pq HTTP endpoint to be an alias of the /json/pq HTTP endpoint
-* [Commit ee87](https://github.com/manticoresoftware/columnar/commit/ee87d11) Fixed crash on search with the secondary index
-* [Commit e7f9](https://github.com/manticoresoftware/manticoresearch/commit/e7f9815) Added buddy version to startup log entry
-* [Commit fdd9](https://github.com/manticoresoftware/manticoresearch/commit/fdd9087) Fixed compat mode to pass errors into buddy
-* [Commit 1912](https://github.com/manticoresoftware/manticoresearch/commit/1912b3c) Added compatibility mode to work with Logstash, Beat and Kibana
-* [Commit 3b53](https://github.com/manticoresoftware/manticoresearch/commit/3b5385a) Fixed daemon crash on buddy restart
+* [Commit 6940](https://github.com/manticoresoftware/manticoresearch/commit/6940e95), [Commit cc5a](https://github.com/manticoresoftware/manticoresearch/commit/cc5a480) Fixed replication issues for cluster with nodes in multiple networks.
+* [Commit 4972](https://github.com/manticoresoftware/manticoresearch/commit/49722ab) Fixed `/pq` HTTP endpoint to be an alias of the `/json/pq` HTTP endpoint.
+* [Commit 3b53](https://github.com/manticoresoftware/manticoresearch/commit/3b5385a) Fixed daemon crash on Buddy restart.
+* [Buddy commit fba9](https://github.com/manticoresoftware/manticoresearch-buddy/commit/fba9c8c) Display original error on invalid request received.
+* [Buddy commit db95](https://github.com/manticoresoftware/manticoresearch-buddy/commit/db9532c) Allow spaces in backup path and add some magic to regexp to support single quotes also.
 
 # Version 6.0.2
 Released: Feb 10 2023
@@ -119,6 +124,10 @@ This release also includes more than 130 bug fixes and numerous features, many o
 * [Commit bef3](https://github.com/manticoresoftware/lemmatizer-uk/commit/bef3ff0386d3ee87ec57619782100972c1122e47) Ukirainian lemmatizer path has been changed.
 * [Commit 4ae7](https://github.com/manticoresoftware/manticoresearch/commit/4ae789595329a2951e194d1191ddb3121459a560) Secondary indexes statistics has been added to [SHOW META](../Node_info_and_management/SHOW_META.md#SHOW-META).
 * [Commit 2e7c](https://github.com/manticoresoftware/manticoresearch/commit/2e7c585e) JSON interface can now be easily visualized using Swagger Editor https://manual.manticoresearch.com/dev/Openapi#OpenAPI-specification.
+* **⚠️ BREAKING CHANGE**: Replication protocol has been changed. If you are running a replication cluster, then when upgrading to Manticore 5 you need to:
+  - stop all your nodes first cleanly
+  - and then start the node which was stopped last with `--new-cluster` (run tool `manticore_new_cluster` in Linux).
+  - read about [restarting a cluster](Creating_a_cluster/Setting_up_replication/Restarting_a_cluster.md#Restarting-a-cluster) for more details.
 
 ### Changes related with Manticore Columnar Library
 * Refactoring of Secondary indexes integration with Columnar storage.
@@ -247,10 +256,10 @@ Released: May 18th 2022
 * New [/cli](../Connecting_to_the_server/HTTP.md#/cli) endpoint for running SQL queries over HTTP even easier.
 * Faster bulk INSERT/REPLACE/DELETE via JSON over HTTP: previously you could provide multiple write commands via HTTP JSON protocol, but they were processed one by one, now they are handled as a single transaction.
 * [#720](https://github.com/manticoresoftware/manticoresearch/issues/720) [Nested filters](../Searching/Filters.md#Nested-bool-query) support in JSON protocol. Previously you couldn't code things like `a=1 and (b=2 or c=3)` in JSON: `must` (AND), `should` (OR) and `must_not` (NOT) worked only on the highest level. Now they can be nested.
-* Support for [Chunked transfer encoding](https://en.wikipedia.org/wiki/Chunked_transfer_encoding) in HTTP protocol. You can now use chunked transfer in your application to transfer large batches with lower resource consumption (since you don't need to calculate `Content-Length`). On the server's side Manticore now always processes incoming HTTP data in streaming fashion without waiting for the whole batch to be transferred as previously, which:
-  - decreases peak RAM consumption, which lowers a chance of OOM
-  - decreases response time (our tests showed 11% decrease for processing a 100MB batch)
-  - lets you overcome [max_packet_size](../Server_settings/Searchd.md#max_packet_size) and transfer batches much larger than the largest allowed value of `max_packet_size` (128MB), e.g. 1GB at once.
+* Support for [Chunked transfer encoding](https://en.wikipedia.org/wiki/Chunked_transfer_encoding) in the HTTP protocol. You can now use chunked transfer in your application to transmit large batches with reduced resource consumption (since calculating `Content-Length` is unnecessary). On the server side, Manticore now always processes incoming HTTP data in a streaming manner, without waiting for the entire batch to be transferred as before, which:
+  - reduces peak RAM usage, lowering the risk of OOM
+  - decreases response time (our tests indicated an 11% reduction for processing a 100MB batch)
+  - allows you to bypass [max_packet_size](../Server_settings/Searchd.md#max_packet_size) and transfer batches much larger than the maximum allowed value of `max_packet_size` (128MB), for example, 1GB at a time.
 * [#719](https://github.com/manticoresoftware/manticoresearch/issues/719) HTTP interface support of `100 Continue`: now you can transfer large batches from `curl` (including curl libraries used by various programming languages) which by default does `Expect: 100-continue` and waits some time before actually sending the batch. Previously you had to add `Expect: ` header, now it's not needed.
 
   <details>
