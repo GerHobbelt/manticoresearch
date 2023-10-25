@@ -1268,19 +1268,7 @@ void SendSqlSchema ( const ISphSchema& tSchema, RowBuffer_i* pRows, const VecTra
 		const CSphColumnInfo& tCol = tSchema.GetAttr ( i );
 		if ( sphIsInternalAttr ( tCol ) )
 			continue;
-		MysqlColumnType_e eType = MYSQL_COL_STRING;
-		switch ( tCol.m_eAttrType )
-		{
-		case SPH_ATTR_INTEGER:
-		case SPH_ATTR_TIMESTAMP:
-		case SPH_ATTR_BOOL: eType = MYSQL_COL_LONG; break;
-		case SPH_ATTR_FLOAT: eType = MYSQL_COL_FLOAT; break;
-		case SPH_ATTR_DOUBLE: eType = MYSQL_COL_DOUBLE; break;
-		case SPH_ATTR_BIGINT: eType = MYSQL_COL_LONGLONG; break;
-		case SPH_ATTR_UINT64: eType = MYSQL_COL_UINT64; break;
-		default: break;
-		}
-		pRows->HeadColumn ( tCol.m_sName.cstr(), eType );
+		pRows->HeadColumn ( tCol.m_sName.cstr(), ESphAttr2MysqlColumn ( tCol.m_eAttrType ) );
 	}
 
 	pRows->HeadEnd ( false, 0 );
@@ -1466,7 +1454,7 @@ private:
 	bool						m_bNotYetFinalized = true;
 
 	inline bool			PushMatch ( CSphMatch & tEntry );
-	void				SendSchema();
+	void				SendSchemaOnce();
 	void				MakeCtx();
 };
 
@@ -1478,8 +1466,12 @@ DirectSqlQueue_c::DirectSqlQueue_c ( RowBuffer_i* pOutput, void* pOpaque, StrVec
 	, m_dColumns ( std::move ( dColumns ) )
 {}
 
-void DirectSqlQueue_c::SendSchema()
+void DirectSqlQueue_c::SendSchemaOnce()
 {
+	if ( m_bSchemaSent )
+		return;
+
+	assert ( !m_iDocs );
 	for ( const auto& sColumn : m_dColumns )
 	{
 		auto iIdx = m_pSchema->GetAttrIndex ( sColumn.cstr() );
@@ -1518,8 +1510,7 @@ void DirectSqlQueue_c::MakeCtx()
 
 bool DirectSqlQueue_c::PushMatch ( CSphMatch & tEntry )
 {
-	if (!m_bSchemaSent)
-		SendSchema();
+	SendSchemaOnce();
 	++m_iDocs;
 	auto* pDocstores = *(std::pair<void*,void*>**)m_pOpaque;
 	auto pDocstoreReader = pDocstores->first;
@@ -1551,10 +1542,13 @@ bool DirectSqlQueue_c::PushMatch ( CSphMatch & tEntry )
 }
 
 /// final update pass
-void DirectSqlQueue_c::Finalize ( MatchProcessor_i&, bool bCallProcessInResultSetOrder, bool bFinalizeMatches )
+void DirectSqlQueue_c::Finalize ( MatchProcessor_i&, bool, bool bFinalizeMatches )
 {
-	if ( bFinalizeMatches && std::exchange ( m_bNotYetFinalized, false ) )
-		m_pOutput->Eof();
+	if ( !bFinalizeMatches || !std::exchange ( m_bNotYetFinalized, false ) )
+		return;
+
+	SendSchemaOnce();
+	m_pOutput->Eof();
 }
 
 

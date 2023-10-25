@@ -85,6 +85,16 @@ agent = test:9312|box2:9312|box3:9312:any2[retry_count=2]
 agent = test:9312|box2:9312:any2[retry_count=2,conn=pconn,ha_strategy=noerrors]
 ```
 
+For optimal performance, it's recommended to place remote tables that reside on the same server within the same record. For instance, instead of:
+```ini
+agent = remote:9312:idx1
+agent = remote:9312:idx2
+```
+you should prefer:
+```ini
+agent = remote:9312:idx1,idx2
+```
+
 ## agent_persistent
 
 ```ini
@@ -203,7 +213,7 @@ To learn more about distributed snippets creation, see  [CALL SNIPPETS](../../Se
 
 ## Distributed percolate tables (DPQ tables)
 
-You can create a distributed table from multiple [percolate](../../Creating_a_table/Local_tables/Percolate_table.md) ables. The syntax for constructing this type of table is the same as for other distributed tables, and can include multiple`local` tables as well as `agents`.
+You can create a distributed table from multiple [percolate](../../Creating_a_table/Local_tables/Percolate_table.md) tables. The syntax for constructing this type of table is the same as for other distributed tables, and can include multiple`local` tables as well as `agents`.
 
 For DPQ, the operations of listing stored queries and searching through them (using [CALL PQ](../../Searching/Percolate_query.md#Performing-a-percolate-query-with-CALL-PQ)) are transparent and work as if all the tables were one single local table. However, data manipulation statements such as `insert`, `replace`, `truncate` are not available.
 
