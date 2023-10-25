@@ -37,6 +37,7 @@ const char* TaskStateName ( TaskState_e eState )
 		case TaskState_e::NET_WRITE: return "net_write";
 		case TaskState_e::QUERY: return "query";
 		case TaskState_e::NET_IDLE: return "net_idle";
+		case TaskState_e::RETIRED: return "- retired";
 	}
 	return "unknown";
 }
@@ -1294,21 +1295,17 @@ class IterationHandler_c : public Threads::details::SchedulerOperation_t
 		}
 	};
 
-	IteratorsQueue_t & g_dIteratorsList ()
-	{
-		static IteratorsQueue_t dIteratorsList;
-		return dIteratorsList;
-	}
+	IteratorsQueue_t g_dIteratorsList;
 }
 
 void Threads::RegisterIterator ( ThreadIteratorFN fnIterator )
 {
-	g_dIteratorsList ().RegisterIterator ( std::move ( fnIterator ) );
+	g_dIteratorsList.RegisterIterator ( std::move ( fnIterator ) );
 }
 
 void Threads::IterateActive ( ThreadFN fnHandler )
 {
-	g_dIteratorsList ().IterateActive ( std::move ( fnHandler ) );
+	g_dIteratorsList.IterateActive ( std::move ( fnHandler ) );
 }
 
 Threads::Scheduler_i * MakeSingleThreadExecutor ( int iMaxThreads, const char * szName )
@@ -1487,7 +1484,7 @@ void Threads::JobStarted ()
 	auto& tDesc = Threads::MyThd ();
 	tDesc.m_tmLastJobDoneTimeUS = -1;
 	tDesc.m_tmLastJobStartTimeUS = sphMicroTimer ();
-	tDesc.m_tmLastJobStartCPUTimeUS = sphCpuTimer ();
+	tDesc.m_tmLastJobStartCPUTimeUS = sphThreadCpuTimer ();
 }
 
 void Threads::JobFinished ( bool bIsDone )
@@ -1497,7 +1494,7 @@ void Threads::JobFinished ( bool bIsDone )
 	if ( bIsDone )
 		++tDesc.m_iTotalJobsDone;
 	tDesc.m_tmTotalWorkedTimeUS += tDesc.m_tmLastJobDoneTimeUS-tDesc.m_tmLastJobStartTimeUS;
-	tDesc.m_tmTotalWorkedCPUTimeUS += sphCpuTimer()-tDesc.m_tmLastJobStartCPUTimeUS;
+	tDesc.m_tmTotalWorkedCPUTimeUS += sphThreadCpuTimer()-tDesc.m_tmLastJobStartCPUTimeUS;
 }
 
 const void * Threads::TopOfStack ()
