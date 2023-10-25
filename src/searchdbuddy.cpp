@@ -405,7 +405,7 @@ static std::pair<bool, CSphString> BuddyQuery ( bool bHttp, Str_t sQueryError, S
 	}
 
 	CSphString sConnID;
-	sConnID.SetSprintf ( "Request-ID: %d", session::GetConnID() );
+	sConnID.SetSprintf ( "Request-ID: %d_%u", session::GetConnID(), sphCRC32 ( sQuery.first, sQuery.second, sphRand() ) );
 	CSphFixedVector<const char *> dHeaders ( 1 );
 	dHeaders[0] = sConnID.cstr();
 
@@ -414,7 +414,7 @@ static std::pair<bool, CSphString> BuddyQuery ( bool bHttp, Str_t sQueryError, S
 
 static bool HasProhibitBuddy ( const OptionsHash_t & hOptions )
 {
-	CSphString * pProhibit = hOptions ( "User-Agent" );
+	CSphString * pProhibit = hOptions ( "user-agent" );
 	if ( !pProhibit )
 		return false;
 

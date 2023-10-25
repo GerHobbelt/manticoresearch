@@ -1,5 +1,14 @@
 # Changelog
 
+# Version 6.0.2
+Released: Feb 10 2023
+
+### Bugfixes
+* [Issue #1024 crash 2](https://github.com/manticoresoftware/manticoresearch/issues/1024) Crash / Segmentation Fault on Facet search with larger number of results
+* ❗[Issue #1029](https://github.com/manticoresoftware/manticoresearch/issues/1029) - WARNING: Compiled-in value KNOWN_CREATE_SIZE (16) is less than measured (208). Consider to fix the value!
+* ❗[Issue #1032](https://github.com/manticoresoftware/manticoresearch/issues/1032) - Manticore 6.0.0 plain index crashes
+* ❗[Issue #1033](https://github.com/manticoresoftware/manticoresearch/issues/1033) - multiple distributed lost on daemon restart
+
 # Version 6.0.0
 Released: Feb 7 2023
 
@@ -52,7 +61,7 @@ This release also includes more than 130 bug fixes and numerous features, many o
 
   If you are running a replication cluster, you'll need to run `ALTER TABLE <table name> REBUILD SECONDARY` on all the nodes or follow [this instruction](../Securing_and_compacting_a_table/Compacting_a_table.md#Optimizing-clustered-tables) with just change: run the `ALTER .. REBUILD SECONDARY` instead of the `OPTIMIZE`.
 * **⚠️ BREAKING CHANGE**: The binlog version has been updated, so any binlogs from previous versions will not be replayed. It is important to ensure that Manticore Search is stopped cleanly during the upgrade process. This means that there should be no binlog files in `/var/lib/manticore/binlog/` except for `binlog.meta` after stopping the previous instance.
-* [Issue #849](https://github.com/manticoresoftware/manticoresearch/issues/849) `SHOW SETTINGS`: helper command for manticore-backup.
+* [Issue #849](https://github.com/manticoresoftware/manticoresearch/issues/849) `SHOW SETTINGS`: you can now see the settings from the configuration file from inside Manticore.
 * [Issue #1007](https://github.com/manticoresoftware/manticoresearch/issues/1007) [SET GLOBAL CPUSTATS=1/0](../Server_settings/Setting_variables_online.md#SET) turns on/off cpu time tracking; [SHOW THREADS](../Node_info_and_management/SHOW_THREADS.md) now doesn't show CPU statistics when the cpu time tracking is off.
 * [Issue #1009](https://github.com/manticoresoftware/manticoresearch/issues/1009) RT table RAM chunk segments can now be merged while the RAM chunk is being flushed.
 * [Issue #1012](https://github.com/manticoresoftware/manticoresearch/issues/1012) Added secondary index progress to the output of [indexer](../Data_creation_and_modification/Adding_data_from_external_storages/Plain_tables_creation.md#Indexer-tool).
@@ -163,7 +172,8 @@ This release also includes more than 130 bug fixes and numerous features, many o
 * [Issue #1010](https://github.com/manticoresoftware/manticoresearch/issues/1010) Fixed ICU data file location in Windows builds
 * [PR #1018](https://github.com/manticoresoftware/manticoresearch/pull/1018) Handshake send problem
 * [Issue #1020](https://github.com/manticoresoftware/manticoresearch/issues/1020) Display id in show create table
-* [Issue #1024 crash 1](https://github.com/manticoresoftware/manticoresearch/issues/1024) Crash / Segmentation Fault on Facet search with larger number of results. 
+* [Issue #1024 crash 1](https://github.com/manticoresoftware/manticoresearch/issues/1024) Crash / Segmentation Fault on Facet search with larger number of results.
+* [Issue #1026](https://github.com/manticoresoftware/manticoresearch/issues/1026) RT index: searchd "stuck" forever when many documents are being inserted and RAMchunk gets full
 * [Commit 4739](https://github.com/manticoresoftware/manticoresearch/commit/4739dafd) Thread gets stuck on shutdown while replication is busy between nodes
 * [Commit ab87](https://github.com/manticoresoftware/manticoresearch/commit/ab87836782e7ae43fe5f9dea739eed0d336b42c1) Mixing floats and ints in a JSON range filter could make Manticore ignore the filter
 * [Commit d001](https://github.com/manticoresoftware/manticoresearch/commit/d00101c2905f6393ce3fca23c4f6dcb2506f4bd9) Float filters in JSON were inaccurate

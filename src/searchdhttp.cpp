@@ -475,7 +475,7 @@ int HttpRequestParser_c::ParsedBodyLength() const
 
 bool HttpRequestParser_c::Expect100() const
 {
-	return m_hOptions.Exists ( "Expect" ) && m_hOptions["Expect"] == "100-continue";
+	return m_hOptions.Exists ( "expect" ) && m_hOptions["expect"] == "100-continue";
 }
 
 bool HttpRequestParser_c::KeepAlive() const
@@ -586,6 +586,7 @@ void HttpRequestParser_c::ParseList ( Str_t sData, OptionsHash_t & hOptions )
 			{
 				Str_t sVal { sLast, int ( sCur - sLast ) };
 				UriPercentReplace ( sVal );
+				ToLower ( sName );
 				hOptions.Add ( sVal, sName );
 				sLast = sCur + 1;
 				sName = dEmptyStr;
@@ -601,6 +602,7 @@ void HttpRequestParser_c::ParseList ( Str_t sData, OptionsHash_t & hOptions )
 
 	Str_t sVal { sLast, int ( sCur - sLast ) };
 	UriPercentReplace ( sVal );
+	ToLower ( sName );
 	hOptions.Add ( sVal, sName );
 }
 
@@ -693,7 +695,9 @@ inline void HttpRequestParser_c::FinishParserKeyVal()
 
 	HTTPINFO << "FinishParserKeyVal with '" << m_sCurField << "':'" << m_sCurValue << "'";
 
-	m_hOptions.Add ( (CSphString)m_sCurValue, (CSphString)m_sCurField );
+	CSphString sField = (CSphString)m_sCurField;
+	sField.ToLower();
+	m_hOptions.Add ( (CSphString)m_sCurValue, sField );
 	m_sCurField.Clear();
 	m_sCurValue.Clear();
 }
@@ -2067,10 +2071,10 @@ protected:
 
 	const char* IsNDJson() const
 	{
-		if ( !m_tOptions.Exists ( "Content-Type" ) )
+		if ( !m_tOptions.Exists ( "content-type" ) )
 			return "Content-Type must be set";
 
-		auto sContentType = m_tOptions["Content-Type"].ToLower();
+		auto sContentType = m_tOptions["content-type"].ToLower();
 		auto dParts = sphSplit ( sContentType.cstr(), ";" );
 		if ( dParts.IsEmpty() || dParts[0] != "application/x-ndjson" )
 			return "Content-Type must be application/x-ndjson";
@@ -2732,6 +2736,8 @@ static bool ParseMetaLine ( const char * sLine, BulkDoc_t & tDoc, CSphString & s
 			tDoc.m_tDocid = tId.IntVal();
 		else if ( tId.IsStr() )
 			tDoc.m_tDocid = strtoll ( tId.SzVal(), NULL, 10 );
+		else if ( tId.IsNull() )
+			tDoc.m_tDocid = 0;
 		else
 		{
 			sError.SetSprintf ( "_id should be an int or string" );
@@ -2742,9 +2748,17 @@ static bool ParseMetaLine ( const char * sLine, BulkDoc_t & tDoc, CSphString & s
 	return true;
 }
 
-static void AddDocid ( SqlStmt_t & tStmt, DocID_t & tDocId )
+static bool AddDocid ( SqlStmt_t & tStmt, DocID_t & tDocId, CSphString & sError )
 {
 	int iDocidPos = tStmt.m_dInsertSchema.GetFirst ( [&] ( const CSphString & sName ) { return sName=="id"; } );
+	
+	// can not set id at the same time via es meta and via document id property
+	if ( iDocidPos!=-1 && tDocId!=0 )
+	{
+		sError = "id has already been specified";
+		return false;
+	}
+
 	if ( iDocidPos!=-1 )
 	{
 		SqlInsert_t & tVal = tStmt.m_dInsertValues[iDocidPos];
@@ -2755,11 +2769,11 @@ static void AddDocid ( SqlStmt_t & tStmt, DocID_t & tDocId )
 			tVal.m_iType = SqlInsert_t::CONST_INT;
 		}
 		tDocId = tVal.m_iVal;
-		return;
+		return true;
 	}
 
 	if ( !tDocId )
-		return;
+		return true;
 
 	tStmt.m_dInsertSchema.Add ( sphGetDocidName() );
 	SqlInsert_t & tId = tStmt.m_dInsertValues.Add();
@@ -2767,6 +2781,7 @@ static void AddDocid ( SqlStmt_t & tStmt, DocID_t & tDocId )
 	tId.m_iVal = tDocId;
 
 	tStmt.m_iSchemaSz = tStmt.m_dInsertSchema.GetLength();
+	return true;
 }
 
 static bool ParseSourceLine ( const char * sLine, const CSphString & sAction, SqlStmt_t & tStmt, DocID_t & tDocId, CSphString & sError )
@@ -2777,14 +2792,16 @@ static bool ParseSourceLine ( const char * sLine, const CSphString & sAction, Sq
 		JsonObj_c tRoot ( sLine );
 		if ( !ParseJsonInsertSource ( tRoot, tStmt, true, true, sError ) )
 			return false;
-		AddDocid ( tStmt, tDocId );
+		if ( !AddDocid ( tStmt, tDocId, sError ) )
+			return false;
 
 	}  else if ( sAction=="create" )
 	{
 		JsonObj_c tRoot ( sLine );
 		if ( !ParseJsonInsertSource ( tRoot, tStmt, false, true, sError ) )
 			return false;
-		AddDocid ( tStmt, tDocId );
+		if ( !AddDocid ( tStmt, tDocId, sError ) )
+			return false;
 
 	} else if ( sAction=="update" )
 	{
@@ -2852,10 +2869,7 @@ bool HttpHandlerEsBulk_c::Validate()
 {
 	CSphString sError;
 
-	// case insitive option get: content-type
-	CSphString * pOptContentType = GetOptions() ( "Content-Type" );
-	if ( !pOptContentType )
-		pOptContentType = GetOptions() ( "content-type" );
+	CSphString * pOptContentType = GetOptions() ( "content-type" );
 	if ( !pOptContentType )
 	{
 		ReportLogError ( "Content-Type must be set", "illegal_argument_exception", SPH_HTTP_STATUS_400, false );
@@ -2896,6 +2910,7 @@ bool HttpHandlerEsBulk_c::Process()
 	CSphVector<Str_t> dLines;
 	SplitNdJson ( GetBody(), [&] ( const char * sLine, int iLen ) { dLines.Add ( Str_t ( sLine, iLen ) ); } );
 	
+	CSphString sError;
 	CSphVector<BulkDoc_t> dDocs;
 	dDocs.Reserve ( dLines.GetLength() / 2 );
 	bool bNextLineMeta = true;
@@ -2913,9 +2928,9 @@ bool HttpHandlerEsBulk_c::Process()
 
 			// any bad meta result in general error
 			BulkDoc_t & tDoc = dDocs.Add();
-			if ( !ParseMetaLine ( tLine.first, tDoc, m_sError ) )
+			if ( !ParseMetaLine ( tLine.first, tDoc, sError ) )
 			{
-				ReportLogError ( m_sError.cstr(), "action_request_validation_exception", SPH_HTTP_STATUS_400, false );
+				ReportLogError ( sError.cstr(), "action_request_validation_exception", SPH_HTTP_STATUS_400, false );
 				return false;
 			}
 			if ( tDoc.m_sAction=="delete" )
