@@ -2497,7 +2497,7 @@ int main ( int argc, char ** argv )
 
 			sConfig = argv[i];
 
-		} else if ( strcmp ( argv[i], "-i" )==0 || strcmp ( argv[i], "--index" )==0 )
+		} else if ( strcmp ( argv[i], "-i" )==0 || strcmp ( argv[i], "--index" )==0 || strcmp ( argv[i], "-t" )==0 || strcmp ( argv[i], "--table" )==0 )
 		{
 			if ( ++i>=argc )
 				sphDie ( "index name requires an argument" );
@@ -2571,7 +2571,7 @@ int main ( int argc, char ** argv )
 	const CSphConfigType * pIndexes = nullptr;
 	if ( !sConfig.IsEmpty() )
 	{
-		CSphConfig hConfig = sphLoadConfig ( sConfig.cstr(), false, false );
+		CSphConfig hConfig = sphLoadConfig ( sConfig.cstr(), true );
 		pIndexes = hConfig ( "index" );
 
 		if ( ( bAll || !sIndexName.IsEmpty() ) && !pIndexes )
@@ -2675,8 +2675,7 @@ int main ( int argc, char ** argv )
 				sphWarning ( "output-dir failed '%s', skipped", sError.cstr() );
 				continue;
 			}
-
-			tDir.UnlinkFile();
+			// tDir will be unlinked as non-closed
 
 			sIndexOut.SetSprintf ( "%s/%s", legacy::g_sOutDir.cstr(), sIndexFile.cstr() );
 		} else

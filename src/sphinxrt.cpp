@@ -244,7 +244,9 @@ SphAttr_t InsertDocData_t::GetID() const
 
 
 RtSegment_t::RtSegment_t ( DWORD uDocs, const ISphSchema& tSchema )
-	: m_tDeadRowMap ( uDocs )
+	: m_uRows ( uDocs )
+	, m_tAliveRows { uDocs }
+	, m_tDeadRowMap ( uDocs )
 	, m_tSchema { tSchema }
 {
 }
@@ -1132,7 +1134,7 @@ public:
 	bool				DeleteDocument ( const VecTraits_T<DocID_t> & dDocs, CSphString & sError, RtAccum_t * pAccExt ) final;
 	bool				Commit ( int * pDeleted, RtAccum_t * pAccExt, CSphString* pError = nullptr ) final;
 	void				RollBack ( RtAccum_t * pAccExt ) final;
-	int					CommitReplayable ( RtSegment_t * pNewSeg, const VecTraits_T<DocID_t> & dAccKlist ); // returns total killed documents
+	int					CommitReplayable ( RtSegment_t * pNewSeg, const VecTraits_T<DocID_t> & dAccKlist, int64_t iAddTotalBytes ); // returns total killed documents
 	void				ForceRamFlush ( const char * szReason ) final;
 	bool				IsFlushNeed() const final;
 	bool				ForceDiskChunk() final;
@@ -1368,7 +1370,7 @@ private:
 	void						SetMemLimit ( int64_t iMemLimit );
 	void						RecalculateRateLimit ( int64_t iSaved, int64_t iInserted, bool bEmergent );
 	void						AlterSave ( bool bSaveRam );
-	void 						BinlogCommit ( RtSegment_t * pSeg, const VecTraits_T<DocID_t> & dKlist );
+	void 						BinlogCommit ( RtSegment_t * pSeg, const VecTraits_T<DocID_t> & dKlist, int64_t iAddTotalBytes );
 	bool						StopOptimize();
 	void						UpdateUnlockedCount();
 	bool						CheckSegmentConsistency ( const RtSegment_t* pNewSeg, bool bSilent=true ) const;
@@ -1865,12 +1867,8 @@ bool RtIndex_c::AddDocument ( InsertDocData_t & tDoc, bool bReplace, const CSphS
 	CSphVector<CSphVector<BYTE>> dTmpAttrStorage;
 	DocstoreBuilder_i::Doc_t tStoredDoc;
 	DocstoreBuilder_i::Doc_t * pStoredDoc = FetchDocFields ( tStoredDoc, tDoc, tSrc, dTmpAttrStorage );
-	if ( !AddDocument ( pHits, tDoc, bReplace, pStoredDoc, sError, sWarning, pAcc ) )
-		return false;
-
-	m_tStats.m_iTotalBytes += tSrc.GetStats().m_iTotalBytes;
-
-	return true;
+	tDoc.m_iTotalBytes = tSrc.GetStats().m_iTotalBytes;
+	return AddDocument ( pHits, tDoc, bReplace, pStoredDoc, sError, sWarning, pAcc );
 }
 
 
@@ -2068,8 +2066,6 @@ RtSegment_t * CreateSegment ( RtAccum_t* pAcc, int iWordsCheckpoint, ESphHitless
 	if ( pAcc->m_bKeywordDict )
 		FixupSegmentCheckpoints(pSeg);
 
-	pSeg->m_uRows = pAcc->m_uAccumDocs;
-	pSeg->m_tAliveRows.store ( pAcc->m_uAccumDocs, std::memory_order_relaxed );
 	pSeg->m_dRows.SwapData( pAcc->m_dAccumRows);
 	pSeg->m_dBlobs.SwapData( pAcc->m_dBlobs);
 	std::swap ( pSeg->m_pDocstore, pAcc->m_pDocstore );
@@ -2747,7 +2743,7 @@ bool RtIndex_c::Commit ( int * pDeleted, RtAccum_t * pAcc, CSphString* pError )
 	pAcc->m_dAccumKlist.Uniq ();
 
 	// now on to the stuff that needs locking and recovery
-	auto iKilled = CommitReplayable ( pNewSeg, pAcc->m_dAccumKlist );
+	auto iKilled = CommitReplayable ( pNewSeg, pAcc->m_dAccumKlist, pAcc->m_iAccumBytes );
 	if ( pDeleted )
 		*pDeleted = iKilled;
 
@@ -3090,7 +3086,7 @@ int CommitID() {
 }
 } // namespace
 
-int RtIndex_c::CommitReplayable ( RtSegment_t * pNewSeg, const VecTraits_T<DocID_t> & dAccKlist ) REQUIRES_SHARED ( pNewSeg->m_tLock )
+int RtIndex_c::CommitReplayable ( RtSegment_t * pNewSeg, const VecTraits_T<DocID_t> & dAccKlist, int64_t iAddTotalBytes ) REQUIRES_SHARED ( pNewSeg->m_tLock )
 {
 	// store statistics, because pNewSeg just might get merged
 	const int iId = CommitID();
@@ -3130,7 +3126,7 @@ int RtIndex_c::CommitReplayable ( RtSegment_t * pNewSeg, const VecTraits_T<DocID
 	RTLOGV << "CommitReplayable";
 
 	// first of all, binlog txn data for recovery
-	BinlogCommit ( pNewSeg, dAccKlist );
+	BinlogCommit ( pNewSeg, dAccKlist, iAddTotalBytes );
 
 	// 1. Apply kill-list to existing chunks/segments
 	int iTotalKilled = ApplyKillList ( dAccKlist );
@@ -3145,6 +3141,7 @@ int RtIndex_c::CommitReplayable ( RtSegment_t * pNewSeg, const VecTraits_T<DocID
 
 	// update stats
 	m_tStats.m_iTotalDocuments += iNewDocs - iTotalKilled;
+	m_tStats.m_iTotalBytes += iAddTotalBytes;
 
 	if ( dLens.GetLength() )
 		for ( int i = 0; i < m_tSchema.GetFieldsCount(); ++i )
@@ -3610,6 +3607,9 @@ bool RtIndex_c::WriteDocs ( SaveDiskDataContext_t & tCtx, CSphWriter & tWriterDi
 	}
 
 	tCtx.m_tDocsOffset = tWriterDocs.GetPos();
+	tWriterHits.CloseFile();
+	tWriterDocs.CloseFile();
+	tWriterSkips.CloseFile();
 	return true;
 }
 
@@ -4768,7 +4768,6 @@ bool RtIndex_c::LoadRamChunk ( DWORD uVersion, bool bRebuildInfixes, bool bFixup
 		DWORD uRows = rdChunk.GetDword();
 
 		RtSegmentRefPtf_t pSeg { new RtSegment_t ( uRows, m_tSchema ) };
-		pSeg->m_uRows = uRows;
 		pSeg->m_tAliveRows.store ( rdChunk.GetDword (), std::memory_order_relaxed );
 
 		rdChunk.GetDword ();
@@ -6769,6 +6768,67 @@ void SorterSchemaTransform_c::Transform ( ISphMatchSorter * pSorter, const RtGua
 }
 
 
+static int64_t CalcMaxCountDistinct ( const CSphQuery & tQuery, const RtGuard_t & tGuard )
+{
+	if ( tQuery.m_sGroupBy.IsEmpty() )
+		return -1;
+
+	int64_t iMaxCountDistinct = -1;
+	for ( auto & i : tGuard.m_dDiskChunks )
+	{
+		int iGroupby = GetAliasedAttrIndex ( tQuery.m_sGroupBy, tQuery, i->Cidx().GetMatchSchema() );
+		if ( iGroupby>=0 )
+		{
+			int64_t iCountDistinct = i->Cidx().GetCountDistinct ( i->Cidx().GetMatchSchema().GetAttr(iGroupby).m_sName );
+			if ( iCountDistinct==-1 )
+				return -1;	// if one of the chunks doesn't have that info, we can't calculate max
+
+			iMaxCountDistinct = Max ( iCountDistinct, iMaxCountDistinct );
+		}
+	}
+
+	return iMaxCountDistinct;
+}
+
+
+static bool CalcDiskChunkSplits ( IntVec_t & dSplits, int iJobs, const CSphQuery & tQuery, const CSphMultiQueryArgs & tArgs, const RtGuard_t & tGuard, int iConcurrency )
+{
+	int64_t iMaxCountDistinct = CalcMaxCountDistinct ( tQuery, tGuard );
+
+	dSplits.Resize(iJobs);
+	dSplits.Fill(1);
+
+	int iSingleSplit = 0;
+	int64_t iTotalMetric = 0;
+	CSphVector<int64_t> dMetrics { iJobs };
+	ARRAY_FOREACH ( i, dMetrics )
+	{
+		bool bForceSingleThread = false;
+		dMetrics[i] = tGuard.m_dDiskChunks[i]->Cidx().GetPseudoShardingMetric ( { &tQuery, 1 }, { &iMaxCountDistinct, 1 }, iConcurrency, bForceSingleThread );
+		if ( bForceSingleThread )
+			return false;
+
+		if ( dMetrics[i]>0 )
+			iTotalMetric += dMetrics[i];
+		else
+			iSingleSplit++;
+	}
+
+	// we have more free threads than disk chunks; makes sense to apply pseudo_sharding
+	if ( tArgs.m_iSplit>iJobs )
+	{
+		int iLeft = tArgs.m_iSplit - iSingleSplit;
+		assert(iLeft>=0);
+
+		ARRAY_FOREACH ( i, dSplits )
+			if ( dMetrics[i]>0 )
+				dSplits[i] = Max ( (int)round ( double ( dMetrics[i] ) / iTotalMetric * iLeft ), 1 );
+	}
+
+	return true;
+}
+
+
 static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tResult, const CSphMultiQueryArgs & tArgs, const RtGuard_t & tGuard, VecTraits_T<ISphMatchSorter *> & dSorters, QueryProfile_c * pProfiler, bool bGotLocalDF, const SmallStringHash_T<int64_t> * pLocalDocs, int64_t iTotalDocs, const char * szIndexName, SorterSchemaTransform_c & tSSTransform, int64_t tmMaxTimer )
 {
 	// counter of tasks we will issue now
@@ -6784,38 +6844,19 @@ static void QueryDiskChunks ( const CSphQuery & tQuery, CSphQueryResultMeta & tR
 	// the context
 	ClonableCtx_T<DiskChunkSearcherCtx_t, DiskChunkSearcherCloneCtx_t, Threads::ECONTEXT::ORDERED> tClonableCtx { dSorters, tResult };
 	auto pDispatcher = Dispatcher::Make ( iJobs, tQuery.m_iCouncurrency, tDispatch, tClonableCtx.IsSingle() );
-	tClonableCtx.LimitConcurrency ( pDispatcher->GetConcurrency() );
-
-	auto iStart = sphMicroTimer();
-	sphLogDebugv ( "Started: " INT64_FMT, sphMicroTimer()-iStart );
 
 	// because disk chunk search within the loop will switch the profiler state
 	SwitchProfile ( pProfiler, SPH_QSTATE_INIT );
 
 	IntVec_t dSplits {iJobs};
-	dSplits.Fill(1);
-	if ( tArgs.m_iSplit>iJobs )
-	{
-		// we have more free threads than disk chunks; makes sense to apply pseudo_sharding
-		int iSingleSplit = 0;
-		int64_t iTotalMetric = 0;
-		CSphVector<int64_t> dMetrics { iJobs };
-		ARRAY_FOREACH ( i, dMetrics )
-		{
-			dMetrics[i] = tGuard.m_dDiskChunks[i]->Cidx().GetPseudoShardingMetric ( { &tQuery, 1 } );
-			if ( dMetrics[i]>0 )
-				iTotalMetric += dMetrics[i];
-			else
-				iSingleSplit++;
-		}
+	int iThreads = pDispatcher->GetConcurrency();
+	if ( !CalcDiskChunkSplits ( dSplits, iJobs, tQuery, tArgs, tGuard, iThreads ) )
+		iThreads = 1;
 
-		int iLeft = tArgs.m_iSplit - iSingleSplit;
-		assert(iLeft>=0);
+	tClonableCtx.LimitConcurrency(iThreads);
 
-		ARRAY_FOREACH ( i, dSplits )
-			if ( dMetrics[i]>0 )
-				dSplits[i] = Max ( (int)round ( double ( dMetrics[i] ) / iTotalMetric * iLeft ), 1 );
-	}
+	auto iStart = sphMicroTimer();
+	sphLogDebugv ( "Started: " INT64_FMT, sphMicroTimer()-iStart );
 
 	std::atomic<bool> bInterrupt {false};
 	auto CheckInterrupt = [&bInterrupt]() { return bInterrupt.load ( std::memory_order_relaxed ); };
@@ -8577,7 +8618,6 @@ ConstDiskChunkRefPtr_t RtIndex_c::MergeDiskChunks ( const char* szParentAction, 
 
 	const CSphIndex& tChunkA = pChunkA->Cidx();
 	const CSphIndex& tChunkB = pChunkB->Cidx();
-	CSphString sFirst = tChunkA.GetFilebase();
 
 	ConstDiskChunkRefPtr_t pChunk;
 
@@ -8586,13 +8626,9 @@ ConstDiskChunkRefPtr_t RtIndex_c::MergeDiskChunks ( const char* szParentAction, 
 	{
 		if ( sError.IsEmpty() && tProgress.GetMergeCb().NeedStop() )
 			sError = "interrupted because of shutdown";
-		sphWarning ( "rt %s: index %s: failed to %s %s (%s)", szParentAction, GetName(), dFilters.IsEmpty() ? "merge" : "split", sFirst.cstr(), sError.cstr() );
+		sphWarning ( "rt %s: index %s: failed to %s %s (%s)", szParentAction, GetName(), dFilters.IsEmpty() ? "merge" : "split", tChunkA.GetFilebase(), sError.cstr() );
 		return pChunk;
 	}
-
-	// check forced exit after long operation
-	if ( tProgress.GetMergeCb().NeedStop() )
-		return pChunk;
 
 	auto fnFnameBuilder = GetIndexFilenameBuilder();
 	std::unique_ptr<FilenameBuilder_i> pFilenameBuilder;
@@ -8600,10 +8636,11 @@ ConstDiskChunkRefPtr_t RtIndex_c::MergeDiskChunks ( const char* szParentAction, 
 		pFilenameBuilder = fnFnameBuilder ( GetName() );
 
 	// prealloc new (optimized) chunk
-	CSphString sChunk = SphSprintf( "%s.tmp", sFirst.cstr() );
+	CSphString sChunk = tChunkA.GetFilename ( "tmp" );
 
-	StrVec_t dWarnings; // FIXME! report warnings
+	StrVec_t dWarnings;
 	pChunk = DiskChunk_c::make ( PreallocDiskChunk ( sChunk, tChunkA.m_iChunk, pFilenameBuilder.get(), dWarnings, sError, tChunkA.GetName() ) );
+	dWarnings.for_each ( [] ( const auto& sWarning ) { sphWarning ( "PreallocDiskChunk warning: %s", sWarning.cstr() ); } );
 
 	if ( pChunk )
 		pChunk->m_bFinallyUnlink = true; // on destroy files will be deleted. Caller must explicitly reset this flag if chunk is usable
@@ -8663,16 +8700,17 @@ static int64_t NumAliveDocs ( const CSphIndex& dChunk )
 	return dChunk.GetStats().m_iTotalDocuments - tStatus.m_iDead;
 }
 
-void RtIndex_c::BinlogCommit ( RtSegment_t * pSeg, const VecTraits_T<DocID_t> & dKlist ) REQUIRES ( pSeg->m_tLock )
+void RtIndex_c::BinlogCommit ( RtSegment_t * pSeg, const VecTraits_T<DocID_t> & dKlist, int64_t iAddTotalBytes ) REQUIRES ( pSeg->m_tLock )
 {
 //	Tracer::AsyncOp tTracer ( "rt", "RtIndex_c::BinlogCommit" );
-	Binlog::Commit ( Binlog::COMMIT, &m_iTID, GetName(), false, [pSeg,&dKlist,this] (CSphWriter& tWriter) REQUIRES ( pSeg->m_tLock )
+	Binlog::Commit ( Binlog::COMMIT, &m_iTID, GetName(), false, [pSeg,&dKlist,iAddTotalBytes,this] (CSphWriter& tWriter) REQUIRES ( pSeg->m_tLock )
 	{
 		if ( !pSeg || !pSeg->m_uRows )
 			tWriter.ZipOffset ( 0 );
 		else
 		{
 			tWriter.ZipOffset ( pSeg->m_uRows );
+			tWriter.ZipOffset(iAddTotalBytes);
 			Binlog::SaveVector ( tWriter, pSeg->m_dWords );
 			tWriter.ZipOffset ( pSeg->m_dWordCheckpoints.GetLength() );
 			if ( !m_bKeywordDict )
@@ -8724,13 +8762,13 @@ Binlog::CheckTnxResult_t RtIndex_c::ReplayCommit ( CSphReader & tReader, CSphStr
 	CSphRefcountedPtr<RtSegment_t> pSeg;
 	CSphVector<DocID_t> dKlist;
 
+	int64_t iAddTotalBytes = 0;
 	DWORD uRows = tReader.UnzipOffset();
 	if ( uRows )
 	{
+		iAddTotalBytes = (int64_t)tReader.UnzipOffset();
 		pSeg = new RtSegment_t(uRows, m_tSchema);
 		FakeWL_t _ ( pSeg->m_tLock );
-		pSeg->m_uRows = uRows;
-		pSeg->m_tAliveRows.store ( uRows, std::memory_order_relaxed );
 
 		if ( !Binlog::LoadVector ( tReader, pSeg->m_dWords ) ) return Warn ( sError, tReader );
 		pSeg->m_dWordCheckpoints.Resize ( (int) tReader.UnzipOffset() ); // FIXME! sanity check
@@ -8789,7 +8827,7 @@ Binlog::CheckTnxResult_t RtIndex_c::ReplayCommit ( CSphReader & tReader, CSphStr
 
 		// actually replay
 		FakeRL_t _ ( pSeg.operator RtSegment_t*()->m_tLock);
-		CommitReplayable ( pSeg, dKlist );
+		CommitReplayable ( pSeg, dKlist, iAddTotalBytes );
 		tRes.m_bApply = true;
 	}
 	return tRes;

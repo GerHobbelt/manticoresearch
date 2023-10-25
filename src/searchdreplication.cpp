@@ -606,7 +606,8 @@ std::pair<int, CSphString> WaitClusterCommit ( const CSphString& sCluster, int i
 // commands version (commands these got replicated via Galera)
 // ver 0x104 added docstore from RT index
 // ver 0x105 fixed CSphWordHit serialization - instead of direct raw blob copy only fields sent (16 bytes vs 24)
-static const WORD g_iReplicateCommandVer = 0x105;
+// ver 0x106 add total indexed bytes to accum
+static const WORD g_iReplicateCommandVer = 0x106;
 
 // log debug info about cluster nodes as current nodes views that
 static void LogGroupView ( const wsrep_view_info_t * pView )
@@ -4034,7 +4035,7 @@ private:
 		if ( !bRestart && m_iFile==iFile )
 			return true;
 
-		if ( !m_pMerge.get() )
+		if ( !m_pMerge )
 		{
 			sError.SetSprintf ( "missed write state" );
 			return false;
@@ -5571,13 +5572,12 @@ bool CheckIndexCluster ( const CSphString & sIndexName, const ServedDesc_t & tDe
 	return false;
 }
 
-Optional_T<CSphString> IsPartOfCluster ( const ServedDesc_t * pDesc )
+std::optional<CSphString> IsPartOfCluster ( const ServedDesc_t * pDesc )
 {
-	Optional_T<CSphString> sResult;
 	assert ( pDesc );
 	if ( !pDesc->m_sCluster.IsEmpty() )
-		sResult.emplace ( pDesc->m_sCluster );
-	return sResult;
+		return pDesc->m_sCluster;
+	return {};
 }
 
 // command to all remote nodes at cluster to get actual nodes list

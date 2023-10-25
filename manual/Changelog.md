@@ -9,7 +9,7 @@
 * Added `KILL`
 * Added [FREEZE/UNFREEZE](../Securing_and_compacting_an_index/Freezing_a_table.md) to prepare a real-time/plain table for a backup
 * Dynamic `max_matches` for aggregation queries to increase accuracy and lower response time
-* 64-bit IDs
+* Support for signed negative 64-bit IDs. Note, you still can't use IDs > 2^63, but you can now use ids in the range of from -2^63 to 0.
 
 ### Minor changes
 * Queries with stateful UDFs are now forced to be executed in a single thread
@@ -21,7 +21,6 @@
 
   If you are running a replication cluster, you'll need to run `ALTER TABLE <table name> REBUILD SECONDARY` on all the nodes or follow [this instruction](../Securing_and_compacting_an_index/Compacting_an_index.md#Optimizing-clustered-indexes) with just change: run the `ALTER .. REBUILD SECONDARY` instead of the `OPTIMIZE`.
 * `SHOW SETTINGS`
-* `disable_ps_threshold`
 * `max_matches_increase_threshold`
 
 ### Packaging

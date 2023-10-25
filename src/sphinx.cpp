@@ -1270,7 +1270,7 @@ public:
 	SI::Index_i *		Debug_GetSI() const override { return m_pSIdx.get(); }
 
 	bool				CheckEarlyReject ( const CSphVector<CSphFilterSettings> & dFilters, const ISphFilter * pFilter, ESphCollation eCollation, const ISphSchema & tSchema ) const;
-	int64_t				GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries ) const override;
+	int64_t				GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, int iThreads, bool & bForceSingleThread ) const override;
 	int64_t				GetCountDistinct ( const CSphString & sAttr ) const override;
 
 private:
@@ -1381,7 +1381,7 @@ private:
 	RowidIterator_i *			CreateColumnarAnalyzerOrPrefilter ( CSphVector<SecondaryIndexInfo_t> & dSIInfo, const CSphVector<CSphFilterSettings> & dFilters, const CSphVector<FilterTreeItem_t> & dFilterTree, const ISphFilter * pFilter, ESphCollation eCollation, const ISphSchema & tSchema, CSphString & sWarning ) const;
 
 	bool						SplitQuery ( CSphQueryResult & tResult, const CSphQuery & tQuery, const VecTraits_T<ISphMatchSorter *> & dAllSorters, const CSphMultiQueryArgs & tArgs, int64_t tmMaxTimer ) const;
-	RowidIterator_i *			SpawnIterators ( const CSphQuery & tQuery, CSphQueryContext & tCtx, CreateFilterContext_t & tFlx, const ISphSchema & tMaxSorterSchema, CSphQueryResultMeta & tMeta, int iCutoff, CSphVector<CSphFilterSettings> & dModifiedFilters ) const;
+	RowidIterator_i *			SpawnIterators ( const CSphQuery & tQuery, CSphQueryContext & tCtx, CreateFilterContext_t & tFlx, const ISphSchema & tMaxSorterSchema, CSphQueryResultMeta & tMeta, int iCutoff, int iThreads, CSphVector<CSphFilterSettings> & dModifiedFilters ) const;
 
 	bool						IsQueryFast ( const CSphQuery & tQuery ) const;
 
@@ -2021,7 +2021,7 @@ int CSphIndex::UpdateAttributes ( AttrUpdateInc_t& tUpd, bool& bCritical, CSphSt
 
 CSphVector<SphAttr_t> CSphIndex::BuildDocList () const
 {
-	TlsMsg::Err(); // reset error
+	TlsMsg::ResetErr(); // reset error
 	return {};
 }
 
@@ -2038,7 +2038,7 @@ void CSphIndex::SetMutableSettings ( const MutableIndexSettings_c & tSettings )
 }
 
 
-int64_t CSphIndex::GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries ) const
+int64_t CSphIndex::GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, int iThreads, bool & bForceSingleThread ) const
 {
 	int64_t iTotalDocs = GetStats().m_iTotalDocuments;
 	return iTotalDocs > g_iSplitThresh ? iTotalDocs : -1;
@@ -2928,17 +2928,39 @@ bool CSphIndex_VLN::IsQueryFast ( const CSphQuery & tQuery ) const
 }
 
 
-int64_t CSphIndex_VLN::GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries ) const
+static bool CheckQueryFilters ( const CSphQuery & tQuery, const CSphSchema & tSchema )
+{
+	for ( auto & tFilter : tQuery.m_dFilters )
+	{
+		CommonFilterSettings_t tFixedSettings;
+		CSphString sError;
+		CreateFilterContext_t tCtx;
+		tCtx.m_pSchema = &tSchema;
+		if ( !FixupFilterSettings ( tFilter, tFixedSettings, tCtx, tFilter.m_sAttrName, sError ) )
+			return false;
+	}
+
+	return true;
+}
+
+
+int64_t CSphIndex_VLN::GetPseudoShardingMetric ( const VecTraits_T<const CSphQuery> & dQueries, const VecTraits_T<int64_t> & dMaxCountDistinct, int iThreads, bool & bForceSingleThread ) const
 {
 	bool bAllFast = true;
 	const float COST_THRESH = 0.5f;
 
 	ESphCollation eCollation = dQueries.GetLength() ? dQueries.Begin()->m_eCollation : SPH_COLLATION_DEFAULT;
 
-	for ( const auto & i : dQueries )
+	ARRAY_FOREACH ( i, dQueries )
 	{
+		auto & tQuery = dQueries[i];
+		int iMaxCountDistinct = dMaxCountDistinct[i];
 		float fCost = FLT_MAX;
-		SelectIteratorCtx_t tCtx ( i.m_dFilters, i.m_dFilterTree, i.m_dIndexHints, m_tSchema, m_pHistograms, m_pSIdx.get(), eCollation, i.m_iCutoff, m_iDocinfo );
+
+		if ( !CheckQueryFilters ( tQuery, m_tSchema ) )
+			continue;
+
+		SelectIteratorCtx_t tCtx ( tQuery.m_dFilters, tQuery.m_dFilterTree, tQuery.m_dIndexHints, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), eCollation, tQuery.m_iCutoff, m_iDocinfo, iThreads );
 		CSphVector<SecondaryIndexInfo_t> dEnabledIndexes = SelectIterators ( tCtx, fCost );
 
 		// disable pseudo sharding if any of the queries use secondary indexes/docid lookups
@@ -2946,32 +2968,53 @@ int64_t CSphIndex_VLN::GetPseudoShardingMetric ( const VecTraits_T<const CSphQue
 			return -1;
 
 		bool bFastQuery = false;
-		if ( i.m_sQuery.IsEmpty() )
+		if ( tQuery.m_sQuery.IsEmpty() )
 			bFastQuery = dEnabledIndexes.GetLength() && fCost<=COST_THRESH;
 		else
-			bFastQuery = IsQueryFast(i);
+			bFastQuery = IsQueryFast(tQuery);
 
 		bAllFast &= bFastQuery;
 
-		// if there's a groupby query and and count distinct is bigger than 64k unique values
-		// then pseudo_sharding will probably consume too much memory and produce incorrect (too approximate) results
-		// so disable it
-		if ( m_pSIdx.get() && !i.m_sGroupBy.IsEmpty() )
+		// at this point we are trying to decide how many threads this index gets
+		// we did not correct max_matches yet (to achieve max grouping accuracy)
+		// but if increasing max_matches would be enough to achieve max accuracy, there's no need to turn off multithreading
+		// that's why now we try to guess if increasing max_matches is enough
+		bool bAccurateAggregation = tQuery.m_bExplicitAccurateAggregation ? tQuery.m_bAccurateAggregation : GetAccurateAggregationDefault();
+		if ( bAccurateAggregation && !tQuery.m_sGroupBy.IsEmpty() )
 		{
-			const int TOOMANY_MAXMATCHES = 65536;
-			int iTooMany = i.m_iPseudoThresh ? i.m_iPseudoThresh : TOOMANY_MAXMATCHES;
-			int iCountDistinct = m_pSIdx.get()->GetCountDistinct ( i.m_sGroupBy.cstr() );
-			if ( iCountDistinct>=iTooMany )
-				return -1;
+			int iGroupby = GetAliasedAttrIndex ( tQuery.m_sGroupBy, tQuery, m_tSchema );
+			if ( iGroupby>0 )
+			{
+				if ( iMaxCountDistinct==-1 )
+					iMaxCountDistinct = GetCountDistinct ( tQuery.m_sGroupBy );
 
-			// fixme! maybe let the index know it is running under pseudo_sharding so that it can apply the *1.5 boost for max_matches
+				if ( iMaxCountDistinct==-1 )
+				{
+					bForceSingleThread = true;
+					return -1;	// no info on max_matches; disable ps
+				}
+				else
+				{
+					if ( tQuery.m_bExplicitMaxMatches && iMaxCountDistinct > tQuery.m_iMaxMatches )
+					{
+						bForceSingleThread = true;
+						return -1;	// can't change max_matches and not enough were set; disable ps
+					}
+
+					if ( iMaxCountDistinct > tQuery.m_iMaxMatchThresh )
+					{
+						bForceSingleThread = true;
+						return -1; // max_matches can't be increased; disable ps
+					}
+				}
+			}
 		}
 	}
 
 	if ( bAllFast )
 		return -1;
 
-	return CSphIndex::GetPseudoShardingMetric(dQueries);
+	return CSphIndex::GetPseudoShardingMetric ( dQueries, dMaxCountDistinct, iThreads, bForceSingleThread );
 }
 
 
@@ -4270,43 +4313,6 @@ bool LoadHitlessWords ( const CSphString & sHitlessFiles, const TokenizerRefPtr_
 }
 
 
-class DeleteOnFail_c : public ISphNoncopyable
-{
-public:
-	DeleteOnFail_c() : m_bShitHappened ( true )
-	{}
-	~DeleteOnFail_c()
-	{
-		if ( m_bShitHappened )
-		{
-			ARRAY_FOREACH ( i, m_dWriters )
-				m_dWriters[i]->UnlinkFile();
-
-			ARRAY_FOREACH ( i, m_dAutofiles )
-				m_dAutofiles[i]->SetTemporary();
-		}
-	}
-	void AddWriter ( CSphWriter * pWr )
-	{
-		if ( pWr )
-			m_dWriters.Add ( pWr );
-	}
-	void AddAutofile ( CSphAutofile * pAf )
-	{
-		if ( pAf )
-			m_dAutofiles.Add ( pAf );
-	}
-	void AllIsDone()
-	{
-		m_bShitHappened = false;
-	}
-private:
-	bool	m_bShitHappened;
-	CSphVector<CSphWriter*> m_dWriters;
-	CSphVector<CSphAutofile*> m_dAutofiles;
-};
-
-
 bool CSphIndex_VLN::Build_CollectQueryMvas ( const CSphVector<CSphSource*> & dSources, QueryMvaContainer_c & tMvaContainer )
 {
 	CSphBitvec dQueryMvas ( m_tSchema.GetAttrsCount() );
@@ -4531,8 +4537,8 @@ static void BuildStoreHistograms ( const CSphSchema & tSchema, DocID_t tDocId, C
 			case SPH_ATTR_STRING:
 			{
 				const CSphString & sVal = tSource.GetStrAttr ( tItem.m_iAttr );
-				SphAttr_t uHash = sphCRC32 ( sVal.scstr() );
-				tItem.m_pHist->Insert ( uHash );
+				int iLen = sVal.Length();
+				tItem.m_pHist->Insert ( iLen ? LibcCIHash_fn::Hash ( (const BYTE*)sVal.scstr(), iLen ) : 0 );
 			}
 			break;
 
@@ -4891,12 +4897,12 @@ bool CSphIndex_VLN::SortDocidLookup ( int iFD, int nBlocks, int iMemoryLimit, in
 	if ( !nBlocks )
 		return true;
 
-	DocidLookupWriter_c tWriter ( (DWORD)m_tStats.m_iTotalDocuments );
-	if ( !tWriter.Open ( GetFilename ( SPH_EXT_SPT ), m_sLastError ) )
+	CSphWriter tfWriter;
+	if ( !tfWriter.OpenFile ( GetFilename ( SPH_EXT_SPT ), m_sLastError ) )
 		return false;
 
-	DeleteOnFail_c tWatchdog;
-	tWatchdog.AddWriter ( &tWriter.GetWriter() );
+	DocidLookupWriter_c tWriter ( tfWriter, (DWORD)m_tStats.m_iTotalDocuments );
+	tWriter.Start();
 
 	RawVector_T<CSphBin> dBins;
 	SphOffset_t iSharedOffset = -1;
@@ -4962,7 +4968,6 @@ bool CSphIndex_VLN::SortDocidLookup ( int iFD, int nBlocks, int iMemoryLimit, in
 	// clean up readers
 	dBins.Reset();
 
-	tWatchdog.AllIsDone();
 	tProgress.m_iDocids = tProgress.m_iDocidsTotal;
 	tProgress.PhaseEnd();
 	return true;
@@ -5357,10 +5362,8 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 	const bool bGotPrevIndex = tPrevAttrs.Init ( m_sKeepAttrs, m_dKeepAttrs, m_tSchema );
 
 	// create temp files
-	CSphString sFileSPP = m_bInplaceSettings ? GetFilename ( SPH_EXT_SPP ) : GetFilename ( "tmp1" );
-
 	CSphAutofile fdLock ( GetFilename ( "tmp0" ), SPH_O_NEW, m_sLastError, true );
-	CSphAutofile fdHits ( sFileSPP, SPH_O_NEW, m_sLastError, !m_bInplaceSettings );
+	CSphAutofile fdHits ( ( m_bInplaceSettings ? GetFilename ( SPH_EXT_SPP ) : GetFilename ( "tmp1" ) ), SPH_O_NEW, m_sLastError, true );
 	CSphAutofile fdTmpLookup ( GetFilename ( "tmp2" ), SPH_O_NEW, m_sLastError, true );
 
 	CSphWriter tWriterSPA;
@@ -5369,11 +5372,6 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 	// write to temp file because of possible --keep-attrs option which loads prev index
 	if ( bHaveNonColumnarAttrs && !tWriterSPA.OpenFile ( GetTmpFilename ( SPH_EXT_SPA ), m_sLastError ) )
 		return 0;
-
-	DeleteOnFail_c dFileWatchdog;
-
-	if ( m_bInplaceSettings )
-		dFileWatchdog.AddAutofile ( &fdHits );
 
 	if ( fdLock.GetFD()<0 || fdHits.GetFD()<0 )
 		return 0;
@@ -5979,7 +5977,8 @@ int CSphIndex_VLN::Build ( const CSphVector<CSphSource*> & dSources, int iMemory
 	ARRAY_FOREACH ( i, dSources )
 		dSources[i]->PostIndex ();
 
-	dFileWatchdog.AllIsDone();
+	if ( m_bInplaceSettings )
+		fdHits.SetPersistent();
 	return 1;
 } // NOLINT function length
 
@@ -6595,6 +6594,11 @@ bool CSphIndex_VLN::DoMerge ( const CSphIndex_VLN * pDstIndex, const CSphIndex_V
 
 	BuildHeader_t tBuildHeader ( pDstIndex->m_tStats );
 
+	// merging attributes is separate complete stage; files are finally prepared after it.
+	// however, if interrupt is requested after that stage - we need list of the files
+	// to gracefully unlink them.
+	StrVec_t dDeleteOnInterrupt;
+
 	// merging attributes
 	{
 		AttrMerger_c tAttrMerger { tMonitor, sError, iTotalDocs };
@@ -6607,13 +6611,16 @@ bool CSphIndex_VLN::DoMerge ( const CSphIndex_VLN * pDstIndex, const CSphIndex_V
 		if ( !bCompress && !tAttrMerger.CopyAttributes ( *pSrcIndex, dSrcRows, tTotalDocs.second ) )
 			return false;
 
-		if ( !tAttrMerger.FinishMergeAttributes ( pDstIndex, tBuildHeader ) )
+		if ( !tAttrMerger.FinishMergeAttributes ( pDstIndex, tBuildHeader, &dDeleteOnInterrupt ) )
 			return false;
 	}
 
+	// unlink prepared attribute files on exit, if any
+	AT_SCOPE_EXIT ( [&dDeleteOnInterrupt] { dDeleteOnInterrupt.for_each ( [] ( const auto& sFile ) { ::unlink ( sFile.cstr() ); } ); } );
+
 	const CSphIndex_VLN* pSettings = ( bSrcSettings ? pSrcIndex : pDstIndex );
 	CSphAutofile tTmpDict ( pDstIndex->GetFilename("spi.tmp"), SPH_O_NEW, sError, true ); // that is huge file with bins
-	CSphAutofile tDict ( pDstIndex->GetTmpFilename ( SPH_EXT_SPI ), SPH_O_NEW, sError );
+	CSphAutofile tDict ( pDstIndex->GetTmpFilename ( SPH_EXT_SPI ), SPH_O_NEW, sError, true );
 
 	if ( !sError.IsEmpty() || tTmpDict.GetFD()<0 || tDict.GetFD()<0 || tMonitor.NeedStop() )
 		return false;
@@ -6669,6 +6676,10 @@ bool CSphIndex_VLN::DoMerge ( const CSphIndex_VLN * pDstIndex, const CSphIndex_V
 	tWriteHeader.m_pFieldLens = pSettings->m_dFieldLens.Begin();
 
 	IndexBuildDone ( tBuildHeader, tWriteHeader, pDstIndex->GetTmpFilename ( SPH_EXT_SPH ), sError );
+
+	// we're done; clean all deferred deletes
+	tDict.SetPersistent();
+	dDeleteOnInterrupt.Reset();
 
 	return true;
 }
@@ -6995,7 +7006,7 @@ bool CSphIndex_VLN::EarlyReject ( CSphQueryContext * pCtx, CSphMatch & tMatch ) 
 
 CSphVector<SphAttr_t> CSphIndex_VLN::BuildDocList () const
 {
-	TlsMsg::Err(); // clean err
+	TlsMsg::ResetErr(); // clean err
 	CSphVector<SphAttr_t> dResult;
 	if ( !m_iDocinfo )
 		return dResult;
@@ -7835,10 +7846,10 @@ static void RecreateFilters ( const CSphVector<SecondaryIndexInfo_t> & dSIInfo, 
 }
 
 
-RowidIterator_i * CSphIndex_VLN::SpawnIterators ( const CSphQuery & tQuery, CSphQueryContext & tCtx, CreateFilterContext_t & tFlx, const ISphSchema & tMaxSorterSchema, CSphQueryResultMeta & tMeta, int iCutoff, CSphVector<CSphFilterSettings> & dModifiedFilters ) const
+RowidIterator_i * CSphIndex_VLN::SpawnIterators ( const CSphQuery & tQuery, CSphQueryContext & tCtx, CreateFilterContext_t & tFlx, const ISphSchema & tMaxSorterSchema, CSphQueryResultMeta & tMeta, int iCutoff, int iThreads, CSphVector<CSphFilterSettings> & dModifiedFilters ) const
 {
 	float fCost = FLT_MAX;
-	SelectIteratorCtx_t tSelectIteratorCtx ( tQuery.m_dFilters, tQuery.m_dFilterTree, tQuery.m_dIndexHints, m_tSchema, m_pHistograms, m_pSIdx.get(), tQuery.m_eCollation, tQuery.m_iCutoff, m_iDocinfo );
+	SelectIteratorCtx_t tSelectIteratorCtx ( tQuery.m_dFilters, tQuery.m_dFilterTree, tQuery.m_dIndexHints, m_tSchema, m_pHistograms, m_pColumnar.get(), m_pSIdx.get(), tQuery.m_eCollation, iCutoff, m_iDocinfo, iThreads );
 	CSphVector<SecondaryIndexInfo_t> dSIInfo = SelectIterators ( tSelectIteratorCtx, fCost );
 
 	CSphVector<RowidIterator_i *> dSIIterators, dLookupIterators;
@@ -7991,7 +8002,7 @@ bool CSphIndex_VLN::MultiScan ( CSphQueryResult & tResult, const CSphQuery & tQu
 
 	// try to spawn an iterator from a secondary index
 	CSphVector<CSphFilterSettings> dModifiedFilters; // holds filter settings if they were modified. filters holds pointers to those settings
-	std::unique_ptr<RowidIterator_i> pIterator ( SpawnIterators ( tQuery, tCtx, tFlx, tMaxSorterSchema, tMeta, iCutoff, dModifiedFilters ) );
+	std::unique_ptr<RowidIterator_i> pIterator ( SpawnIterators ( tQuery, tCtx, tFlx, tMaxSorterSchema, tMeta, iCutoff, tArgs.m_iSplit, dModifiedFilters ) );
 
 	SwitchProfile ( tMeta.m_pProfile, SPH_QSTATE_FULLSCAN );
 
